@@ -2,3 +2,4 @@
 *.pyc
 *.pth
 *.safetensors
+*.png
