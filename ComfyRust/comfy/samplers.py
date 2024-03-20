@@ -4,9 +4,9 @@ import torch
 import enum
 from comfy import model_management
 import math
-from comfy import model_base
-import comfy.utils
-import comfy.conds
+from . import model_base
+import comfy.utils as utils
+import comfy.conds as conds
 
 
 #The main sampling function shared by all the samplers

@@ -1,5 +1,5 @@
 from transformers import CLIPVisionModelWithProjection, CLIPVisionConfig, modeling_utils
-from .utils import load_torch_file, transformers_convert, common_upscale
+from comfy.utils import load_torch_file, transformers_convert, common_upscale
 import os
 import torch
 import contextlib
@@ -7,7 +7,7 @@ import contextlib
 import comfy.ops
 import comfy.model_patcher
 import comfy.model_management
-import comfy.utils
+import utils
 
 def clip_preprocess(image, size=224):
     mean = torch.tensor([ 0.48145466,0.4578275,0.40821073], device=image.device, dtype=image.dtype)

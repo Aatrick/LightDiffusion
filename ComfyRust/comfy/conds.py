@@ -1,7 +1,7 @@
 import enum
 import torch
 import math
-import comfy.utils
+import comfy.utils as utils
 
 
 def lcm(a, b): #TODO: eventually replace by math.lcm (added in python3.9)
@@ -15,7 +15,7 @@ class CONDRegular:
         return self.__class__(cond)
 
     def process_cond(self, batch_size, device, **kwargs):
-        return self._copy_with(comfy.utils.repeat_to_batch_size(self.cond, batch_size).to(device))
+        return self._copy_with(utils.repeat_to_batch_size(self.cond, batch_size).to(device))
 
     def can_concat(self, other):
         if self.cond.shape != other.cond.shape:
@@ -31,7 +31,7 @@ class CONDRegular:
 class CONDNoiseShape(CONDRegular):
     def process_cond(self, batch_size, device, area, **kwargs):
         data = self.cond[:,:,area[2]:area[0] + area[2],area[3]:area[1] + area[3]]
-        return self._copy_with(comfy.utils.repeat_to_batch_size(data, batch_size).to(device))
+        return self._copy_with(utils.repeat_to_batch_size(data, batch_size).to(device))
 
 
 class CONDCrossAttn(CONDRegular):

@@ -3,9 +3,9 @@ from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel
 from comfy.ldm.modules.encoders.noise_aug_modules import CLIPEmbeddingNoiseAugmentation
 from comfy.ldm.modules.diffusionmodules.openaimodel import Timestep
 import comfy.model_management
-import comfy.conds
+import comfy.conds as conds
 from enum import Enum
-from . import utils
+from comfy import utils
 
 class ModelType(Enum):
     EPS = 1
@@ -108,10 +108,10 @@ class BaseModel(torch.nn.Module):
                     elif ck == "masked_image":
                         cond_concat.append(blank_inpaint_image_like(noise))
             data = torch.cat(cond_concat, dim=1)
-            out['c_concat'] = comfy.conds.CONDNoiseShape(data)
+            out['c_concat'] = conds.CONDNoiseShape(data)
         adm = self.encode_adm(**kwargs)
         if adm is not None:
-            out['y'] = comfy.conds.CONDRegular(adm)
+            out['y'] = conds.CONDRegular(adm)
         return out
 
     def load_model_weights(self, sd, unet_prefix=""):

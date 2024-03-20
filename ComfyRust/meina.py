@@ -65,22 +65,9 @@ def add_comfyui_directory_to_sys_path() -> None:
         print(f"'{comfyui_path}' added to sys.path")
 
 
-def add_extra_model_paths() -> None:
-    """
-    Parse the optional extra_model_paths.yaml file and add the parsed paths to the sys.path.
-    """
-    from main import load_extra_path_config
-
-    extra_model_paths = find_path("extra_model_paths.yaml")
-
-    if extra_model_paths is not None:
-        load_extra_path_config(extra_model_paths)
-    else:
-        print("Could not find the extra_model_paths config file.")
 
 
 add_comfyui_directory_to_sys_path()
-add_extra_model_paths()
 
 from nodes import (
     EmptyLatentImage,
@@ -93,7 +80,7 @@ from nodes import (
 )
 
 
-def gen(prompt="1girl,solo", w=512, h=1024):
+def gen(prompt="masterpiece, best quality, (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl,((colourful paint splashes on transparent background, dulux,)), ((caustic)), dynamic angle,beautiful detailed glow,full body, cowboy shot", w=512, h=1024):
     with torch.inference_mode():
         checkpointloadersimple = CheckpointLoaderSimple()
         checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
@@ -123,10 +110,10 @@ def gen(prompt="1girl,solo", w=512, h=1024):
         for q in range(1):
             ksampler_239 = ksampler.sample(
                 seed=random.randint(1, 2**64),
-                steps=60,
+                steps=50,
                 cfg=7,
-                sampler_name="euler_ancestral",
-                scheduler="simple",
+                sampler_name="dpmpp_2m",
+                scheduler="karras",
                 denoise=1,
                 model=get_value_at_index(checkpointloadersimple_241, 0),
                 positive=get_value_at_index(cliptextencode_242, 0),

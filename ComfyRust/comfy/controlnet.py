@@ -1,7 +1,7 @@
 import torch
 import math
 import os
-import comfy.utils
+import comfy.utils as utils
 import comfy.model_management
 import comfy.model_detection
 import comfy.model_patcher
@@ -151,7 +151,7 @@ class ControlNet(ControlBase):
             if self.cond_hint is not None:
                 del self.cond_hint
             self.cond_hint = None
-            self.cond_hint = comfy.utils.common_upscale(self.cond_hint_original, x_noisy.shape[3] * 8, x_noisy.shape[2] * 8, 'nearest-exact', "center").to(self.control_model.dtype).to(self.device)
+            self.cond_hint = utils.common_upscale(self.cond_hint_original, x_noisy.shape[3] * 8, x_noisy.shape[2] * 8, 'nearest-exact', "center").to(self.control_model.dtype).to(self.device)
         if x_noisy.shape[0] != self.cond_hint.shape[0]:
             self.cond_hint = broadcast_image_to(self.cond_hint, x_noisy.shape[0], batched_number)
 
@@ -272,13 +272,13 @@ class ControlLora(ControlNet):
         for k in sd:
             weight = comfy.model_management.resolve_lowvram_weight(sd[k], diffusion_model, k)
             try:
-                comfy.utils.set_attr(self.control_model, k, weight)
+                utils.set_attr(self.control_model, k, weight)
             except:
                 pass
 
         for k in self.control_weights:
             if k not in {"lora_controlnet"}:
-                comfy.utils.set_attr(self.control_model, k, self.control_weights[k].to(dtype).to(comfy.model_management.get_torch_device()))
+                utils.set_attr(self.control_model, k, self.control_weights[k].to(dtype).to(comfy.model_management.get_torch_device()))
 
     def copy(self):
         c = ControlLora(self.control_weights, global_average_pooling=self.global_average_pooling)
@@ -295,10 +295,10 @@ class ControlLora(ControlNet):
         return out
 
     def inference_memory_requirements(self, dtype):
-        return comfy.utils.calculate_parameters(self.control_weights) * comfy.model_management.dtype_size(dtype) + ControlBase.inference_memory_requirements(self, dtype)
+        return utils.calculate_parameters(self.control_weights) * comfy.model_management.dtype_size(dtype) + ControlBase.inference_memory_requirements(self, dtype)
 
 def load_controlnet(ckpt_path, model=None):
-    controlnet_data = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+    controlnet_data = utils.load_torch_file(ckpt_path, safe_load=True)
     if "lora_controlnet" in controlnet_data:
         return ControlLora(controlnet_data)
 
@@ -306,7 +306,7 @@ def load_controlnet(ckpt_path, model=None):
     if "controlnet_cond_embedding.conv_in.weight" in controlnet_data: #diffusers format
         unet_dtype = comfy.model_management.unet_dtype()
         controlnet_config = comfy.model_detection.unet_config_from_diffusers_unet(controlnet_data, unet_dtype)
-        diffusers_keys = comfy.utils.unet_to_diffusers(controlnet_config)
+        diffusers_keys = utils.unet_to_diffusers(controlnet_config)
         diffusers_keys["controlnet_mid_block.weight"] = "middle_block_out.0.weight"
         diffusers_keys["controlnet_mid_block.bias"] = "middle_block_out.0.bias"
 
@@ -436,7 +436,7 @@ class T2IAdapter(ControlBase):
             self.control_input = None
             self.cond_hint = None
             width, height = self.scale_image_to(x_noisy.shape[3] * 8, x_noisy.shape[2] * 8)
-            self.cond_hint = comfy.utils.common_upscale(self.cond_hint_original, width, height, 'nearest-exact', "center").float().to(self.device)
+            self.cond_hint = utils.common_upscale(self.cond_hint_original, width, height, 'nearest-exact', "center").float().to(self.device)
             if self.channels_in == 1 and self.cond_hint.shape[1] > 1:
                 self.cond_hint = torch.mean(self.cond_hint, 1, keepdim=True)
         if x_noisy.shape[0] != self.cond_hint.shape[0]:
@@ -469,7 +469,7 @@ def load_t2i_adapter(t2i_data):
                 prefix_replace["adapter.body.{}.resnets.{}.".format(i, j)] = "body.{}.".format(i * 2 + j)
             prefix_replace["adapter.body.{}.".format(i, j)] = "body.{}.".format(i * 2)
         prefix_replace["adapter."] = ""
-        t2i_data = comfy.utils.state_dict_prefix_replace(t2i_data, prefix_replace)
+        t2i_data = utils.state_dict_prefix_replace(t2i_data, prefix_replace)
     keys = t2i_data.keys()
 
     if "body.0.in_conv.weight" in keys:

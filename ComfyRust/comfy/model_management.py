@@ -1,7 +1,7 @@
 import psutil
 from enum import Enum
 from comfy.cli_args import args
-import comfy.utils
+import comfy.utils as utils
 import torch
 import sys
 
@@ -692,7 +692,7 @@ def soft_empty_cache(force=False):
 def resolve_lowvram_weight(weight, model, key):
     if weight.device == torch.device("meta"): #lowvram NOTE: this depends on the inner working of the accelerate library so it might break.
         key_split = key.split('.')              # I have no idea why they don't just leave the weight there instead of using the meta device.
-        op = comfy.utils.get_attr(model, '.'.join(key_split[:-1]))
+        op = utils.get_attr(model, '.'.join(key_split[:-1]))
         weight = op._hf_hook.weights_map[key_split[-1]]
     return weight
 

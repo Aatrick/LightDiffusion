@@ -6,7 +6,7 @@ Tiny AutoEncoder for Stable Diffusion
 import torch
 import torch.nn as nn
 
-import comfy.utils
+import comfy.utils as utils
 
 def conv(n_in, n_out, **kwargs):
     return nn.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
@@ -52,9 +52,9 @@ class TAESD(nn.Module):
         self.encoder = Encoder()
         self.decoder = Decoder()
         if encoder_path is not None:
-            self.encoder.load_state_dict(comfy.utils.load_torch_file(encoder_path, safe_load=True))
+            self.encoder.load_state_dict(utils.load_torch_file(encoder_path, safe_load=True))
         if decoder_path is not None:
-            self.decoder.load_state_dict(comfy.utils.load_torch_file(decoder_path, safe_load=True))
+            self.decoder.load_state_dict(utils.load_torch_file(decoder_path, safe_load=True))
 
     @staticmethod
     def scale_latents(x):
