@@ -35,10 +35,8 @@ supported_pt_extensions = set(['.ckpt', '.pt', '.bin', '.pth', '.safetensors'])
 folder_names_and_paths = {}
 
 base_path = os.path.dirname(os.path.realpath(__file__))
-models_dir = os.path.join(base_path, "models")
-folder_names_and_paths["checkpoints"] = ([os.path.join(models_dir, "checkpoints")], supported_pt_extensions)
+folder_names_and_paths["checkpoints"] = ([os.path.join(base_path)], supported_pt_extensions)
 folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], [])
-folder_names_and_paths["embeddings"] = ([os.path.join(models_dir, "embeddings")], supported_pt_extensions)
 
 output_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output")
 temp_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "temp")
@@ -387,7 +385,7 @@ class CheckpointLoaderSimple:
 
     def load_checkpoint(self, ckpt_name, output_vae=True, output_clip=True):
         ckpt_path = get_full_path("checkpoints", ckpt_name)
-        out = sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=get_folder_paths("embeddings"))
+        out = sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True)
         return out[:3]
 
 class VAEDecode:
