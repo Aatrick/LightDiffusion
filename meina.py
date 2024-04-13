@@ -14,16 +14,13 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
-import comfy.diffusers_load
-import comfy.samplers as samplers
-import comfy.sample as sample
-import comfy.sd as sd
-import comfy.utils as utils
-import comfy.controlnet
-import comfy.clip_vision
-import comfy.model_management
-from comfy.taesd.taesd import TAESD
-from comfy.cli_args import args, LatentPreviewMethod
+import samplers as samplers
+import sample as sample
+import sd as sd
+import utils as utils
+import model_management
+from taesd import TAESD
+from cli_args import args, LatentPreviewMethod
 
 import importlib
 
@@ -242,11 +239,11 @@ def prepare_callback(model, steps, x0_output_dict=None):
 
 
 def before_node_execution():
-    comfy.model_management.throw_exception_if_processing_interrupted()
+    model_management.throw_exception_if_processing_interrupted()
 
 
 def interrupt_processing(value=True):
-    comfy.model_management.interrupt_current_processing(value)
+    model_management.interrupt_current_processing(value)
 
 
 MAX_RESOLUTION = 8192
@@ -523,6 +520,7 @@ def init_custom_nodes():
 
     load_custom_nodes()
 
+
 def get_value_at_index(obj: Union[Sequence, Mapping], index: int) -> Any:
     """Returns the value at the given index of a sequence or mapping.
 
@@ -583,14 +581,11 @@ def add_comfyui_directory_to_sys_path() -> None:
         print(f"'{comfyui_path}' added to sys.path")
 
 
-
-
 add_comfyui_directory_to_sys_path()
 
-
-prompt="masterpiece, best quality, (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl,((colourful paint splashes on transparent background, dulux,)), ((caustic)), dynamic angle,beautiful detailed glow,full body, cowboy shot"
-w=512
-h=1024
+prompt = "masterpiece, best quality, (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl,((colourful paint splashes on transparent background, dulux,)), ((caustic)), dynamic angle,beautiful detailed glow,full body, cowboy shot"
+w = 512
+h = 1024
 with torch.inference_mode():
     checkpointloadersimple = CheckpointLoaderSimple()
     checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
@@ -614,7 +609,7 @@ with torch.inference_mode():
     saveimage = SaveImage()
 
     ksampler_239 = ksampler.sample(
-        seed=random.randint(1, 2**64),
+        seed=random.randint(1, 2 ** 64),
         steps=50,
         cfg=7,
         sampler_name="dpmpp_2m",
