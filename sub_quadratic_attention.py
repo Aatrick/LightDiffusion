@@ -9,10 +9,11 @@
 #   Self-attention Does Not Need O(n2) Memory":
 #   https://arxiv.org/abs/2112.05682v2
 
+import math
 from functools import partial
+
 import torch
 from torch.utils.checkpoint import checkpoint
-import math
 
 try:
     from typing import Optional, NamedTuple, List, Protocol

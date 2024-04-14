@@ -1,9 +1,11 @@
-import torch
 import copy
 import inspect
 
-import utils as utils
+import torch
+
 import model_management
+import utils as utils
+
 
 class ModelPatcher:
     def __init__(self, model, load_device, offload_device, size=0, current_device=None, weight_inplace_update=False):

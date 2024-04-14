@@ -1,8 +1,9 @@
 # pytorch_diffusion + derived encoder decoder
 import math
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 
 import model_management
 import ops

@@ -1,10 +1,9 @@
 #code taken from: https://github.com/wl-zhao/UniPC and modified
 
-import torch
-import torch.nn.functional as F
 import math
 
-from tqdm.auto import trange, tqdm
+import torch
+from tqdm.auto import trange
 
 
 class NoiseScheduleVP:

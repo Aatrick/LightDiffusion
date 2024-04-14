@@ -1,12 +1,13 @@
-from transformers import CLIPVisionModelWithProjection, CLIPVisionConfig, modeling_utils
-from utils import load_torch_file, transformers_convert
-import os
-import torch
 import contextlib
+import os
 
-import ops
-import model_patcher
+import torch
+from transformers import CLIPVisionModelWithProjection, CLIPVisionConfig, modeling_utils
+
 import model_management
+import model_patcher
+import ops
+from utils import load_torch_file, transformers_convert
 
 
 def clip_preprocess(image, size=224):

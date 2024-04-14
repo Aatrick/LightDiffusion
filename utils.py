@@ -1,10 +1,13 @@
-import torch
 import math
 import struct
-import checkpoint_pickle as checkpoint_pickle
-import safetensors.torch
+
 import numpy as np
+import safetensors.torch
+import torch
 from PIL import Image
+
+import checkpoint_pickle as checkpoint_pickle
+
 
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:

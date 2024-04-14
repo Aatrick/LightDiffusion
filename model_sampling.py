@@ -1,5 +1,6 @@
-import torch
 import numpy as np
+import torch
+
 from utild import make_beta_schedule
 
 

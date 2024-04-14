@@ -1,6 +1,9 @@
-import sd1_clip
-import torch
 import os
+
+import torch
+
+import sd1_clip
+
 
 class SDXLClipG(sd1_clip.SDClipModel):
     def __init__(self, device="cpu", max_length=77, freeze=True, layer="penultimate", layer_idx=None, textmodel_path=None, dtype=None):

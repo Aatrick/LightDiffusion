@@ -1,12 +1,14 @@
+import contextlib
 import os
-
-from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
-import ops
-import torch
 import traceback
 import zipfile
+
+import torch
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
+
 import model_management
-import contextlib
+import ops
+
 
 def gen_empty_tokens(special_tokens, length):
     start_token = special_tokens.get("start", None)

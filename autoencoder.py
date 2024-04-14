@@ -1,12 +1,13 @@
-import torch
 # import pytorch_lightning as pl
 from contextlib import contextmanager
 from typing import Any, Dict, Tuple, Union
 
-from distributions import DiagonalGaussianDistribution
+import torch
 
-from util import instantiate_from_config
+from distributions import DiagonalGaussianDistribution
 from ema import LitEma
+from util import instantiate_from_config
+
 
 class DiagonalGaussianRegularizer(torch.nn.Module):
     def __init__(self, sample: bool = True):

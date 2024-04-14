@@ -1,6 +1,8 @@
-from upscaling import ImageConcatWithNoiseAugmentation
-from openaimodel import Timestep
 import torch
+
+from openaimodel import Timestep
+from upscaling import ImageConcatWithNoiseAugmentation
+
 
 class CLIPEmbeddingNoiseAugmentation(ImageConcatWithNoiseAugmentation):
     def __init__(self, *args, clip_stats_path=None, timestep_dim=256, **kwargs):

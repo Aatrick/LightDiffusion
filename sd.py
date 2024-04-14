@@ -1,24 +1,15 @@
 import torch
 
-import model_management
-from autoencoder import AutoencoderKL
-import yaml
-
-import utils as utils
-
 import clip_vision
-import gligen
 import diffusers_convert
-import model_base
 import model_detection
-
+import model_management
+import model_patcher
 import sd1_clip
 import sd2_clip
 import sdxl_clip
-
-import model_patcher
-import adapter
-import supported_models_base
+import utils as utils
+from autoencoder import AutoencoderKL
 from model_patcher import ModelPatcher
 
 
@@ -35,53 +26,6 @@ def load_model_weights(model, sd):
     if len(m) > 0:
         print("missing", m)
     return model
-
-
-def load_clip_weights(model, sd):
-    k = list(sd.keys())
-    for x in k:
-        if x.startswith("cond_stage_model.transformer.") and not x.startswith(
-                "cond_stage_model.transformer.text_model."):
-            y = x.replace("cond_stage_model.transformer.", "cond_stage_model.transformer.text_model.")
-            sd[y] = sd.pop(x)
-
-    if 'cond_stage_model.transformer.text_model.embeddings.position_ids' in sd:
-        ids = sd['cond_stage_model.transformer.text_model.embeddings.position_ids']
-        if ids.dtype == torch.float32:
-            sd['cond_stage_model.transformer.text_model.embeddings.position_ids'] = ids.round()
-
-    sd = utils.transformers_convert(sd, "cond_stage_model.model.", "cond_stage_model.transformer.text_model.", 24)
-    return load_model_weights(model, sd)
-
-
-def load_lora_for_models(model, clip, lora, strength_model, strength_clip):
-    key_map = {}
-    if model is not None:
-        key_map = lora.model_lora_keys_unet(model.model, key_map)
-    if clip is not None:
-        key_map = lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
-
-    loaded = lora.load_lora(lora, key_map)
-    if model is not None:
-        new_modelpatcher = model.clone()
-        k = new_modelpatcher.add_patches(loaded, strength_model)
-    else:
-        k = ()
-        new_modelpatcher = None
-
-    if clip is not None:
-        new_clip = clip.clone()
-        k1 = new_clip.add_patches(loaded, strength_clip)
-    else:
-        k1 = ()
-        new_clip = None
-    k = set(k)
-    k1 = set(k1)
-    for x in loaded:
-        if (x not in k) and (x not in k1):
-            print("NOT LOADED", x)
-
-    return (new_modelpatcher, new_clip)
 
 
 class CLIP:
@@ -136,22 +80,15 @@ class CLIP:
             return cond, pooled
         return cond
 
-    def encode(self, text):
-        tokens = self.tokenize(text)
-        return self.encode_from_tokens(tokens)
 
     def load_sd(self, sd):
         return self.cond_stage_model.load_sd(sd)
 
-    def get_sd(self):
-        return self.cond_stage_model.state_dict()
 
     def load_model(self):
         model_management.load_model_gpu(self.patcher)
         return self.patcher
 
-    def get_key_patches(self):
-        return self.patcher.get_key_patches()
 
 
 class VAE:
@@ -202,25 +139,6 @@ class VAE:
                                      / 3.0) / 2.0, min=0.0, max=1.0)
         return output
 
-    def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
-        steps = pixel_samples.shape[0] * utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2],
-                                                                     tile_x, tile_y, overlap)
-        steps += pixel_samples.shape[0] * utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2],
-                                                                      tile_x // 2, tile_y * 2, overlap)
-        steps += pixel_samples.shape[0] * utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2],
-                                                                      tile_x * 2, tile_y // 2, overlap)
-        pbar = utils.ProgressBar(steps)
-
-        encode_fn = lambda a: self.first_stage_model.encode((2. * a - 1.).to(self.vae_dtype).to(self.device)).float()
-        samples = utils.tiled_scale(pixel_samples, encode_fn, tile_x, tile_y, overlap, upscale_amount=(1 / 8),
-                                    out_channels=4, pbar=pbar)
-        samples += utils.tiled_scale(pixel_samples, encode_fn, tile_x * 2, tile_y // 2, overlap, upscale_amount=(1 / 8),
-                                     out_channels=4, pbar=pbar)
-        samples += utils.tiled_scale(pixel_samples, encode_fn, tile_x // 2, tile_y * 2, overlap, upscale_amount=(1 / 8),
-                                     out_channels=4, pbar=pbar)
-        samples /= 3.0
-        return samples
-
     def decode(self, samples_in):
         self.first_stage_model = self.first_stage_model.to(self.device)
         try:
@@ -243,66 +161,6 @@ class VAE:
         self.first_stage_model = self.first_stage_model.to(self.offload_device)
         pixel_samples = pixel_samples.cpu().movedim(1, -1)
         return pixel_samples
-
-    def decode_tiled(self, samples, tile_x=64, tile_y=64, overlap=16):
-        self.first_stage_model = self.first_stage_model.to(self.device)
-        output = self.decode_tiled_(samples, tile_x, tile_y, overlap)
-        self.first_stage_model = self.first_stage_model.to(self.offload_device)
-        return output.movedim(1, -1)
-
-    def encode(self, pixel_samples):
-        self.first_stage_model = self.first_stage_model.to(self.device)
-        pixel_samples = pixel_samples.movedim(-1, 1)
-        try:
-            memory_used = (2078 * pixel_samples.shape[2] * pixel_samples.shape[
-                3]) * 1.7  #NOTE: this constant along with the one in the decode above are estimated from the mem usage for the VAE and could change.
-            model_management.free_memory(memory_used, self.device)
-            free_memory = model_management.get_free_memory(self.device)
-            batch_number = int(free_memory / memory_used)
-            batch_number = max(1, batch_number)
-            samples = torch.empty(
-                (pixel_samples.shape[0], 4, round(pixel_samples.shape[2] // 8), round(pixel_samples.shape[3] // 8)),
-                device="cpu")
-            for x in range(0, pixel_samples.shape[0], batch_number):
-                pixels_in = (2. * pixel_samples[x:x + batch_number] - 1.).to(self.vae_dtype).to(self.device)
-                samples[x:x + batch_number] = self.first_stage_model.encode(pixels_in).cpu().float()
-
-        except model_management.OOM_EXCEPTION as e:
-            print("Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding.")
-            samples = self.encode_tiled_(pixel_samples)
-
-        self.first_stage_model = self.first_stage_model.to(self.offload_device)
-        return samples
-
-    def encode_tiled(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
-        self.first_stage_model = self.first_stage_model.to(self.device)
-        pixel_samples = pixel_samples.movedim(-1, 1)
-        samples = self.encode_tiled_(pixel_samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap)
-        self.first_stage_model = self.first_stage_model.to(self.offload_device)
-        return samples
-
-    def get_sd(self):
-        return self.first_stage_model.state_dict()
-
-
-class StyleModel:
-    def __init__(self, model, device="cpu"):
-        self.model = model
-
-    def get_cond(self, input):
-        return self.model(input.last_hidden_state)
-
-
-def load_style_model(ckpt_path):
-    model_data = utils.load_torch_file(ckpt_path, safe_load=True)
-    keys = model_data.keys()
-    if "style_embedding" in keys:
-        model = adapter.StyleAdapter(width=1024, context_dim=768, num_head=8, n_layes=3, num_token=8)
-    else:
-        raise Exception("invalid style model {}".format(ckpt_path))
-    model.load_state_dict(model_data)
-    return StyleModel(model)
-
 
 def load_clip(ckpt_paths, embedding_directory=None):
     clip_data = []
@@ -341,103 +199,6 @@ def load_clip(ckpt_paths, embedding_directory=None):
         if len(u) > 0:
             print("clip unexpected:", u)
     return clip
-
-
-def load_gligen(ckpt_path):
-    data = utils.load_torch_file(ckpt_path, safe_load=True)
-    model = gligen.load_gligen(data)
-    if model_management.should_use_fp16():
-        model = model.half()
-    return model_patcher.ModelPatcher(model, load_device=model_management.get_torch_device(),
-                                      offload_device=model_management.unet_offload_device())
-
-
-def load_checkpoint(config_path=None, ckpt_path=None, output_vae=True, output_clip=True, embedding_directory=None,
-                    state_dict=None, config=None):
-    #TODO: this function is a mess and should be removed eventually
-    if config is None:
-        with open(config_path, 'r') as stream:
-            config = yaml.safe_load(stream)
-    model_config_params = config['model']['params']
-    clip_config = model_config_params['cond_stage_config']
-    scale_factor = model_config_params['scale_factor']
-    vae_config = model_config_params['first_stage_config']
-
-    fp16 = False
-    if "unet_config" in model_config_params:
-        if "params" in model_config_params["unet_config"]:
-            unet_config = model_config_params["unet_config"]["params"]
-            if "use_fp16" in unet_config:
-                fp16 = unet_config.pop("use_fp16")
-                if fp16:
-                    unet_config["dtype"] = torch.float16
-
-    noise_aug_config = None
-    if "noise_aug_config" in model_config_params:
-        noise_aug_config = model_config_params["noise_aug_config"]
-
-    model_type = model_base.ModelType.EPS
-
-    if "parameterization" in model_config_params:
-        if model_config_params["parameterization"] == "v":
-            model_type = model_base.ModelType.V_PREDICTION
-
-    clip = None
-    vae = None
-
-    class WeightsLoader(torch.nn.Module):
-        pass
-
-    if state_dict is None:
-        state_dict = utils.load_torch_file(ckpt_path)
-
-    class EmptyClass:
-        pass
-
-    model_config = supported_models_base.BASE({})
-
-    import latent_formats
-    model_config.latent_format = latent_formats.SD15(scale_factor=scale_factor)
-    model_config.unet_config = model_detection.convert_config(unet_config)
-
-    if config['model']["target"].endswith("ImageEmbeddingConditionedLatentDiffusion"):
-        model = model_base.SD21UNCLIP(model_config, noise_aug_config["params"], model_type=model_type)
-    else:
-        model = model_base.BaseModel(model_config, model_type=model_type)
-
-    if config['model']["target"].endswith("LatentInpaintDiffusion"):
-        model.set_inpaint()
-
-    if fp16:
-        model = model.half()
-
-    offload_device = model_management.unet_offload_device()
-    model = model.to(offload_device)
-    model.load_model_weights(state_dict, "model.diffusion_model.")
-
-    if output_vae:
-        vae_sd = utils.state_dict_prefix_replace(state_dict, {"first_stage_model.": ""}, filter_keys=True)
-        vae = VAE(sd=vae_sd, config=vae_config)
-
-    if output_clip:
-        w = WeightsLoader()
-        clip_target = EmptyClass()
-        clip_target.params = clip_config.get("params", {})
-        if clip_config["target"].endswith("FrozenOpenCLIPEmbedder"):
-            clip_target.clip = sd2_clip.SD2ClipModel
-            clip_target.tokenizer = sd2_clip.SD2Tokenizer
-            clip = CLIP(clip_target, embedding_directory=embedding_directory)
-            w.cond_stage_model = clip.cond_stage_model.clip_h
-        elif clip_config["target"].endswith("FrozenCLIPEmbedder"):
-            clip_target.clip = sd1_clip.SD1ClipModel
-            clip_target.tokenizer = sd1_clip.SD1Tokenizer
-            clip = CLIP(clip_target, embedding_directory=embedding_directory)
-            w.cond_stage_model = clip.cond_stage_model.clip_l
-        load_clip_weights(w, state_dict)
-
-    return (
-        model_patcher.ModelPatcher(model, load_device=model_management.get_torch_device(),
-                                   offload_device=offload_device), clip, vae)
 
 
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False,
@@ -533,9 +294,3 @@ def load_unet(unet_path):  #load unet in diffusers format
         print("left over keys in unet:", left_over)
     return model_patcher.ModelPatcher(model, load_device=model_management.get_torch_device(),
                                       offload_device=offload_device)
-
-
-def save_checkpoint(output_path, model, clip, vae, metadata=None):
-    model_management.load_models_gpu([model, clip.load_model()])
-    sd = model.model.state_dict_for_saving(clip.get_sd(), vae.get_sd())
-    utils.save_torch_file(sd, output_path, metadata=metadata)

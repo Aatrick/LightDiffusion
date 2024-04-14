@@ -1,5 +1,7 @@
-import sd1_clip
 import os
+
+import sd1_clip
+
 
 class SD2ClipHModel(sd1_clip.SDClipModel):
     def __init__(self, arch="ViT-H-14", device="cpu", max_length=77, freeze=True, layer="penultimate", layer_idx=None, textmodel_path=None, dtype=None):

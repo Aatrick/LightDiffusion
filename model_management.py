@@ -1,9 +1,12 @@
-import psutil
-from enum import Enum
-from cli_args import args
-import utils as utils
-import torch
 import sys
+from enum import Enum
+
+import psutil
+import torch
+
+import utils as utils
+from cli_args import args
+
 
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
