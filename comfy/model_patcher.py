@@ -1,9 +1,10 @@
-import torch
 import copy
-import inspect
 
-import comfy.utils as utils
+import torch
+
 import comfy.model_management
+import comfy.utils as utils
+
 
 class ModelPatcher:
     def __init__(self, model, load_device, offload_device, size=0, current_device=None, weight_inplace_update=False):
@@ -52,53 +53,6 @@ class ModelPatcher:
             return True
         return False
 
-    def set_model_sampler_cfg_function(self, sampler_cfg_function):
-        if len(inspect.signature(sampler_cfg_function).parameters) == 3:
-            self.model_options["sampler_cfg_function"] = lambda args: sampler_cfg_function(args["cond"], args["uncond"], args["cond_scale"]) #Old way
-        else:
-            self.model_options["sampler_cfg_function"] = sampler_cfg_function
-
-    def set_model_unet_function_wrapper(self, unet_wrapper_function):
-        self.model_options["model_function_wrapper"] = unet_wrapper_function
-
-    def set_model_patch(self, patch, name):
-        to = self.model_options["transformer_options"]
-        if "patches" not in to:
-            to["patches"] = {}
-        to["patches"][name] = to["patches"].get(name, []) + [patch]
-
-    def set_model_patch_replace(self, patch, name, block_name, number):
-        to = self.model_options["transformer_options"]
-        if "patches_replace" not in to:
-            to["patches_replace"] = {}
-        if name not in to["patches_replace"]:
-            to["patches_replace"][name] = {}
-        to["patches_replace"][name][(block_name, number)] = patch
-
-    def set_model_attn1_patch(self, patch):
-        self.set_model_patch(patch, "attn1_patch")
-
-    def set_model_attn2_patch(self, patch):
-        self.set_model_patch(patch, "attn2_patch")
-
-    def set_model_attn1_replace(self, patch, block_name, number):
-        self.set_model_patch_replace(patch, "attn1", block_name, number)
-
-    def set_model_attn2_replace(self, patch, block_name, number):
-        self.set_model_patch_replace(patch, "attn2", block_name, number)
-
-    def set_model_attn1_output_patch(self, patch):
-        self.set_model_patch(patch, "attn1_output_patch")
-
-    def set_model_attn2_output_patch(self, patch):
-        self.set_model_patch(patch, "attn2_output_patch")
-
-    def set_model_output_block_patch(self, patch):
-        self.set_model_patch(patch, "output_block_patch")
-
-    def add_object_patch(self, name, obj):
-        self.object_patches[name] = obj
-
     def model_patches_to(self, device):
         to = self.model_options["transformer_options"]
         if "patches" in to:
@@ -134,20 +88,6 @@ class ModelPatcher:
                 self.patches[k] = current_patches
 
         return list(p)
-
-    def get_key_patches(self, filter_prefix=None):
-        comfy.model_management.unload_model_clones(self)
-        model_sd = self.model_state_dict()
-        p = {}
-        for k in model_sd:
-            if filter_prefix is not None:
-                if not k.startswith(filter_prefix):
-                    continue
-            if k in self.patches:
-                p[k] = [model_sd[k]] + self.patches[k]
-            else:
-                p[k] = (model_sd[k],)
-        return p
 
     def model_state_dict(self, filter_prefix=None):
         sd = self.model.state_dict()

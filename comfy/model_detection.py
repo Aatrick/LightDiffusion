@@ -58,8 +58,6 @@ def detect_unet_config(state_dict, key_prefix, dtype):
     use_linear_in_transformer = False
 
 
-    current_res = 1
-    count = 0
 
     last_res_blocks = 0
     last_channel_mult = 0
@@ -78,8 +76,6 @@ def detect_unet_config(state_dict, key_prefix, dtype):
         if "{}0.op.weight".format(prefix) in block_keys: #new layer
             num_res_blocks.append(last_res_blocks)
             channel_mult.append(last_channel_mult)
-
-            current_res *= 2
             last_res_blocks = 0
             last_channel_mult = 0
             out = calculate_transformer_depth(prefix_output, state_dict_keys, state_dict)

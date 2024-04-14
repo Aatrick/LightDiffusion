@@ -98,7 +98,6 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.layer_idx = None
         self.special_tokens = special_tokens
         self.text_projection = torch.nn.Parameter(torch.eye(self.transformer.get_input_embeddings().weight.shape[1]))
-        self.logit_scale = torch.nn.Parameter(torch.tensor(4.6055))
         self.enable_attention_masks = False
 
         self.layer_norm_hidden_state = layer_norm_hidden_state
@@ -298,7 +297,7 @@ def expand_directory_list(directories):
     dirs = set()
     for x in directories:
         dirs.add(x)
-        for root, subdir, file in os.walk(x, followlinks=True):
+        for root, file in os.walk(x, followlinks=True):
             dirs.add(root)
     return list(dirs)
 

@@ -1,9 +1,10 @@
-from comfy import sd1_clip
-import torch
 import os
 
+from comfy import sd1_clip
+
+
 class SD2ClipHModel(sd1_clip.SDClipModel):
-    def __init__(self, arch="ViT-H-14", device="cpu", max_length=77, freeze=True, layer="penultimate", layer_idx=None, textmodel_path=None, dtype=None):
+    def __init__(self, device="cpu", freeze=True, layer="penultimate", layer_idx=None, textmodel_path=None, dtype=None):
         if layer == "penultimate":
             layer="hidden"
             layer_idx=23

@@ -1,7 +1,5 @@
-import torch
-from . import model_base
-from . import utils
-from . import latent_formats
+from . import model_base, latent_formats
+
 
 class ClipTarget:
     def __init__(self, tokenizer, clip):
@@ -15,8 +13,6 @@ class BASE:
         "num_heads": -1,
         "num_head_channels": 64,
     }
-
-    clip_prefix = []
     clip_vision_prefix = None
     noise_aug_config = None
     beta_schedule = "linear"
@@ -52,16 +48,3 @@ class BASE:
 
     def process_clip_state_dict(self, state_dict):
         return state_dict
-
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": "cond_stage_model."}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_unet_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": "model.diffusion_model."}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_vae_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": "first_stage_model."}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
-

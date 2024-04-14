@@ -1,21 +1,19 @@
 from abc import abstractmethod
-import math
 
-import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
+import comfy.ops
+from comfy.ldm.util import exists
 from .util import (
     checkpoint,
     avg_pool_nd,
     zero_module,
-    normalization,
     timestep_embedding,
 )
 from ..attention import SpatialTransformer
-from comfy.ldm.util import exists
-import comfy.ops
+
 
 class TimestepBlock(nn.Module):
     """
@@ -35,17 +33,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None, transformer_options={}, output_shape=None):
-        for layer in self:
-            if isinstance(layer, TimestepBlock):
-                x = layer(x, emb)
-            elif isinstance(layer, SpatialTransformer):
-                x = layer(x, context, transformer_options)
-            elif isinstance(layer, Upsample):
-                x = layer(x, output_shape=output_shape)
-            else:
-                x = layer(x)
-        return x
+    pass
 
 #This is needed because accelerate makes a copy of transformer_options which breaks "current_index"
 def forward_timestep_embed(ts, x, emb, context=None, transformer_options={}, output_shape=None):
@@ -303,7 +291,6 @@ class UNetModel(nn.Module):
         num_heads_upsample=-1,
         use_scale_shift_norm=False,
         resblock_updown=False,
-        use_new_attention_order=False,
         use_spatial_transformer=False,    # custom transformer support
         transformer_depth=1,              # custom transformer support
         context_dim=None,                 # custom transformer support
@@ -404,7 +391,6 @@ class UNetModel(nn.Module):
                 )
             ]
         )
-        self._feature_size = model_channels
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
@@ -448,7 +434,6 @@ class UNetModel(nn.Module):
                             )
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
                 input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
                 out_ch = ch
@@ -476,7 +461,6 @@ class UNetModel(nn.Module):
                 ch = out_ch
                 input_block_chans.append(ch)
                 ds *= 2
-                self._feature_size += ch
 
         if num_head_channels == -1:
             dim_head = ch // num_heads
@@ -516,7 +500,6 @@ class UNetModel(nn.Module):
                 operations=operations
             )]
         self.middle_block = TimestepEmbedSequential(*mid_block)
-        self._feature_size += ch
 
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
@@ -581,7 +564,6 @@ class UNetModel(nn.Module):
                     )
                     ds //= 2
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
 
         self.out = nn.Sequential(
             nn.GroupNorm(32, ch, dtype=self.dtype, device=device),

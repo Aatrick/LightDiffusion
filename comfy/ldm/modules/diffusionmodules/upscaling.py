@@ -1,10 +1,10 @@
-import torch
-import torch.nn as nn
-import numpy as np
 from functools import partial
 
-from .util import extract_into_tensor, make_beta_schedule
-from comfy.ldm.util import default
+import numpy as np
+import torch
+import torch.nn as nn
+
+from .util import make_beta_schedule
 
 
 class AbstractLowScaleModel(nn.Module):
@@ -41,14 +41,6 @@ class AbstractLowScaleModel(nn.Module):
         self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
         self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
 
-    def q_sample(self, x_start, t, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
-
-    def forward(self, x):
-        return x, None
-
     def decode(self, x):
         return x
 
@@ -59,23 +51,8 @@ class SimpleImageConcat(AbstractLowScaleModel):
         super(SimpleImageConcat, self).__init__(noise_schedule_config=None)
         self.max_noise_level = 0
 
-    def forward(self, x):
-        # fix to constant noise level
-        return x, torch.zeros(x.shape[0], device=x.device).long()
-
 
 class ImageConcatWithNoiseAugmentation(AbstractLowScaleModel):
-    def __init__(self, noise_schedule_config, max_noise_level=1000, to_cuda=False):
+    def __init__(self, noise_schedule_config, max_noise_level=1000):
         super().__init__(noise_schedule_config=noise_schedule_config)
         self.max_noise_level = max_noise_level
-
-    def forward(self, x, noise_level=None):
-        if noise_level is None:
-            noise_level = torch.randint(0, self.max_noise_level, (x.shape[0],), device=x.device).long()
-        else:
-            assert isinstance(noise_level, torch.Tensor)
-        z = self.q_sample(x, noise_level)
-        return z, noise_level
-
-
-

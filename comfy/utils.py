@@ -1,10 +1,12 @@
-import torch
 import math
-import struct
-import comfy.checkpoint_pickle as checkpoint_pickle
-import safetensors.torch
+
 import numpy as np
+import safetensors.torch
+import torch
 from PIL import Image
+
+import comfy.checkpoint_pickle as checkpoint_pickle
+
 
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
@@ -28,11 +30,6 @@ def load_torch_file(ckpt, safe_load=False, device=None):
             sd = pl_sd
     return sd
 
-def save_torch_file(sd, ckpt, metadata=None):
-    if metadata is not None:
-        safetensors.torch.save_file(sd, ckpt, metadata=metadata)
-    else:
-        safetensors.torch.save_file(sd, ckpt)
 
 def calculate_parameters(sd, prefix=""):
     params = 0
@@ -239,20 +236,6 @@ def repeat_to_batch_size(tensor, batch_size):
         return tensor.repeat([math.ceil(batch_size / tensor.shape[0])] + [1] * (len(tensor.shape) - 1))[:batch_size]
     return tensor
 
-def convert_sd_to(state_dict, dtype):
-    keys = list(state_dict.keys())
-    for k in keys:
-        state_dict[k] = state_dict[k].to(dtype)
-    return state_dict
-
-def safetensors_header(safetensors_path, max_size=100*1024*1024):
-    with open(safetensors_path, "rb") as f:
-        header = f.read(8)
-        length_of_header = struct.unpack('<Q', header)[0]
-        if length_of_header > max_size:
-            return None
-        return f.read(length_of_header)
-
 def set_attr(obj, attr, value):
     attrs = attr.split(".")
     for name in attrs[:-1]:
@@ -410,14 +393,7 @@ def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap = 8, upscale_am
     return output
 
 PROGRESS_BAR_ENABLED = True
-def set_progress_bar_enabled(enabled):
-    global PROGRESS_BAR_ENABLED
-    PROGRESS_BAR_ENABLED = enabled
-
 PROGRESS_BAR_HOOK = None
-def set_progress_bar_global_hook(function):
-    global PROGRESS_BAR_HOOK
-    PROGRESS_BAR_HOOK = function
 
 class ProgressBar:
     def __init__(self, total):

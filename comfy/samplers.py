@@ -1,12 +1,10 @@
-from .k_diffusion import sampling as k_diffusion_sampling
-from .extra_samplers import uni_pc
-import torch
-import enum
-from comfy import model_management
 import math
-from . import model_base
-import comfy.utils as utils
-import comfy.conds as conds
+
+import torch
+
+from comfy import model_management
+from .extra_samplers import uni_pc
+from .k_diffusion import sampling as k_diffusion_sampling
 
 
 #The main sampling function shared by all the samplers
@@ -278,44 +276,6 @@ class KSamplerX0Inpaint(torch.nn.Module):
         if denoise_mask is not None:
             out += self.latent_image * latent_mask
         return out
-
-def simple_scheduler(model, steps):
-    s = model.model_sampling
-    sigs = []
-    ss = len(s.sigmas) / steps
-    for x in range(steps):
-        sigs += [float(s.sigmas[-(1 + int(x * ss))])]
-    sigs += [0.0]
-    return torch.FloatTensor(sigs)
-
-def ddim_scheduler(model, steps):
-    s = model.model_sampling
-    sigs = []
-    ss = len(s.sigmas) // steps
-    x = 1
-    while x < len(s.sigmas):
-        sigs += [float(s.sigmas[x])]
-        x += ss
-    sigs = sigs[::-1]
-    sigs += [0.0]
-    return torch.FloatTensor(sigs)
-
-def normal_scheduler(model, steps, sgm=False, floor=False):
-    s = model.model_sampling
-    start = s.timestep(s.sigma_max)
-    end = s.timestep(s.sigma_min)
-
-    if sgm:
-        timesteps = torch.linspace(start, end, steps + 1)[:-1]
-    else:
-        timesteps = torch.linspace(start, end, steps)
-
-    sigs = []
-    for x in range(len(timesteps)):
-        ts = timesteps[x]
-        sigs.append(s.sigma(ts))
-    sigs += [0.0]
-    return torch.FloatTensor(sigs)
 
 def get_mask_aabb(masks):
     if masks.numel() == 0:
@@ -603,16 +563,6 @@ SAMPLER_NAMES = KSAMPLER_NAMES + ["ddim", "uni_pc", "uni_pc_bh2"]
 def calculate_sigmas_scheduler(model, scheduler_name, steps):
     if scheduler_name == "karras":
         sigmas = k_diffusion_sampling.get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min), sigma_max=float(model.model_sampling.sigma_max))
-    elif scheduler_name == "exponential":
-        sigmas = k_diffusion_sampling.get_sigmas_exponential(n=steps, sigma_min=float(model.model_sampling.sigma_min), sigma_max=float(model.model_sampling.sigma_max))
-    elif scheduler_name == "normal":
-        sigmas = normal_scheduler(model, steps)
-    elif scheduler_name == "simple":
-        sigmas = simple_scheduler(model, steps)
-    elif scheduler_name == "ddim_uniform":
-        sigmas = ddim_scheduler(model, steps)
-    elif scheduler_name == "sgm_uniform":
-        sigmas = normal_scheduler(model, steps, sgm=True)
     else:
         print("error invalid scheduler", self.scheduler)
     return sigmas

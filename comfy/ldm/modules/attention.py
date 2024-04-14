@@ -29,27 +29,10 @@ else:
 def exists(val):
     return val is not None
 
-
-def uniq(arr):
-    return{el: True for el in arr}.keys()
-
-
 def default(val, d):
     if exists(val):
         return val
     return d
-
-
-def max_neg_value(t):
-    return -torch.finfo(t.dtype).max
-
-
-def init_(tensor):
-    dim = tensor.shape[-1]
-    std = 1 / math.sqrt(dim)
-    tensor.uniform_(-std, std)
-    return tensor
-
 
 # feedforward
 class GEGLU(nn.Module):
@@ -80,15 +63,6 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
-
-def zero_module(module):
-    """
-    Zero out the parameters of a module and return it.
-    """
-    for p in module.parameters():
-        p.detach().zero_()
-    return module
 
 
 def Normalize(in_channels, dtype=None, device=None):
@@ -156,7 +130,6 @@ def attention_sub_quad(query, key, value, heads, mask=None):
         bytes_per_token = torch.finfo(query.dtype).bits//8
     batch_x_heads, q_tokens, _ = query.shape
     _, _, k_tokens = key.shape
-    qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
 
     mem_free_total, mem_free_torch = model_management.get_free_memory(query.device, True)
 

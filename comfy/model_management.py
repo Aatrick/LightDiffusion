@@ -1,9 +1,11 @@
-import psutil
 from enum import Enum
-from comfy.cli_args import args
-import comfy.utils as utils
+
+import psutil
 import torch
-import sys
+
+import comfy.utils as utils
+from comfy.cli_args import args
+
 
 class VRAMState(Enum):
     DISABLED = 0    #No vram present: no need to move models to vram
@@ -411,16 +413,6 @@ def load_models_gpu(models, memory_required=0):
 def load_model_gpu(model):
     return load_models_gpu([model])
 
-def cleanup_models():
-    to_delete = []
-    for i in range(len(current_loaded_models)):
-        if sys.getrefcount(current_loaded_models[i].model) <= 2:
-            to_delete = [i] + to_delete
-
-    for i in to_delete:
-        x = current_loaded_models.pop(i)
-        x.model_unload()
-        del x
 
 def dtype_size(dtype):
     dtype_size = 4
@@ -696,31 +688,3 @@ def resolve_lowvram_weight(weight, model, key):
         weight = op._hf_hook.weights_map[key_split[-1]]
     return weight
 
-#TODO: might be cleaner to put this somewhere else
-import threading
-
-class InterruptProcessingException(Exception):
-    pass
-
-interrupt_processing_mutex = threading.RLock()
-
-interrupt_processing = False
-def interrupt_current_processing(value=True):
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        interrupt_processing = value
-
-def processing_interrupted():
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        return interrupt_processing
-
-def throw_exception_if_processing_interrupted():
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        if interrupt_processing:
-            interrupt_processing = False
-            raise InterruptProcessingException()

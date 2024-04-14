@@ -36,7 +36,6 @@ def dynamic_slice(
 
 class AttnChunk(NamedTuple):
     exp_values: Tensor
-    exp_weights_sum: Tensor
     max_score: Tensor
 
 class SummarizeChunk(Protocol):
@@ -169,10 +168,6 @@ def _get_attention_scores_no_kv_chunking(
 
     hidden_states_slice = torch.bmm(attn_probs.to(value.dtype), value)
     return hidden_states_slice
-
-class ScannedChunk(NamedTuple):
-    chunk_idx: int
-    attn_chunk: AttnChunk
 
 def efficient_dot_product_attention(
     query: Tensor,

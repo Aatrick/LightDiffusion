@@ -1,34 +1,16 @@
-import torch
 # import pytorch_lightning as pl
-import torch.nn.functional as F
-from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, Tuple, Union
 
-from comfy.ldm.modules.distributions.distributions import DiagonalGaussianDistribution
+import torch
 
-from comfy.ldm.util import instantiate_from_config
 from comfy.ldm.modules.ema import LitEma
+from comfy.ldm.util import instantiate_from_config
+
 
 class DiagonalGaussianRegularizer(torch.nn.Module):
     def __init__(self, sample: bool = True):
         super().__init__()
         self.sample = sample
-
-    def get_trainable_parameters(self) -> Any:
-        yield from ()
-
-    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict]:
-        log = dict()
-        posterior = DiagonalGaussianDistribution(z)
-        if self.sample:
-            z = posterior.sample()
-        else:
-            z = posterior.mode()
-        kl_loss = posterior.kl()
-        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-        log["kl_loss"] = kl_loss
-        return z, log
-
 
 class AbstractAutoencoder(torch.nn.Module):
     """
@@ -55,43 +37,8 @@ class AbstractAutoencoder(torch.nn.Module):
             self.model_ema = LitEma(self, decay=ema_decay)
             logpy.info(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
-    def get_input(self, batch) -> Any:
-        raise NotImplementedError()
-
-    def on_train_batch_end(self, *args, **kwargs):
-        # for EMA computation
-        if self.use_ema:
-            self.model_ema(self)
-
-    @contextmanager
-    def ema_scope(self, context=None):
-        if self.use_ema:
-            self.model_ema.store(self.parameters())
-            self.model_ema.copy_to(self)
-            if context is not None:
-                logpy.info(f"{context}: Switched to EMA weights")
-        try:
-            yield None
-        finally:
-            if self.use_ema:
-                self.model_ema.restore(self.parameters())
-                if context is not None:
-                    logpy.info(f"{context}: Restored training weights")
-
-    def encode(self, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError("encode()-method of abstract base class called")
-
     def decode(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("decode()-method of abstract base class called")
-
-    def instantiate_optimizer_from_config(self, params, lr, cfg):
-        logpy.info(f"loading >>> {cfg['target']} <<< optimizer from config")
-        return get_obj_from_str(cfg["target"])(
-            params, lr=lr, **cfg.get("params", dict())
-        )
-
-    def configure_optimizers(self) -> Any:
-        raise NotImplementedError()
 
 
 class AutoencodingEngine(AbstractAutoencoder):
@@ -117,33 +64,11 @@ class AutoencodingEngine(AbstractAutoencoder):
             regularizer_config
         )
 
-    def get_last_layer(self):
-        return self.decoder.get_last_layer()
-
-    def encode(
-        self,
-        x: torch.Tensor,
-        return_reg_log: bool = False,
-        unregularized: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        z = self.encoder(x)
-        if unregularized:
-            return z, dict()
-        z, reg_log = self.regularization(z)
-        if return_reg_log:
-            return z, reg_log
-        return z
 
     def decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
         x = self.decoder(z, **kwargs)
         return x
 
-    def forward(
-        self, x: torch.Tensor, **additional_decode_kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
-        z, reg_log = self.encode(x, return_reg_log=True)
-        dec = self.decode(z, **additional_decode_kwargs)
-        return z, dec, reg_log
 
 
 class AutoencodingEngineLegacy(AutoencodingEngine):
@@ -168,10 +93,6 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         )
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
         self.embed_dim = embed_dim
-
-    def get_autoencoder_params(self) -> list:
-        params = super().get_autoencoder_params()
-        return params
 
     def encode(
         self, x: torch.Tensor, return_reg_log: bool = False

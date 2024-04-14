@@ -2,16 +2,12 @@ import torch
 from contextlib import contextmanager
 
 class Linear(torch.nn.Linear):
-    def reset_parameters(self):
-        return None
+    pass
 
 class Conv2d(torch.nn.Conv2d):
-    def reset_parameters(self):
-        return None
-
+    pass
 class Conv3d(torch.nn.Conv3d):
-    def reset_parameters(self):
-        return None
+    pass
 
 def conv_nd(dims, *args, **kwargs):
     if dims == 2:

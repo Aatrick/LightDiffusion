@@ -1,15 +1,13 @@
 import torch
-from . import model_base
-from . import utils
 
+from . import latent_formats
+from . import model_base
 from . import sd1_clip
 from . import sd2_clip
 from . import sdxl_clip
-
 from . import supported_models_base
-from . import latent_formats
+from . import utils
 
-from . import diffusers_convert
 
 class SD15(supported_models_base.BASE):
     unet_config = {
@@ -43,10 +41,6 @@ class SD15(supported_models_base.BASE):
         state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix)
         return state_dict
 
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"clip_l.": "cond_stage_model."}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
-
     def clip_target(self):
         return supported_models_base.ClipTarget(sd1_clip.SD1Tokenizer, sd1_clip.SD1ClipModel)
 
@@ -70,13 +64,6 @@ class SD20(supported_models_base.BASE):
 
     def process_clip_state_dict(self, state_dict):
         state_dict = utils.transformers_convert(state_dict, "cond_stage_model.model.", "cond_stage_model.clip_h.transformer.text_model.", 24)
-        return state_dict
-
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {}
-        replace_prefix["clip_h"] = "cond_stage_model.model"
-        state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix)
-        state_dict = diffusers_convert.convert_text_enc_state_dict_v20(state_dict)
         return state_dict
 
     def clip_target(self):
@@ -130,15 +117,6 @@ class SDXLRefiner(supported_models_base.BASE):
         state_dict = utils.state_dict_key_replace(state_dict, keys_to_replace)
         return state_dict
 
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {}
-        state_dict_g = diffusers_convert.convert_text_enc_state_dict_v20(state_dict, "clip_g")
-        if "clip_g.transformer.text_model.embeddings.position_ids" in state_dict_g:
-            state_dict_g.pop("clip_g.transformer.text_model.embeddings.position_ids")
-        replace_prefix["clip_g"] = "conditioner.embedders.0.model"
-        state_dict_g = utils.state_dict_prefix_replace(state_dict_g, replace_prefix)
-        return state_dict_g
-
     def clip_target(self):
         return supported_models_base.ClipTarget(sdxl_clip.SDXLTokenizer, sdxl_clip.SDXLRefinerClipModel)
 
@@ -178,21 +156,6 @@ class SDXL(supported_models_base.BASE):
         state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix)
         state_dict = utils.state_dict_key_replace(state_dict, keys_to_replace)
         return state_dict
-
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {}
-        keys_to_replace = {}
-        state_dict_g = diffusers_convert.convert_text_enc_state_dict_v20(state_dict, "clip_g")
-        if "clip_g.transformer.text_model.embeddings.position_ids" in state_dict_g:
-            state_dict_g.pop("clip_g.transformer.text_model.embeddings.position_ids")
-        for k in state_dict:
-            if k.startswith("clip_l"):
-                state_dict_g[k] = state_dict[k]
-
-        replace_prefix["clip_g"] = "conditioner.embedders.1.model"
-        replace_prefix["clip_l"] = "conditioner.embedders.0"
-        state_dict_g = utils.state_dict_prefix_replace(state_dict_g, replace_prefix)
-        return state_dict_g
 
     def clip_target(self):
         return supported_models_base.ClipTarget(sdxl_clip.SDXLTokenizer, sdxl_clip.SDXLClipModel)

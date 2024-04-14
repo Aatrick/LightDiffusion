@@ -7,7 +7,7 @@ import comfy.model_detection
 import comfy.model_patcher
 
 import comfy.cldm.cldm
-import comfy.t2i_adapter.adapter
+import comfy.adapter
 
 
 def broadcast_image_to(tensor, target_batch_size, batched_number):
@@ -474,7 +474,7 @@ def load_t2i_adapter(t2i_data):
 
     if "body.0.in_conv.weight" in keys:
         cin = t2i_data['body.0.in_conv.weight'].shape[1]
-        model_ad = comfy.t2i_adapter.adapter.Adapter_light(cin=cin, channels=[320, 640, 1280, 1280], nums_rb=4)
+        model_ad = comfy.adapter.Adapter_light(cin=cin, channels=[320, 640, 1280, 1280], nums_rb=4)
     elif 'conv_in.weight' in keys:
         cin = t2i_data['conv_in.weight'].shape[1]
         channel = t2i_data['conv_in.weight'].shape[0]
@@ -486,7 +486,7 @@ def load_t2i_adapter(t2i_data):
         xl = False
         if cin == 256 or cin == 768:
             xl = True
-        model_ad = comfy.t2i_adapter.adapter.Adapter(cin=cin, channels=[channel, channel*2, channel*4, channel*4][:4], nums_rb=2, ksize=ksize, sk=True, use_conv=use_conv, xl=xl)
+        model_ad = comfy.adapter.Adapter(cin=cin, channels=[channel, channel * 2, channel * 4, channel * 4][:4], nums_rb=2, ksize=ksize, sk=True, use_conv=use_conv, xl=xl)
     else:
         return None
     missing, unexpected = model_ad.load_state_dict(t2i_data)
