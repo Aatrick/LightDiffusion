@@ -78,17 +78,6 @@ class ModelPatcher:
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
 
-    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        p = set()
-        for k in patches:
-            if k in self.model_keys:
-                p.add(k)
-                current_patches = self.patches.get(k, [])
-                current_patches.append((strength_patch, patches[k], strength_model))
-                self.patches[k] = current_patches
-
-        return list(p)
-
     def model_state_dict(self, filter_prefix=None):
         sd = self.model.state_dict()
         keys = list(sd.keys())

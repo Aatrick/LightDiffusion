@@ -8,9 +8,6 @@ from comfy import clip_vision
 from comfy import diffusers_convert
 from comfy import model_detection
 from comfy import model_management
-from comfy import sd1_clip
-from comfy import sd2_clip
-from comfy import sdxl_clip
 from .ldm.models.autoencoder import AutoencoderKL
 
 
@@ -58,9 +55,6 @@ class CLIP:
         n.tokenizer = self.tokenizer
         n.layer_idx = self.layer_idx
         return n
-
-    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        return self.patcher.add_patches(patches, strength_patch, strength_model)
 
     def clip_layer(self, layer_idx):
         self.layer_idx = layer_idx
@@ -149,44 +143,6 @@ class VAE:
         pixel_samples = pixel_samples.cpu().movedim(1,-1)
         return pixel_samples
 
-def load_clip(ckpt_paths, embedding_directory=None):
-    clip_data = []
-    for p in ckpt_paths:
-        clip_data.append(utils.load_torch_file(p, safe_load=True))
-
-    class EmptyClass:
-        pass
-
-    for i in range(len(clip_data)):
-        if "transformer.resblocks.0.ln_1.weight" in clip_data[i]:
-            clip_data[i] = utils.transformers_convert(clip_data[i], "", "text_model.", 32)
-
-    clip_target = EmptyClass()
-    clip_target.params = {}
-    if len(clip_data) == 1:
-        if "text_model.encoder.layers.30.mlp.fc1.weight" in clip_data[0]:
-            clip_target.clip = sdxl_clip.SDXLRefinerClipModel
-            clip_target.tokenizer = sdxl_clip.SDXLTokenizer
-        elif "text_model.encoder.layers.22.mlp.fc1.weight" in clip_data[0]:
-            clip_target.clip = sd2_clip.SD2ClipModel
-            clip_target.tokenizer = sd2_clip.SD2Tokenizer
-        else:
-            clip_target.clip = sd1_clip.SD1ClipModel
-            clip_target.tokenizer = sd1_clip.SD1Tokenizer
-    else:
-        clip_target.clip = sdxl_clip.SDXLClipModel
-        clip_target.tokenizer = sdxl_clip.SDXLTokenizer
-
-    clip = CLIP(clip_target, embedding_directory=embedding_directory)
-    for c in clip_data:
-        m, u = clip.load_sd(c)
-        if len(m) > 0:
-            print("clip missing:", m)
-
-        if len(u) > 0:
-            print("clip unexpected:", u)
-    return clip
-
 
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False, embedding_directory=None, output_model=True):
     sd = utils.load_torch_file(ckpt_path)
@@ -241,37 +197,3 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
             model_management.load_model_gpu(model_patcher)
 
     return (model_patcher, clip, vae, clipvision)
-
-
-def load_unet(unet_path): #load unet in diffusers format
-    sd = utils.load_torch_file(unet_path)
-    parameters = utils.calculate_parameters(sd)
-    unet_dtype = model_management.unet_dtype(model_params=parameters)
-    if "input_blocks.0.0.weight" in sd: #ldm
-        model_config = model_detection.model_config_from_unet(sd, "", unet_dtype)
-        if model_config is None:
-            raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
-        new_sd = sd
-
-    else: #diffusers
-        model_config = model_detection.model_config_from_diffusers_unet(sd, unet_dtype)
-        if model_config is None:
-            print("ERROR UNSUPPORTED UNET", unet_path)
-            return None
-
-        diffusers_keys = utils.unet_to_diffusers(model_config.unet_config)
-
-        new_sd = {}
-        for k in diffusers_keys:
-            if k in sd:
-                new_sd[diffusers_keys[k]] = sd.pop(k)
-            else:
-                print(diffusers_keys[k], k)
-    offload_device = model_management.unet_offload_device()
-    model = model_config.get_model(new_sd, "")
-    model = model.to(offload_device)
-    model.load_model_weights(new_sd, "")
-    left_over = sd.keys()
-    if len(left_over) > 0:
-        print("left over keys in unet:", left_over)
-    return comfy.model_patcher.ModelPatcher(model, load_device=model_management.get_torch_device(), offload_device=offload_device)

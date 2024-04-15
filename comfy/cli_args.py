@@ -25,7 +25,7 @@ class EnumAction(argparse.Action):
 
         self._enum = enum_type
 
-    def __call__(self, parser, namespace, values, option_string=None):
+    def __call__(self, parser, namespace, values):
         # Convert value back into an Enum
         value = self._enum(values)
         setattr(namespace, self.dest, value)
@@ -103,9 +103,3 @@ if comfy.options.args_parsing:
     args = parser.parse_args()
 else:
     args = parser.parse_args([])
-
-if args.windows_standalone_build:
-    args.auto_launch = True
-
-if args.disable_auto_launch:
-    args.auto_launch = False

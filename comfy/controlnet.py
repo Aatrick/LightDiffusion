@@ -1,13 +1,13 @@
-import torch
 import math
-import os
-import comfy.utils as utils
-import comfy.model_management
-import comfy.model_detection
-import comfy.model_patcher
 
-import comfy.cldm.cldm
+import torch
+
 import comfy.adapter
+import comfy.cldm.cldm
+import comfy.model_detection
+import comfy.model_management
+import comfy.model_patcher
+import comfy.utils as utils
 
 
 def broadcast_image_to(tensor, target_batch_size, batched_number):
@@ -42,20 +42,10 @@ class ControlBase:
         self.previous_controlnet = None
         self.global_average_pooling = False
 
-    def set_cond_hint(self, cond_hint, strength=1.0, timestep_percent_range=(1.0, 0.0)):
-        self.cond_hint_original = cond_hint
-        self.strength = strength
-        self.timestep_percent_range = timestep_percent_range
-        return self
-
     def pre_run(self, model, percent_to_timestep_function):
         self.timestep_range = (percent_to_timestep_function(self.timestep_percent_range[0]), percent_to_timestep_function(self.timestep_percent_range[1]))
         if self.previous_controlnet is not None:
             self.previous_controlnet.pre_run(model, percent_to_timestep_function)
-
-    def set_previous_controlnet(self, controlnet):
-        self.previous_controlnet = controlnet
-        return self
 
     def cleanup(self):
         if self.previous_controlnet is not None:
@@ -186,9 +176,7 @@ class ControlNet(ControlBase):
 
 class ControlLoraOps:
     class Linear(torch.nn.Module):
-        def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                    device=None, dtype=None) -> None:
-            factory_kwargs = {'device': device, 'dtype': dtype}
+        def __init__(self, in_features: int, out_features: int) -> None:
             super().__init__()
             self.in_features = in_features
             self.out_features = out_features
@@ -196,12 +184,6 @@ class ControlLoraOps:
             self.up = None
             self.down = None
             self.bias = None
-
-        def forward(self, input):
-            if self.up is not None:
-                return torch.nn.functional.linear(input, self.weight.to(input.device) + (torch.mm(self.up.flatten(start_dim=1), self.down.flatten(start_dim=1))).reshape(self.weight.shape).type(input.dtype), self.bias)
-            else:
-                return torch.nn.functional.linear(input, self.weight.to(input.device), self.bias)
 
     class Conv2d(torch.nn.Module):
         def __init__(
@@ -225,8 +207,6 @@ class ControlLoraOps:
             self.stride = stride
             self.padding = padding
             self.dilation = dilation
-            self.transposed = False
-            self.output_padding = 0
             self.groups = groups
             self.padding_mode = padding_mode
 
@@ -234,13 +214,6 @@ class ControlLoraOps:
             self.bias = None
             self.up = None
             self.down = None
-
-
-        def forward(self, input):
-            if self.up is not None:
-                return torch.nn.functional.conv2d(input, self.weight.to(input.device) + (torch.mm(self.up.flatten(start_dim=1), self.down.flatten(start_dim=1))).reshape(self.weight.shape).type(input.dtype), self.bias, self.stride, self.padding, self.dilation, self.groups)
-            else:
-                return torch.nn.functional.conv2d(input, self.weight.to(input.device), self.bias, self.stride, self.padding, self.dilation, self.groups)
 
     def conv_nd(self, dims, *args, **kwargs):
         if dims == 2:
@@ -267,7 +240,6 @@ class ControlLora(ControlNet):
         self.control_model.to(comfy.model_management.get_torch_device())
         diffusion_model = model.diffusion_model
         sd = diffusion_model.state_dict()
-        cm = self.control_model.state_dict()
 
         for k in sd:
             weight = comfy.model_management.resolve_lowvram_weight(sd[k], diffusion_model, k)
@@ -297,113 +269,6 @@ class ControlLora(ControlNet):
     def inference_memory_requirements(self, dtype):
         return utils.calculate_parameters(self.control_weights) * comfy.model_management.dtype_size(dtype) + ControlBase.inference_memory_requirements(self, dtype)
 
-def load_controlnet(ckpt_path, model=None):
-    controlnet_data = utils.load_torch_file(ckpt_path, safe_load=True)
-    if "lora_controlnet" in controlnet_data:
-        return ControlLora(controlnet_data)
-
-    controlnet_config = None
-    if "controlnet_cond_embedding.conv_in.weight" in controlnet_data: #diffusers format
-        unet_dtype = comfy.model_management.unet_dtype()
-        controlnet_config = comfy.model_detection.unet_config_from_diffusers_unet(controlnet_data, unet_dtype)
-        diffusers_keys = utils.unet_to_diffusers(controlnet_config)
-        diffusers_keys["controlnet_mid_block.weight"] = "middle_block_out.0.weight"
-        diffusers_keys["controlnet_mid_block.bias"] = "middle_block_out.0.bias"
-
-        count = 0
-        loop = True
-        while loop:
-            suffix = [".weight", ".bias"]
-            for s in suffix:
-                k_in = "controlnet_down_blocks.{}{}".format(count, s)
-                k_out = "zero_convs.{}.0{}".format(count, s)
-                if k_in not in controlnet_data:
-                    loop = False
-                    break
-                diffusers_keys[k_in] = k_out
-            count += 1
-
-        count = 0
-        loop = True
-        while loop:
-            suffix = [".weight", ".bias"]
-            for s in suffix:
-                if count == 0:
-                    k_in = "controlnet_cond_embedding.conv_in{}".format(s)
-                else:
-                    k_in = "controlnet_cond_embedding.blocks.{}{}".format(count - 1, s)
-                k_out = "input_hint_block.{}{}".format(count * 2, s)
-                if k_in not in controlnet_data:
-                    k_in = "controlnet_cond_embedding.conv_out{}".format(s)
-                    loop = False
-                diffusers_keys[k_in] = k_out
-            count += 1
-
-        new_sd = {}
-        for k in diffusers_keys:
-            if k in controlnet_data:
-                new_sd[diffusers_keys[k]] = controlnet_data.pop(k)
-
-        leftover_keys = controlnet_data.keys()
-        if len(leftover_keys) > 0:
-            print("leftover keys:", leftover_keys)
-        controlnet_data = new_sd
-
-    pth_key = 'control_model.zero_convs.0.0.weight'
-    pth = False
-    key = 'zero_convs.0.0.weight'
-    if pth_key in controlnet_data:
-        pth = True
-        key = pth_key
-        prefix = "control_model."
-    elif key in controlnet_data:
-        prefix = ""
-    else:
-        net = load_t2i_adapter(controlnet_data)
-        if net is None:
-            print("error checkpoint does not contain controlnet or t2i adapter data", ckpt_path)
-        return net
-
-    if controlnet_config is None:
-        unet_dtype = comfy.model_management.unet_dtype()
-        controlnet_config = comfy.model_detection.model_config_from_unet(controlnet_data, prefix, unet_dtype, True).unet_config
-    controlnet_config.pop("out_channels")
-    controlnet_config["hint_channels"] = controlnet_data["{}input_hint_block.0.weight".format(prefix)].shape[1]
-    control_model = comfy.cldm.cldm.ControlNet(**controlnet_config)
-
-    if pth:
-        if 'difference' in controlnet_data:
-            if model is not None:
-                comfy.model_management.load_models_gpu([model])
-                model_sd = model.model_state_dict()
-                for x in controlnet_data:
-                    c_m = "control_model."
-                    if x.startswith(c_m):
-                        sd_key = "diffusion_model.{}".format(x[len(c_m):])
-                        if sd_key in model_sd:
-                            cd = controlnet_data[x]
-                            cd += model_sd[sd_key].type(cd.dtype).to(cd.device)
-            else:
-                print("WARNING: Loaded a diff controlnet without a model. It will very likely not work.")
-
-        class WeightsLoader(torch.nn.Module):
-            pass
-        w = WeightsLoader()
-        w.control_model = control_model
-        missing, unexpected = w.load_state_dict(controlnet_data, strict=False)
-    else:
-        missing, unexpected = control_model.load_state_dict(controlnet_data, strict=False)
-    print(missing, unexpected)
-
-    control_model = control_model.to(unet_dtype)
-
-    global_average_pooling = False
-    filename = os.path.splitext(ckpt_path)[0]
-    if filename.endswith("_shuffle") or filename.endswith("_shuffle_fp16"): #TODO: smarter way of enabling global_average_pooling
-        global_average_pooling = True
-
-    control = ControlNet(control_model, global_average_pooling=global_average_pooling)
-    return control
 
 class T2IAdapter(ControlBase):
     def __init__(self, t2i_model, channels_in, device=None):
@@ -458,42 +323,3 @@ class T2IAdapter(ControlBase):
         c = T2IAdapter(self.t2i_model, self.channels_in)
         self.copy_to(c)
         return c
-
-def load_t2i_adapter(t2i_data):
-    if 'adapter' in t2i_data:
-        t2i_data = t2i_data['adapter']
-    if 'adapter.body.0.resnets.0.block1.weight' in t2i_data: #diffusers format
-        prefix_replace = {}
-        for i in range(4):
-            for j in range(2):
-                prefix_replace["adapter.body.{}.resnets.{}.".format(i, j)] = "body.{}.".format(i * 2 + j)
-            prefix_replace["adapter.body.{}.".format(i, j)] = "body.{}.".format(i * 2)
-        prefix_replace["adapter."] = ""
-        t2i_data = utils.state_dict_prefix_replace(t2i_data, prefix_replace)
-    keys = t2i_data.keys()
-
-    if "body.0.in_conv.weight" in keys:
-        cin = t2i_data['body.0.in_conv.weight'].shape[1]
-        model_ad = comfy.adapter.Adapter_light(cin=cin, channels=[320, 640, 1280, 1280], nums_rb=4)
-    elif 'conv_in.weight' in keys:
-        cin = t2i_data['conv_in.weight'].shape[1]
-        channel = t2i_data['conv_in.weight'].shape[0]
-        ksize = t2i_data['body.0.block2.weight'].shape[2]
-        use_conv = False
-        down_opts = list(filter(lambda a: a.endswith("down_opt.op.weight"), keys))
-        if len(down_opts) > 0:
-            use_conv = True
-        xl = False
-        if cin == 256 or cin == 768:
-            xl = True
-        model_ad = comfy.adapter.Adapter(cin=cin, channels=[channel, channel * 2, channel * 4, channel * 4][:4], nums_rb=2, ksize=ksize, sk=True, use_conv=use_conv, xl=xl)
-    else:
-        return None
-    missing, unexpected = model_ad.load_state_dict(t2i_data)
-    if len(missing) > 0:
-        print("t2i missing", missing)
-
-    if len(unexpected) > 0:
-        print("t2i unexpected", unexpected)
-
-    return T2IAdapter(model_ad, model_ad.input_channels)

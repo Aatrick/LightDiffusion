@@ -1,24 +1,13 @@
-from transformers import CLIPVisionModelWithProjection, CLIPVisionConfig, modeling_utils
-from comfy.utils import load_torch_file, transformers_convert, common_upscale
 import os
+
 import torch
-import contextlib
+from transformers import CLIPVisionModelWithProjection, CLIPVisionConfig, modeling_utils
 
-import comfy.ops
-import comfy.model_patcher
 import comfy.model_management
-import utils
+import comfy.model_patcher
+import comfy.ops
+from comfy.utils import transformers_convert
 
-def clip_preprocess(image, size=224):
-    mean = torch.tensor([ 0.48145466,0.4578275,0.40821073], device=image.device, dtype=image.dtype)
-    std = torch.tensor([0.26862954,0.26130258,0.27577711], device=image.device, dtype=image.dtype)
-    scale = (size / min(image.shape[1], image.shape[2]))
-    image = torch.nn.functional.interpolate(image.movedim(-1, 1), size=(round(scale * image.shape[1]), round(scale * image.shape[2])), mode="bicubic", antialias=True)
-    h = (image.shape[2] - size)//2
-    w = (image.shape[3] - size)//2
-    image = image[:,:,h:h+size,w:w+size]
-    image = torch.clip((255. * image), 0, 255).round() / 255.0
-    return (image - mean.view([3,1,1])) / std.view([3,1,1])
 
 class ClipVisionModel():
     def __init__(self, json_config):
@@ -37,29 +26,6 @@ class ClipVisionModel():
         self.patcher = comfy.model_patcher.ModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
     def load_sd(self, sd):
         return self.model.load_state_dict(sd, strict=False)
-
-    def encode_image(self, image):
-        comfy.model_management.load_model_gpu(self.patcher)
-        pixel_values = clip_preprocess(image.to(self.load_device))
-
-        if self.dtype != torch.float32:
-            precision_scope = torch.autocast
-        else:
-            precision_scope = lambda a, b: contextlib.nullcontext(a)
-
-        with precision_scope(comfy.model_management.get_autocast_device(self.load_device), torch.float32):
-            outputs = self.model(pixel_values=pixel_values, output_hidden_states=True)
-
-        for k in outputs:
-            t = outputs[k]
-            if t is not None:
-                if k == 'hidden_states':
-                    outputs["penultimate_hidden_states"] = t[-2].cpu()
-                    outputs["hidden_states"] = None
-                else:
-                    outputs[k] = t.cpu()
-
-        return outputs
 
 def convert_to_transformers(sd, prefix):
     sd_k = sd.keys()
@@ -107,10 +73,3 @@ def load_clipvision_from_sd(sd, prefix="", convert_keys=False):
             t = sd.pop(k)
             del t
     return clip
-
-def load(ckpt_path):
-    sd = load_torch_file(ckpt_path)
-    if "visual.transformer.resblocks.0.attn.in_proj_weight" in sd:
-        return load_clipvision_from_sd(sd, prefix="visual.", convert_keys=True)
-    else:
-        return load_clipvision_from_sd(sd)
