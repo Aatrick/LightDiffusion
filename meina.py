@@ -386,7 +386,7 @@ def add_comfyui_directory_to_sys_path() -> None:
 add_comfyui_directory_to_sys_path()
 
 
-prompt="****, 1girl, solo, long hair, white hair, masterpiece, full shot, (sitting, sitting in blood, waruza), particles, reflections, petals, rose petals, reflections on blood, dramatic light, (blood, blood pool), red dress, simple background"
+prompt="masterpiece, best quality, (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl,((colourful paint splashes on transparent background, dulux,)), ((caustic)), dynamic angle,beautiful detailed glow,full body, cowboy shot"
 w=512
 h=1024
 with torch.inference_mode():
@@ -413,9 +413,9 @@ with torch.inference_mode():
 
     ksampler_239 = ksampler.sample(
         seed=random.randint(1, 2**64),
-        steps=30,
+        steps=300,
         cfg=7,
-        sampler_name="dpmpp_2m",
+        sampler_name="dpm_adaptive",
         scheduler="karras",
         denoise=1,
         model=get_value_at_index(checkpointloadersimple_241, 0),
