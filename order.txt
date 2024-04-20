@@ -1,4 +1,4 @@
-util import checkpoint pickle
+utils import checkpoint pickle
 
 TAESD import utils
 
@@ -49,7 +49,7 @@ model_management import utils
 model_detection import supported_models_base
                 import supported_models
 
-models_base import conds
+model_base import conds
             import openaimodel
             import noise_aug_modules
 
@@ -107,9 +107,14 @@ model import ops
 autoencoder import ema
             import util1
 
-sampling X
+utilkd import X
+
+sampling utilkd
 
 uni_pc X
 
-cldm import util1
+cldm import util2
+     import util1
+     import openaimodel
+     import attention
      import ops

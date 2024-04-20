@@ -1,6 +1,7 @@
 import argparse
 import enum
-import comfy.options
+
+args_parsing = False
 
 class EnumAction(argparse.Action):
     """
@@ -99,7 +100,7 @@ parser.add_argument("--windows-standalone-build", action="store_true", help="Win
 
 parser.add_argument("--disable-metadata", action="store_true", help="Disable saving prompt metadata in files.")
 
-if comfy.options.args_parsing:
+if args_parsing:
     args = parser.parse_args()
 else:
     args = parser.parse_args([])

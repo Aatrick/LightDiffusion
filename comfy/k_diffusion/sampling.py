@@ -5,7 +5,7 @@ from torch import nn
 from tqdm.auto import trange, tqdm
 import torchsde
 
-from . import utils
+from . import utilkd
 
 
 def append_zero(x):
@@ -172,7 +172,7 @@ class DPMSolver(nn.Module):
 
 def to_d(x, sigma, denoised):
     """Converts a denoiser output to a Karras ODE derivative."""
-    return (x - denoised) / utils.append_dims(sigma, x.ndim)
+    return (x - denoised) / utilkd.append_dims(sigma, x.ndim)
 @torch.no_grad()
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
