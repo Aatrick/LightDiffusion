@@ -17,6 +17,8 @@ SDXL_clip import sd1_clip
 
 SD2_clip import sd1_clip
 
+sd1_clip import model_management
+
 sd  import adapter
     import model_patcher
     import supported_models_base
@@ -31,14 +33,14 @@ samplers import model_management
          import uni_pc
          import sampling
 
-sample import model_management
+uni_pc_sample import model_management
        import utils
        import samplers
        import conds
 
 ops X
 
-model_sampling import util2 (make_beta_schedule)
+model_sampling import util2 (dm_util_make_beta_schedule)
 
 model_patcher import model_management
               import utils
