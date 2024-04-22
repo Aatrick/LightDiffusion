@@ -4,8 +4,6 @@ import comfy.adapter
 import comfy.model_patcher
 import comfy.supported_models_base
 import comfy.utils as utils
-from comfy import clip_vision
-from comfy import diffusers_convert
 from comfy import model_detection
 from comfy import model_management
 from .ldm.models.autoencoder import AutoencoderKL

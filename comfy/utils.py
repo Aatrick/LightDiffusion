@@ -5,7 +5,6 @@ import safetensors.torch
 import torch
 from PIL import Image
 
-import comfy.checkpoint_pickle as checkpoint_pickle
 
 
 def load_torch_file(ckpt, safe_load=False, device=None):

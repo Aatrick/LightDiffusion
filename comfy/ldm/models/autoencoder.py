@@ -3,7 +3,6 @@ from typing import Dict, Tuple, Union
 
 import torch
 
-from comfy.ldm.modules.ema import LitEma
 from comfy.ldm.util import instantiate_from_config
 
 

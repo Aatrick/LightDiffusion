@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "co
 import comfy.sample as sample
 import comfy.sd as sd
 import comfy.utils as utils
-from comfy.taesd import TAESD
 from comfy.cli_args import args, LatentPreviewMethod
 
 ################################################ Folder_paths #########################################################
@@ -135,23 +134,6 @@ class LatentPreviewer:
     def decode_latent_to_preview_image(self, preview_format, x0):
         preview_image = self.decode_latent_to_preview(x0)
         return ("JPEG", preview_image, MAX_PREVIEW_RESOLUTION)
-
-
-class TAESDPreviewerImpl(LatentPreviewer):
-    def __init__(self, taesd):
-        self.taesd = taesd
-
-    def decode_latent_to_preview(self, x0):
-        x_sample = self.taesd.decoder(x0[:1])[0].detach()
-        # x_sample = self.taesd.unscale_latents(x_sample).div(4).add(0.5)  # returns value in [-2, 2]
-        x_sample = x_sample.sub(0.5).mul(2)
-
-        x_sample = torch.clamp((x_sample + 1.0) / 2.0, min=0.0, max=1.0)
-        x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-        x_sample = x_sample.astype(np.uint8)
-
-        preview_image = Image.fromarray(x_sample)
-        return preview_image
 
 
 class Latent2RGBPreviewer(LatentPreviewer):
@@ -382,51 +364,61 @@ def add_comfyui_directory_to_sys_path() -> None:
 
 
 
-
+import trace
 add_comfyui_directory_to_sys_path()
 
 
-prompt="masterpiece, best quality, (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl,((colourful paint splashes on transparent background, dulux,)), ((caustic)), dynamic angle,beautiful detailed glow,full body, cowboy shot"
-w=512
-h=1024
-with torch.inference_mode():
-    checkpointloadersimple = CheckpointLoaderSimple()
-    checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
-        ckpt_name="meinamix_meinaV11.safetensors"
-    )
-    cliptextencode = CLIPTextEncode()
-    cliptextencode_242 = cliptextencode.encode(
-        text=prompt,
-        clip=get_value_at_index(checkpointloadersimple_241, 1),
-    )
-    cliptextencode_243 = cliptextencode.encode(
-        text="(worst_quality:1.6 low_quality:1.6) monochrome (zombie sketch interlocked_fingers comic) (hands) text signature logo",
-        clip=get_value_at_index(checkpointloadersimple_241, 1),
-    )
-    emptylatentimage = EmptyLatentImage()
-    emptylatentimage_244 = emptylatentimage.generate(
-        width=w, height=h, batch_size=1
-    )
-    ksampler = KSampler()
-    vaedecode = VAEDecode()
-    saveimage = SaveImage()
+with open('prompt.txt', 'r') as file:
+    lines = file.readlines()
 
-    ksampler_239 = ksampler.sample(
-        seed=random.randint(1, 2**64),
-        steps=300,
-        cfg=7,
-        sampler_name="dpm_adaptive",
-        scheduler="karras",
-        denoise=1,
-        model=get_value_at_index(checkpointloadersimple_241, 0),
-        positive=get_value_at_index(cliptextencode_242, 0),
-        negative=get_value_at_index(cliptextencode_243, 0),
-        latent_image=get_value_at_index(emptylatentimage_244, 0),
-    )
-    vaedecode_240 = vaedecode.decode(
-        samples=get_value_at_index(ksampler_239, 0),
-        vae=get_value_at_index(checkpointloadersimple_241, 2),
-    )
-    saveimage_248 = saveimage.save_images(
-        filename_prefix="ComfyUI", images=get_value_at_index(vaedecode_240, 0)
-    )
+prompt = lines[0].split(':')[1].strip()
+w = int(lines[1].split(':')[1].strip())
+h = int(lines[2].split(':')[1].strip())
+def gen(prompt, w, h):
+    with torch.inference_mode():
+        checkpointloadersimple = CheckpointLoaderSimple()
+        checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
+            ckpt_name="meinamix_meinaV11.safetensors"
+        )
+        cliptextencode = CLIPTextEncode()
+        cliptextencode_242 = cliptextencode.encode(
+            text=prompt,
+            clip=get_value_at_index(checkpointloadersimple_241, 1),
+        )
+        cliptextencode_243 = cliptextencode.encode(
+            text="(worst_quality:1.6 low_quality:1.6) monochrome (zombie sketch interlocked_fingers comic) (hands) text signature logo",
+            clip=get_value_at_index(checkpointloadersimple_241, 1),
+        )
+        emptylatentimage = EmptyLatentImage()
+        emptylatentimage_244 = emptylatentimage.generate(
+            width=w, height=h, batch_size=1
+        )
+        ksampler = KSampler()
+        vaedecode = VAEDecode()
+        saveimage = SaveImage()
+
+        ksampler_239 = ksampler.sample(
+            seed=random.randint(1, 2**64),
+            steps=300,
+            cfg=7,
+            sampler_name="dpm_adaptive",
+            scheduler="karras",
+            denoise=1,
+            model=get_value_at_index(checkpointloadersimple_241, 0),
+            positive=get_value_at_index(cliptextencode_242, 0),
+            negative=get_value_at_index(cliptextencode_243, 0),
+            latent_image=get_value_at_index(emptylatentimage_244, 0),
+        )
+        vaedecode_240 = vaedecode.decode(
+            samples=get_value_at_index(ksampler_239, 0),
+            vae=get_value_at_index(checkpointloadersimple_241, 2),
+        )
+        saveimage_248 = saveimage.save_images(
+            filename_prefix="ComfyUI", images=get_value_at_index(vaedecode_240, 0)
+        )
+
+gen(prompt, w, h)
+#tracer = trace.Trace(ignoredirs=[sys.prefix, sys.exec_prefix], countfuncs=1)
+#tracer.run('gen(prompt, w, h)')
+#r = tracer.results()
+#r.write_results(show_missing=True, summary=True, coverdir="coverdir")

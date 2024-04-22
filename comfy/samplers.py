@@ -3,7 +3,6 @@ import math
 import torch
 
 from comfy import model_management
-from .extra_samplers import uni_pc
 from .k_diffusion import sampling as k_diffusion_sampling
 
 
@@ -469,14 +468,6 @@ class Sampler:
         sigma = float(sigmas[0])
         return math.isclose(max_sigma, sigma, rel_tol=1e-05) or sigma > max_sigma
 
-class UNIPC(Sampler):
-    def sample(self, model_wrap, sigmas, extra_args, callback, noise, latent_image=None, denoise_mask=None, disable_pbar=False):
-        return uni_pc.sample_unipc(model_wrap, noise, latent_image, sigmas, sampling_function=sampling_function, max_denoise=self.max_denoise(model_wrap, sigmas), extra_args=extra_args, noise_mask=denoise_mask, callback=callback, disable=disable_pbar)
-
-class UNIPCBH2(Sampler):
-    def sample(self, model_wrap, sigmas, extra_args, callback, noise, latent_image=None, denoise_mask=None, disable_pbar=False):
-        return uni_pc.sample_unipc(model_wrap, noise, latent_image, sigmas, sampling_function=sampling_function, max_denoise=self.max_denoise(model_wrap, sigmas), extra_args=extra_args, noise_mask=denoise_mask, callback=callback, variant='bh2', disable=disable_pbar)
-
 KSAMPLER_NAMES = ["dpm_adaptive", "dpmpp_2m"]
 
 def ksampler(sampler_name, extra_options={}, inpaint_options={}):
@@ -566,11 +557,7 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps):
     return sigmas
 
 def sampler_class(name):
-    if name == "uni_pc":
-        sampler = UNIPC
-    elif name == "uni_pc_bh2":
-        sampler = UNIPCBH2
-    elif name == "ddim":
+    if name == "ddim":
         sampler = ksampler("euler", inpaint_options={"random": True})
     else:
         sampler = ksampler(name)

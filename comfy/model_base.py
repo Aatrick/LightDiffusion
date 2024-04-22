@@ -5,7 +5,6 @@ import torch
 import comfy.conds as conds
 from comfy.ldm.modules.diffusionmodules.openaimodel import Timestep
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel
-from comfy.ldm.modules.encoders.noise_aug_modules import CLIPEmbeddingNoiseAugmentation
 
 
 class ModelType(Enum):
