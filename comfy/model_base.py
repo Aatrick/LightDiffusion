@@ -1,7 +1,7 @@
 import torch
 
 import comfy.conds as conds
-from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel
+from comfy.openaimodel import UNetModel
 from comfy.model_sampling import EPS, ModelSamplingDiscrete
 
 

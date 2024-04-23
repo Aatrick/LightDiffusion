@@ -4,7 +4,7 @@ from einops import rearrange
 from torch import nn
 
 from comfy import model_management
-from .diffusionmodules.util import checkpoint
+from comfy.dm_util import checkpoint
 
 if model_management.xformers_enabled():
     import xformers

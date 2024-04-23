@@ -5,13 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy.ops
-from comfy.ldm.util import exists
-from .util import (
+from comfy.ldm_util import exists
+from .dm_util import (
     checkpoint,
     zero_module,
     timestep_embedding,
 )
-from ..attention import SpatialTransformer
+from comfy.attention import SpatialTransformer
 
 
 class TimestepBlock(nn.Module):

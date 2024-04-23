@@ -2,8 +2,7 @@ import math
 
 import torch
 
-from comfy import model_management
-from .k_diffusion import sampling as k_diffusion_sampling
+from comfy import model_management, sampling as k_diffusion_sampling
 
 
 #The main sampling function shared by all the samplers

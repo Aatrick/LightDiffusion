@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "co
 import comfy.sample as sample
 import comfy.sd as sd
 import comfy.utils as utils
+import trace
 
 ################################################ Folder_paths #########################################################
 
@@ -307,8 +308,7 @@ def gen(prompt, w, h):
         )
 
 
-gen(prompt, w, h)
-#tracer = trace.Trace(ignoredirs=[sys.prefix, sys.exec_prefix], countfuncs=1)
-#tracer.run('gen(prompt, w, h)')
-#r = tracer.results()
-#r.write_results(show_missing=True, summary=True, coverdir="coverdir")
+tracer = trace.Trace(countfuncs=1)
+tracer.runfunc(gen, prompt, w, h)
+r = tracer.results()
+print(r)

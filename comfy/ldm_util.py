@@ -1,10 +1,31 @@
-# import pytorch_lightning as pl
+# Start with the imports and functions from `comfy/ldm_util.py`
+import importlib
+import math
+
+
+def exists(x):
+    return x is not None
+
+def instantiate_from_config(config):
+    if not "target" in config:
+        if config == '__is_first_stage__':
+            return None
+        elif config == "__is_unconditional__":
+            return None
+        raise KeyError("Expected key `target` to instantiate.")
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+def get_obj_from_str(string, reload=False):
+    module, cls = string.rsplit(".", 1)
+    if reload:
+        module_imp = importlib.import_module(module)
+        importlib.reload(module_imp)
+    return getattr(importlib.import_module(module, package=None), cls)
+
+# Then add the imports and classes from `comfy/autoencoder.py`
 from typing import Dict, Union
 
 import torch
-
-from comfy.ldm.util import instantiate_from_config
-
 
 class DiagonalGaussianRegularizer(torch.nn.Module):
     def __init__(self, sample: bool = True):
@@ -30,10 +51,6 @@ class AbstractAutoencoder(torch.nn.Module):
         self.use_ema = ema_decay is not None
         if monitor is not None:
             self.monitor = monitor
-
-        if self.use_ema:
-            self.model_ema = LitEma(self, decay=ema_decay)
-            logpy.info(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
 
 
 class AutoencodingEngine(AbstractAutoencoder):
@@ -67,11 +84,11 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         ddconfig = kwargs.pop("ddconfig")
         super().__init__(
             encoder_config={
-                "target": "comfy.ldm.modules.diffusionmodules.model.Encoder",
+                "target": "comfy.model.Encoder",
                 "params": ddconfig,
             },
             decoder_config={
-                "target": "comfy.ldm.modules.diffusionmodules.model.Decoder",
+                "target": "comfy.model.Decoder",
                 "params": ddconfig,
             },
             **kwargs,
@@ -109,7 +126,7 @@ class AutoencoderKL(AutoencodingEngineLegacy):
         super().__init__(
             regularizer_config={
                 "target": (
-                    "comfy.ldm.models.autoencoder.DiagonalGaussianRegularizer"
+                    "comfy.ldm_util.DiagonalGaussianRegularizer"
                 )
             },
             **kwargs,
