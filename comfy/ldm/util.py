@@ -4,9 +4,6 @@ import importlib
 def exists(x):
     return x is not None
 
-
-
-
 def instantiate_from_config(config):
     if not "target" in config:
         if config == '__is_first_stage__':

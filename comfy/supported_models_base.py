@@ -26,7 +26,7 @@ class BASE:
         return True
 
     def model_type(self, state_dict, prefix=""):
-        return model_base.ModelType.EPS
+        return model_base.EPS
 
     def inpaint_model(self):
         return self.unet_config["in_channels"] > 4
@@ -38,13 +38,7 @@ class BASE:
             self.unet_config[x] = self.unet_extra_config[x]
 
     def get_model(self, state_dict, prefix="", device=None):
-        if self.noise_aug_config is not None:
-            out = model_base.SD21UNCLIP(self, self.noise_aug_config, model_type=self.model_type(state_dict, prefix), device=device)
-        else:
-            out = model_base.BaseModel(self, model_type=self.model_type(state_dict, prefix), device=device)
+        out = model_base.BaseModel(self, model_type=self.model_type(state_dict, prefix), device=device)
         if self.inpaint_model():
             out.set_inpaint()
         return out
-
-    def process_clip_state_dict(self, state_dict):
-        return state_dict

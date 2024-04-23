@@ -1,9 +1,7 @@
-import math
-
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
-from torch import nn, einsum
+from einops import rearrange
+from torch import nn
 
 from comfy import model_management
 from .diffusionmodules.util import checkpoint
@@ -11,16 +9,9 @@ from .diffusionmodules.util import checkpoint
 if model_management.xformers_enabled():
     import xformers
     import xformers.ops
-
-from comfy.cli_args import args
 import comfy.ops
 
-# CrossAttn precision handling
-if args.dont_upcast_attention:
-    print("disabling upcasting of attention")
-    _ATTN_PRECISION = "fp16"
-else:
-    _ATTN_PRECISION = "fp32"
+_ATTN_PRECISION = "fp32"
 
 
 def exists(val):
@@ -65,187 +56,6 @@ class FeedForward(nn.Module):
 def Normalize(in_channels, dtype=None, device=None):
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True, dtype=dtype, device=device)
 
-def attention_basic(q, k, v, heads, mask=None):
-    b, _, dim_head = q.shape
-    dim_head //= heads
-    scale = dim_head ** -0.5
-
-    h = heads
-    q, k, v = map(
-        lambda t: t.unsqueeze(3)
-        .reshape(b, -1, heads, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b * heads, -1, dim_head)
-        .contiguous(),
-        (q, k, v),
-    )
-
-    # force cast to fp32 to avoid overflowing
-    if _ATTN_PRECISION =="fp32":
-        with torch.autocast(enabled=False, device_type = 'cuda'):
-            q, k = q.float(), k.float()
-            sim = einsum('b i d, b j d -> b i j', q, k) * scale
-    else:
-        sim = einsum('b i d, b j d -> b i j', q, k) * scale
-
-    del q, k
-
-    if exists(mask):
-        mask = rearrange(mask, 'b ... -> b (...)')
-        max_neg_value = -torch.finfo(sim.dtype).max
-        mask = repeat(mask, 'b j -> (b h) () j', h=h)
-        sim.masked_fill_(~mask, max_neg_value)
-
-    # attention, what we cannot get enough of
-    sim = sim.softmax(dim=-1)
-
-    out = einsum('b i j, b j d -> b i d', sim.to(v.dtype), v)
-    out = (
-        out.unsqueeze(0)
-        .reshape(b, heads, -1, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b, -1, heads * dim_head)
-    )
-    return out
-
-
-def attention_sub_quad(query, key, value, heads, mask=None):
-    b, _, dim_head = query.shape
-    dim_head //= heads
-
-    scale = dim_head ** -0.5
-    query = query.unsqueeze(3).reshape(b, -1, heads, dim_head).permute(0, 2, 1, 3).reshape(b * heads, -1, dim_head)
-    value = value.unsqueeze(3).reshape(b, -1, heads, dim_head).permute(0, 2, 1, 3).reshape(b * heads, -1, dim_head)
-
-    key = key.unsqueeze(3).reshape(b, -1, heads, dim_head).permute(0, 2, 3, 1).reshape(b * heads, dim_head, -1)
-
-    dtype = query.dtype
-    upcast_attention = _ATTN_PRECISION =="fp32" and query.dtype != torch.float32
-    if upcast_attention:
-        bytes_per_token = torch.finfo(torch.float32).bits//8
-    else:
-        bytes_per_token = torch.finfo(query.dtype).bits//8
-    batch_x_heads, q_tokens, _ = query.shape
-    _, _, k_tokens = key.shape
-
-    mem_free_total, mem_free_torch = model_management.get_free_memory(query.device, True)
-
-    kv_chunk_size_min = None
-    kv_chunk_size = None
-    query_chunk_size = None
-
-    for x in [4096, 2048, 1024, 512, 256]:
-        count = mem_free_total / (batch_x_heads * bytes_per_token * x * 4.0)
-        if count >= k_tokens:
-            kv_chunk_size = k_tokens
-            query_chunk_size = x
-            break
-
-    if query_chunk_size is None:
-        query_chunk_size = 512
-
-    hidden_states = efficient_dot_product_attention(
-        query,
-        key,
-        value,
-        query_chunk_size=query_chunk_size,
-        kv_chunk_size=kv_chunk_size,
-        kv_chunk_size_min=kv_chunk_size_min,
-        use_checkpoint=False,
-        upcast_attention=upcast_attention,
-    )
-
-    hidden_states = hidden_states.to(dtype)
-
-    hidden_states = hidden_states.unflatten(0, (-1, heads)).transpose(1,2).flatten(start_dim=2)
-    return hidden_states
-
-def attention_split(q, k, v, heads, mask=None):
-    b, _, dim_head = q.shape
-    dim_head //= heads
-    scale = dim_head ** -0.5
-
-    h = heads
-    q, k, v = map(
-        lambda t: t.unsqueeze(3)
-        .reshape(b, -1, heads, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b * heads, -1, dim_head)
-        .contiguous(),
-        (q, k, v),
-    )
-
-    r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=q.device, dtype=q.dtype)
-
-    mem_free_total = model_management.get_free_memory(q.device)
-
-    if _ATTN_PRECISION =="fp32":
-        element_size = 4
-    else:
-        element_size = q.element_size()
-
-    gb = 1024 ** 3
-    tensor_size = q.shape[0] * q.shape[1] * k.shape[1] * element_size
-    modifier = 3
-    mem_required = tensor_size * modifier
-    steps = 1
-
-
-    if mem_required > mem_free_total:
-        steps = 2**(math.ceil(math.log(mem_required / mem_free_total, 2)))
-        # print(f"Expected tensor size:{tensor_size/gb:0.1f}GB, cuda free:{mem_free_cuda/gb:0.1f}GB "
-        #      f"torch free:{mem_free_torch/gb:0.1f} total:{mem_free_total/gb:0.1f} steps:{steps}")
-
-    if steps > 64:
-        max_res = math.floor(math.sqrt(math.sqrt(mem_free_total / 2.5)) / 8) * 64
-        raise RuntimeError(f'Not enough memory, use lower resolution (max approx. {max_res}x{max_res}). '
-                            f'Need: {mem_required/64/gb:0.1f}GB free, Have:{mem_free_total/gb:0.1f}GB free')
-
-    # print("steps", steps, mem_required, mem_free_total, modifier, q.element_size(), tensor_size)
-    first_op_done = False
-    cleared_cache = False
-    while True:
-        try:
-            slice_size = q.shape[1] // steps if (q.shape[1] % steps) == 0 else q.shape[1]
-            for i in range(0, q.shape[1], slice_size):
-                end = i + slice_size
-                if _ATTN_PRECISION =="fp32":
-                    with torch.autocast(enabled=False, device_type = 'cuda'):
-                        s1 = einsum('b i d, b j d -> b i j', q[:, i:end].float(), k.float()) * scale
-                else:
-                    s1 = einsum('b i d, b j d -> b i j', q[:, i:end], k) * scale
-
-                s2 = s1.softmax(dim=-1).to(v.dtype)
-                del s1
-                first_op_done = True
-
-                r1[:, i:end] = einsum('b i j, b j d -> b i d', s2, v)
-                del s2
-            break
-        except model_management.OOM_EXCEPTION as e:
-            if first_op_done == False:
-                model_management.soft_empty_cache(True)
-                if cleared_cache == False:
-                    cleared_cache = True
-                    print("out of memory error, emptying cache and trying again")
-                    continue
-                steps *= 2
-                if steps > 64:
-                    raise e
-                print("out of memory error, increasing steps and trying again", steps)
-            else:
-                raise e
-
-    del q, k, v
-
-    r1 = (
-        r1.unsqueeze(0)
-        .reshape(b, heads, -1, dim_head)
-        .permute(0, 2, 1, 3)
-        .reshape(b, -1, heads * dim_head)
-    )
-    return r1
-
 def attention_xformers(q, k, v, heads, mask=None):
     b, _, dim_head = q.shape
     dim_head //= heads
@@ -287,25 +97,9 @@ def attention_pytorch(q, k, v, heads, mask=None):
     return out
 
 
-optimized_attention = attention_basic
-optimized_attention_masked = attention_basic
-
-if model_management.xformers_enabled():
-    print("Using xformers cross attention")
-    optimized_attention = attention_xformers
-elif model_management.pytorch_attention_enabled():
-    print("Using pytorch cross attention")
-    optimized_attention = attention_pytorch
-else:
-    if args.use_split_cross_attention:
-        print("Using split optimization for cross attention")
-        optimized_attention = attention_split
-    else:
-        print("Using sub quadratic optimization for cross attention, if you have memory or speed issues try using: --use-split-cross-attention")
-        optimized_attention = attention_sub_quad
-
-if model_management.pytorch_attention_enabled():
-    optimized_attention_masked = attention_pytorch
+optimized_attention_masked = attention_xformers
+print("Using xformers cross attention")
+optimized_attention = attention_xformers
 
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., dtype=None, device=None, operations=comfy.ops):

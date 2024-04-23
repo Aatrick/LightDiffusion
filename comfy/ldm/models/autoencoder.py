@@ -1,5 +1,5 @@
 # import pytorch_lightning as pl
-from typing import Dict, Tuple, Union
+from typing import Dict, Union
 
 import torch
 
@@ -17,7 +17,6 @@ class AbstractAutoencoder(torch.nn.Module):
     unCLIP models, etc. Hence, it is fairly general, and specific features
     (e.g. discriminator training, encoding, decoding) must be implemented in subclasses.
     """
-
     def __init__(
         self,
         ema_decay: Union[None, float] = None,
@@ -35,9 +34,6 @@ class AbstractAutoencoder(torch.nn.Module):
         if self.use_ema:
             self.model_ema = LitEma(self, decay=ema_decay)
             logpy.info(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
-
-    def decode(self, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError("decode()-method of abstract base class called")
 
 
 class AutoencodingEngine(AbstractAutoencoder):
@@ -64,11 +60,6 @@ class AutoencodingEngine(AbstractAutoencoder):
         )
 
 
-    def decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
-        x = self.decoder(z, **kwargs)
-        return x
-
-
 
 class AutoencodingEngineLegacy(AutoencodingEngine):
     def __init__(self, embed_dim: int, **kwargs):
@@ -92,28 +83,6 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         )
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
         self.embed_dim = embed_dim
-
-    def encode(
-        self, x: torch.Tensor, return_reg_log: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        if self.max_batch_size is None:
-            z = self.encoder(x)
-            z = self.quant_conv(z)
-        else:
-            N = x.shape[0]
-            bs = self.max_batch_size
-            n_batches = int(math.ceil(N / bs))
-            z = list()
-            for i_batch in range(n_batches):
-                z_batch = self.encoder(x[i_batch * bs : (i_batch + 1) * bs])
-                z_batch = self.quant_conv(z_batch)
-                z.append(z_batch)
-            z = torch.cat(z, 0)
-
-        z, reg_log = self.regularization(z)
-        if return_reg_log:
-            return z, reg_log
-        return z
 
     def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
         if self.max_batch_size is None:

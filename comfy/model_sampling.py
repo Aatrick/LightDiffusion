@@ -1,5 +1,6 @@
-import torch
 import numpy as np
+import torch
+
 from comfy.ldm.modules.diffusionmodules.util import make_beta_schedule
 
 
@@ -11,13 +12,6 @@ class EPS:
     def calculate_denoised(self, sigma, model_output, model_input):
         sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
         return model_input - model_output * sigma
-
-
-class V_PREDICTION(EPS):
-    def calculate_denoised(self, sigma, model_output, model_input):
-        sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
-        return model_input * self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2) - model_output * sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
-
 
 class ModelSamplingDiscrete(torch.nn.Module):
     def __init__(self, model_config=None):
@@ -66,15 +60,3 @@ class ModelSamplingDiscrete(torch.nn.Module):
         log_sigma = sigma.log()
         dists = log_sigma.to(self.log_sigmas.device) - self.log_sigmas[:, None]
         return dists.abs().argmin(dim=0).view(sigma.shape)
-
-    def sigma(self, timestep):
-        t = torch.clamp(timestep.float(), min=0, max=(len(self.sigmas) - 1))
-        low_idx = t.floor().long()
-        high_idx = t.ceil().long()
-        w = t.frac()
-        log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
-        return log_sigma.exp()
-
-    def percent_to_sigma(self, percent):
-        return self.sigma(torch.tensor(percent * 999.0))
-

@@ -1,12 +1,12 @@
+import contextlib
 import os
 
-from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
-import comfy.ops
 import torch
-import traceback
-import zipfile
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
+
+import comfy.ops
 from . import model_management
-import contextlib
+
 
 def gen_empty_tokens(special_tokens, length):
     start_token = special_tokens.get("start", None)
@@ -113,13 +113,6 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         for param in self.parameters():
             param.requires_grad = False
 
-    def clip_layer(self, layer_idx):
-        if abs(layer_idx) >= self.num_layers:
-            self.layer = "last"
-        else:
-            self.layer = "hidden"
-            self.layer_idx = layer_idx
-
     def reset_clip_layer(self):
         self.layer = self.layer_default[0]
         self.layer_idx = self.layer_default[1]
@@ -209,13 +202,6 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     def encode(self, tokens):
         return self(tokens)
 
-    def load_sd(self, sd):
-        if "text_projection" in sd:
-            self.text_projection[:] = sd.pop("text_projection")
-        if "text_projection.weight" in sd:
-            self.text_projection[:] = sd.pop("text_projection.weight").transpose(0, 1)
-        return self.transformer.load_state_dict(sd, strict=False)
-
 def parse_parentheses(string):
     result = []
     current_item = ""
@@ -274,105 +260,6 @@ def unescape_important(text):
     text = text.replace("\0\2", "(")
     return text
 
-def safe_load_embed_zip(embed_path):
-    with zipfile.ZipFile(embed_path) as myzip:
-        names = list(filter(lambda a: "data/" in a, myzip.namelist()))
-        names.reverse()
-        for n in names:
-            with myzip.open(n) as myfile:
-                data = myfile.read()
-                number = len(data) // 4
-                length_embed = 1024 #sd2.x
-                if number < 768:
-                    continue
-                if number % 768 == 0:
-                    length_embed = 768 #sd1.x
-                num_embeds = number // length_embed
-                embed = torch.frombuffer(data, dtype=torch.float)
-                out = embed.reshape((num_embeds, length_embed)).clone()
-                del embed
-                return out
-
-def expand_directory_list(directories):
-    dirs = set()
-    for x in directories:
-        dirs.add(x)
-        for root, file in os.walk(x, followlinks=True):
-            dirs.add(root)
-    return list(dirs)
-
-def load_embed(embedding_name, embedding_directory, embedding_size, embed_key=None):
-    if isinstance(embedding_directory, str):
-        embedding_directory = [embedding_directory]
-
-    embedding_directory = expand_directory_list(embedding_directory)
-
-    valid_file = None
-    for embed_dir in embedding_directory:
-        embed_path = os.path.abspath(os.path.join(embed_dir, embedding_name))
-        embed_dir = os.path.abspath(embed_dir)
-        try:
-            if os.path.commonpath((embed_dir, embed_path)) != embed_dir:
-                continue
-        except:
-            continue
-        if not os.path.isfile(embed_path):
-            extensions = ['.safetensors', '.pt', '.bin']
-            for x in extensions:
-                t = embed_path + x
-                if os.path.isfile(t):
-                    valid_file = t
-                    break
-        else:
-            valid_file = embed_path
-        if valid_file is not None:
-            break
-
-    if valid_file is None:
-        return None
-
-    embed_path = valid_file
-
-    embed_out = None
-
-    try:
-        if embed_path.lower().endswith(".safetensors"):
-            import safetensors.torch
-            embed = safetensors.torch.load_file(embed_path, device="cpu")
-        else:
-            if 'weights_only' in torch.load.__code__.co_varnames:
-                try:
-                    embed = torch.load(embed_path, weights_only=True, map_location="cpu")
-                except:
-                    embed_out = safe_load_embed_zip(embed_path)
-            else:
-                embed = torch.load(embed_path, map_location="cpu")
-    except Exception as e:
-        print(traceback.format_exc())
-        print()
-        print("error loading embedding, skipping loading:", embedding_name)
-        return None
-
-    if embed_out is None:
-        if 'string_to_param' in embed:
-            values = embed['string_to_param'].values()
-            embed_out = next(iter(values))
-        elif isinstance(embed, list):
-            out_list = []
-            for x in range(len(embed)):
-                for k in embed[x]:
-                    t = embed[x][k]
-                    if t.shape[-1] != embedding_size:
-                        continue
-                    out_list.append(t.reshape(-1, t.shape[-1]))
-            embed_out = torch.cat(out_list, dim=0)
-        elif embed_key is not None and embed_key in embed:
-            embed_out = embed[embed_key]
-        else:
-            values = embed.values()
-            embed_out = next(iter(values))
-    return embed_out
-
 class SDTokenizer:
     def __init__(self, tokenizer_path=None, max_length=77, pad_with_end=True, embedding_directory=None, embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True, pad_to_max_length=True):
         if tokenizer_path is None:
@@ -399,20 +286,6 @@ class SDTokenizer:
         self.embedding_identifier = "embedding:"
         self.embedding_size = embedding_size
         self.embedding_key = embedding_key
-
-    def _try_get_embedding(self, embedding_name:str):
-        '''
-        Takes a potential embedding name and tries to retrieve it.
-        Returns a Tuple consisting of the embedding and any leftover string, embedding can be None.
-        '''
-        embed = load_embed(embedding_name, self.embedding_directory, self.embedding_size, self.embedding_key)
-        if embed is None:
-            stripped = embedding_name.strip(',')
-            if len(stripped) < len(embedding_name):
-                embed = load_embed(stripped, self.embedding_directory, self.embedding_size, self.embedding_key)
-                return (embed, embedding_name[len(stripped):])
-        return (embed, "")
-
 
     def tokenize_with_weights(self, text:str, return_word_ids=False):
         '''
@@ -497,9 +370,6 @@ class SDTokenizer:
         return batched_tokens
 
 
-    def untokenize(self, token_weight_pair):
-        return list(map(lambda a: (a, self.inv_vocab[a[0]]), token_weight_pair))
-
 
 class SD1Tokenizer:
     def __init__(self, embedding_directory=None, clip_name="l", tokenizer=SDTokenizer):
@@ -512,9 +382,6 @@ class SD1Tokenizer:
         out[self.clip_name] = getattr(self, self.clip).tokenize_with_weights(text, return_word_ids)
         return out
 
-    def untokenize(self, token_weight_pair):
-        return getattr(self, self.clip).untokenize(token_weight_pair)
-
 
 class SD1ClipModel(torch.nn.Module):
     def __init__(self, device="cpu", dtype=None, clip_name="l", clip_model=SDClipModel, **kwargs):
@@ -523,9 +390,6 @@ class SD1ClipModel(torch.nn.Module):
         self.clip = "clip_{}".format(self.clip_name)
         setattr(self, self.clip, clip_model(device=device, dtype=dtype, **kwargs))
 
-    def clip_layer(self, layer_idx):
-        getattr(self, self.clip).clip_layer(layer_idx)
-
     def reset_clip_layer(self):
         getattr(self, self.clip).reset_clip_layer()
 
@@ -533,6 +397,3 @@ class SD1ClipModel(torch.nn.Module):
         token_weight_pairs = token_weight_pairs[self.clip_name]
         out, pooled = getattr(self, self.clip).encode_token_weights(token_weight_pairs)
         return out, pooled
-
-    def load_sd(self, sd):
-        return getattr(self, self.clip).load_sd(sd)

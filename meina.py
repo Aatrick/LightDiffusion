@@ -1,21 +1,17 @@
-import json
 import os
 import random
 import sys
-import time
 from typing import Sequence, Mapping, Any, Union
 
 import numpy as np
 import torch
 from PIL import Image
-from PIL.PngImagePlugin import PngInfo
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
 import comfy.sample as sample
 import comfy.sd as sd
 import comfy.utils as utils
-from comfy.cli_args import args, LatentPreviewMethod
 
 ################################################ Folder_paths #########################################################
 
@@ -36,38 +32,6 @@ filename_list_cache = {}
 def get_output_directory():
     global output_directory
     return output_directory
-
-
-def cached_filename_list_(folder_name):
-    global filename_list_cache
-    global folder_names_and_paths
-    if folder_name not in filename_list_cache:
-        return None
-    out = filename_list_cache[folder_name]
-    if time.perf_counter() < (out[2] + 0.5):
-        return out
-    for x in out[1]:
-        time_modified = out[1][x]
-        folder = x
-        if os.path.getmtime(folder) != time_modified:
-            return None
-
-    folders = folder_names_and_paths[folder_name]
-    for x in folders[0]:
-        if os.path.isdir(x):
-            if x not in out[1]:
-                return None
-
-    return out
-
-
-def get_filename_list(folder_name):
-    out = cached_filename_list_(folder_name)
-    if out is None:
-        out = get_filename_list_(folder_name)
-        global filename_list_cache
-        filename_list_cache[folder_name] = out
-    return list(out[0])
 
 
 def get_full_path(folder_name, filename):
@@ -128,9 +92,6 @@ MAX_PREVIEW_RESOLUTION = 512
 
 
 class LatentPreviewer:
-    def decode_latent_to_preview(self, x0):
-        pass
-
     def decode_latent_to_preview_image(self, preview_format, x0):
         preview_image = self.decode_latent_to_preview(x0)
         return ("JPEG", preview_image, MAX_PREVIEW_RESOLUTION)
@@ -153,34 +114,9 @@ class Latent2RGBPreviewer(LatentPreviewer):
 
 def get_previewer(device, latent_format):
     previewer = None
-    method = args.preview_method
-    if method != LatentPreviewMethod.NoPreviews:
-        # TODO previewer methods
-        taesd_decoder_path = None
-        if latent_format.taesd_decoder_name is not None:
-            taesd_decoder_path = next(
-                (fn for fn in get_filename_list("vae_approx")
-                 if fn.startswith(latent_format.taesd_decoder_name)),
-                ""
-            )
-            taesd_decoder_path = get_full_path("vae_approx", taesd_decoder_path)
-
-        if method == LatentPreviewMethod.Auto:
-            method = LatentPreviewMethod.Latent2RGB
-            if taesd_decoder_path:
-                method = LatentPreviewMethod.TAESD
-
-        if method == LatentPreviewMethod.TAESD:
-            if taesd_decoder_path:
-                taesd = TAESD(None, taesd_decoder_path).to(device)
-                previewer = TAESDPreviewerImpl(taesd)
-            else:
-                print("Warning: TAESD previews enabled, but could not find models/vae_approx/{}".format(
-                    latent_format.taesd_decoder_name))
-
-        if previewer is None:
-            if latent_format.latent_rgb_factors is not None:
-                previewer = Latent2RGBPreviewer(latent_format.latent_rgb_factors)
+    if previewer is None:
+        if latent_format.latent_rgb_factors is not None:
+            previewer = Latent2RGBPreviewer(latent_format.latent_rgb_factors)
     return previewer
 
 
@@ -241,14 +177,6 @@ class SaveImage:
             i = 255. * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             metadata = None
-            if not args.disable_metadata:
-                metadata = PngInfo()
-                if prompt is not None:
-                    metadata.add_text("prompt", json.dumps(prompt))
-                if extra_pnginfo is not None:
-                    for x in extra_pnginfo:
-                        metadata.add_text(x, json.dumps(extra_pnginfo[x]))
-
             file = f"{filename}_{counter:05}_.png"
             img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=4)
             results.append({
@@ -327,53 +255,14 @@ def get_value_at_index(obj: Union[Sequence, Mapping], index: int) -> Any:
         return obj["result"][index]
 
 
-def find_path(name: str, path: str = None) -> str:
-    """
-    Recursively looks at parent folders starting from the given path until it finds the given name.
-    Returns the path as a Path object if found, or None otherwise.
-    """
-    # If no path is given, use the current working directory
-    if path is None:
-        path = os.getcwd()
-
-    # Check if the current directory contains the name
-    if name in os.listdir(path):
-        path_name = os.path.join(path, name)
-        print(f"{name} found: {path_name}")
-        return path_name
-
-    # Get the parent directory
-    parent_directory = os.path.dirname(path)
-
-    # If the parent directory is the same as the current directory, we've reached the root and stop the search
-    if parent_directory == path:
-        return None
-
-    # Recursively call the function with the parent directory
-    return find_path(name, parent_directory)
-
-
-def add_comfyui_directory_to_sys_path() -> None:
-    """
-    Add 'ComfyUI' to the sys.path
-    """
-    comfyui_path = find_path("ComfyUI")
-    if comfyui_path is not None and os.path.isdir(comfyui_path):
-        sys.path.append(comfyui_path)
-        print(f"'{comfyui_path}' added to sys.path")
-
-
-
-import trace
-add_comfyui_directory_to_sys_path()
-
-
 with open('prompt.txt', 'r') as file:
     lines = file.readlines()
 
 prompt = lines[0].split(':')[1].strip()
 w = int(lines[1].split(':')[1].strip())
 h = int(lines[2].split(':')[1].strip())
+
+
 def gen(prompt, w, h):
     with torch.inference_mode():
         checkpointloadersimple = CheckpointLoaderSimple()
@@ -398,7 +287,7 @@ def gen(prompt, w, h):
         saveimage = SaveImage()
 
         ksampler_239 = ksampler.sample(
-            seed=random.randint(1, 2**64),
+            seed=random.randint(1, 2 ** 64),
             steps=300,
             cfg=7,
             sampler_name="dpm_adaptive",
@@ -416,6 +305,7 @@ def gen(prompt, w, h):
         saveimage_248 = saveimage.save_images(
             filename_prefix="ComfyUI", images=get_value_at_index(vaedecode_240, 0)
         )
+
 
 gen(prompt, w, h)
 #tracer = trace.Trace(ignoredirs=[sys.prefix, sys.exec_prefix], countfuncs=1)

@@ -8,7 +8,6 @@ import comfy.ops
 from comfy.ldm.util import exists
 from .util import (
     checkpoint,
-    avg_pool_nd,
     zero_module,
     timestep_embedding,
 )
@@ -107,7 +106,6 @@ class Downsample(nn.Module):
             )
         else:
             assert self.channels == self.out_channels
-            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
 
     def forward(self, x):
         assert x.shape[1] == self.channels

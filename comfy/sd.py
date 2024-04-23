@@ -1,6 +1,5 @@
 import torch
 
-import comfy.adapter
 import comfy.model_patcher
 import comfy.supported_models_base
 import comfy.utils as utils
@@ -46,16 +45,6 @@ class CLIP:
         self.patcher = comfy.model_patcher.ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
         self.layer_idx = None
 
-    def clone(self):
-        n = CLIP(no_init=True)
-        n.patcher = self.patcher.clone()
-        n.cond_stage_model = self.cond_stage_model
-        n.tokenizer = self.tokenizer
-        n.layer_idx = self.layer_idx
-        return n
-
-    def clip_layer(self, layer_idx):
-        self.layer_idx = layer_idx
 
     def tokenize(self, text, return_word_ids=False):
         return self.tokenizer.tokenize_with_weights(text, return_word_ids)
@@ -72,18 +61,12 @@ class CLIP:
             return cond, pooled
         return cond
 
-    def load_sd(self, sd):
-        return self.cond_stage_model.load_sd(sd)
-
     def load_model(self):
         model_management.load_model_gpu(self.patcher)
         return self.patcher
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None):
-        if 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
-            sd = diffusers_convert.convert_vae_state_dict(sd)
-
         if config is None:
             #default SD1.x/SD2.x VAE parameters
             ddconfig = {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128, 'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0}
@@ -106,19 +89,6 @@ class VAE:
         self.vae_dtype = model_management.vae_dtype()
         self.first_stage_model.to(self.vae_dtype)
 
-    def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap = 16):
-        steps = samples.shape[0] * utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x, tile_y, overlap)
-        steps += samples.shape[0] * utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x // 2, tile_y * 2, overlap)
-        steps += samples.shape[0] * utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x * 2, tile_y // 2, overlap)
-        pbar = utils.ProgressBar(steps)
-
-        decode_fn = lambda a: (self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)) + 1.0).float()
-        output = torch.clamp((
-            (utils.tiled_scale(samples, decode_fn, tile_x // 2, tile_y * 2, overlap, upscale_amount = 8, pbar = pbar) +
-            utils.tiled_scale(samples, decode_fn, tile_x * 2, tile_y // 2, overlap, upscale_amount = 8, pbar = pbar) +
-             utils.tiled_scale(samples, decode_fn, tile_x, tile_y, overlap, upscale_amount = 8, pbar = pbar))
-            / 3.0) / 2.0, min=0.0, max=1.0)
-        return output
 
     def decode(self, samples_in):
         self.first_stage_model = self.first_stage_model.to(self.device)
@@ -134,8 +104,7 @@ class VAE:
                 samples = samples_in[x:x+batch_number].to(self.vae_dtype).to(self.device)
                 pixel_samples[x:x+batch_number] = torch.clamp((self.first_stage_model.decode(samples).cpu().float() + 1.0) / 2.0, min=0.0, max=1.0)
         except model_management.OOM_EXCEPTION as e:
-            print("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
-            pixel_samples = self.decode_tiled_(samples_in)
+            print("Warning: Ran out of memory when regular VAE decoding.")
 
         self.first_stage_model = self.first_stage_model.to(self.offload_device)
         pixel_samples = pixel_samples.cpu().movedim(1,-1)
@@ -160,11 +129,6 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     model_config = model_detection.model_config_from_unet(sd, "model.diffusion_model.", unet_dtype)
     if model_config is None:
         raise RuntimeError("ERROR: Could not detect model type of: {}".format(ckpt_path))
-
-    if model_config.clip_vision_prefix is not None:
-        if output_clipvision:
-            clipvision = clip_vision.load_clipvision_from_sd(sd, model_config.clip_vision_prefix, True)
-
     if output_model:
         inital_load_device = model_management.unet_inital_load_device(parameters, unet_dtype)
         offload_device = model_management.unet_offload_device()

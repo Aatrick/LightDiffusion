@@ -2,7 +2,7 @@ import math
 
 import torch
 from torch import nn
-from tqdm.auto import trange, tqdm
+from tqdm.auto import tqdm
 
 
 def append_zero(x):
@@ -49,14 +49,6 @@ class PIDStepSizeController:
         self.h *= factor
         return accept
 
-def get_ancestral_step(sigma_from, sigma_to, eta=1.):
-    """Calculates the noise level (sigma_down) to step down to and the amount
-    of noise to add (sigma_up) when doing an ancestral sampling step."""
-    if not eta:
-        return sigma_to, 0.
-    sigma_up = min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
-    sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
-    return sigma_down, sigma_up
 
 
 class DPMSolver(nn.Module):
@@ -83,13 +75,6 @@ class DPMSolver(nn.Module):
         if self.eps_callback is not None:
             self.eps_callback()
         return eps, {key: eps, **eps_cache}
-
-    def dpm_solver_1_step(self, x, t, t_next, eps_cache=None):
-        eps_cache = {} if eps_cache is None else eps_cache
-        h = t_next - t
-        eps, eps_cache = self.eps(eps_cache, 'eps', x, t)
-        x_1 = x - self.sigma(t_next) * h.expm1() * eps
-        return x_1, eps_cache
 
     def dpm_solver_2_step(self, x, t, t_next, r1=1 / 2, eps_cache=None):
         eps_cache = {} if eps_cache is None else eps_cache
@@ -133,22 +118,13 @@ class DPMSolver(nn.Module):
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
             eps_cache = {}
             t = torch.minimum(t_end, s + pid.h) if forward else torch.maximum(t_end, s + pid.h)
-            if eta:
-                sd, su = get_ancestral_step(self.sigma(s), self.sigma(t), eta)
-                t_ = torch.minimum(t_end, self.t(sd))
-                su = (self.sigma(t) ** 2 - self.sigma(t_) ** 2) ** 0.5
-            else:
-                t_, su = t, 0.
+
+            t_, su = t, 0.
 
             eps, eps_cache = self.eps(eps_cache, 'eps', x, s)
             denoised = x - self.sigma(s) * eps
-
-            if order == 2:
-                x_low, eps_cache = self.dpm_solver_1_step(x, s, t_, eps_cache=eps_cache)
-                x_high, eps_cache = self.dpm_solver_2_step(x, s, t_, eps_cache=eps_cache)
-            else:
-                x_low, eps_cache = self.dpm_solver_2_step(x, s, t_, r1=1 / 3, eps_cache=eps_cache)
-                x_high, eps_cache = self.dpm_solver_3_step(x, s, t_, eps_cache=eps_cache)
+            x_low, eps_cache = self.dpm_solver_2_step(x, s, t_, r1=1 / 3, eps_cache=eps_cache)
+            x_high, eps_cache = self.dpm_solver_3_step(x, s, t_, eps_cache=eps_cache)
             delta = torch.maximum(atol, rtol * torch.maximum(x_low.abs(), x_prev.abs()))
             error = torch.linalg.norm((x_low - x_high) / delta) / x.numel() ** 0.5
             accept = pid.propose_step(error)
@@ -166,29 +142,6 @@ class DPMSolver(nn.Module):
                 self.info_callback({'x': x, 'i': info['steps'] - 1, 't': s, 't_up': s, 'denoised': denoised, 'error': error, 'h': pid.h, **info})
 
         return x, info
-
-def to_d(x, sigma, denoised):
-    """Converts a denoiser output to a Karras ODE derivative."""
-    return (x - denoised) / utilkd.append_dims(sigma, x.ndim)
-@torch.no_grad()
-def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
-    """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
-    extra_args = {} if extra_args is None else extra_args
-    s_in = x.new_ones([x.shape[0]])
-    for i in trange(len(sigmas) - 1, disable=disable):
-        gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.
-        sigma_hat = sigmas[i] * (gamma + 1)
-        if gamma > 0:
-            eps = torch.randn_like(x) * s_noise
-            x = x + eps * (sigma_hat ** 2 - sigmas[i] ** 2) ** 0.5
-        denoised = model(x, sigma_hat * s_in, **extra_args)
-        d = to_d(x, sigma_hat, denoised)
-        if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
-        dt = sigmas[i + 1] - sigma_hat
-        # Euler method
-        x = x + d * dt
-    return x
 
 @torch.no_grad()
 def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callback=None, disable=None, order=3, rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1., dcoeff=0., accept_safety=0.81, eta=0., s_noise=1., noise_sampler=None, return_info=False):

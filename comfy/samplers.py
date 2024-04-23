@@ -276,28 +276,6 @@ class KSamplerX0Inpaint(torch.nn.Module):
             out += self.latent_image * latent_mask
         return out
 
-def get_mask_aabb(masks):
-    if masks.numel() == 0:
-        return torch.zeros((0, 4), device=masks.device, dtype=torch.int)
-
-    b = masks.shape[0]
-
-    bounding_boxes = torch.zeros((b, 4), device=masks.device, dtype=torch.int)
-    is_empty = torch.zeros((b), device=masks.device, dtype=torch.bool)
-    for i in range(b):
-        mask = masks[i]
-        if mask.numel() == 0:
-            continue
-        if torch.max(mask != 0) == False:
-            is_empty[i] = True
-            continue
-        y, x = torch.where(mask)
-        bounding_boxes[i, 0] = torch.min(x)
-        bounding_boxes[i, 1] = torch.min(y)
-        bounding_boxes[i, 2] = torch.max(x)
-        bounding_boxes[i, 3] = torch.max(y)
-
-    return bounding_boxes, is_empty
 
 def resolve_areas_and_cond_masks(conditions, h, w, device):
     # We need to decide on an area outside the sampling loop in order to properly generate opposite areas of equal sizes.
@@ -460,8 +438,6 @@ def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwar
     return conds
 
 class Sampler:
-    def sample(self):
-        pass
 
     def max_denoise(self, model_wrap, sigmas):
         max_sigma = float(model_wrap.inner_model.model_sampling.sigma_max)
