@@ -1,6 +1,6 @@
 import torch
 
-import comfy.model_patcher
+import comfy.imp
 import comfy.supported_models_base
 import comfy.imp as utils
 from comfy import model_detection
@@ -42,7 +42,7 @@ class CLIP:
         self.cond_stage_model = clip(**(params))
 
         self.tokenizer = tokenizer(embedding_directory=embedding_directory)
-        self.patcher = comfy.model_patcher.ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
+        self.patcher = comfy.imp.ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
         self.layer_idx = None
 
 

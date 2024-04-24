@@ -1,7 +1,7 @@
 import torch
 
 import imp as latent_formats
-from . import sd1_clip
+from . import imp
 from . import supported_models_base
 import imp as utils
 
@@ -39,7 +39,7 @@ class SD15(supported_models_base.BASE):
         return state_dict
 
     def clip_target(self):
-        return supported_models_base.ClipTarget(sd1_clip.SD1Tokenizer, sd1_clip.SD1ClipModel)
+        return supported_models_base.ClipTarget(imp.SD1Tokenizer, imp.SD1ClipModel)
 
 
 models = [SD15]

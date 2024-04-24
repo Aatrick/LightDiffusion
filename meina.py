@@ -9,7 +9,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
-import comfy.sample as sample
+import comfy.imp as sample
 import comfy.sd as sd
 import comfy.imp as utils
 import trace
@@ -205,7 +205,7 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
 
     callback = prepare_callback(model, steps)
     disable_pbar = not utils.PROGRESS_BAR_ENABLED
-    samples = sample.sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+    samples = sample.sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                             denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
                             force_full_denoise=force_full_denoise, noise_mask=noise_mask, callback=callback,
                             disable_pbar=disable_pbar, seed=seed)

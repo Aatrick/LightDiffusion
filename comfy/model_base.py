@@ -2,7 +2,7 @@ import torch
 
 import comfy.imp as conds
 from comfy.openaimodel import UNetModel
-from comfy.model_sampling import EPS, ModelSamplingDiscrete
+from comfy.imp import EPS, ModelSamplingDiscrete
 
 
 def model_sampling(model_config, model_type):

@@ -11,7 +11,7 @@ from .imp import (
     zero_module,
     timestep_embedding,
 )
-from comfy.attention import SpatialTransformer
+from comfy.imp import SpatialTransformer
 
 
 class TimestepBlock(nn.Module):
@@ -428,7 +428,7 @@ class UNetModel(nn.Module):
                         layers.append(SpatialTransformer(
                                 ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint, dtype=self.dtype, device=device, operations=operations
+                                use_checkpoint=use_checkpoint, dtype=self.dtype, device=device
                             )
                         )
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
@@ -484,7 +484,7 @@ class UNetModel(nn.Module):
             mid_block += [SpatialTransformer(  # always uses a self-attn
                             ch, num_heads, dim_head, depth=transformer_depth_middle, context_dim=context_dim,
                             disable_self_attn=disable_middle_self_attn, use_linear=use_linear_in_transformer,
-                            use_checkpoint=use_checkpoint, dtype=self.dtype, device=device, operations=operations
+                            use_checkpoint=use_checkpoint, dtype=self.dtype, device=device
                         ),
             ResBlock(
                 ch,
@@ -538,7 +538,7 @@ class UNetModel(nn.Module):
                             SpatialTransformer(
                                 ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint, dtype=self.dtype, device=device, operations=operations
+                                use_checkpoint=use_checkpoint, dtype=self.dtype, device=device
                             )
                         )
                 if level and i == self.num_res_blocks[level]:
