@@ -4,9 +4,9 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-import comfy.ops
+import comfy.imp
 from comfy.ldm_util import exists
-from .dm_util import (
+from .imp import (
     checkpoint,
     zero_module,
     timestep_embedding,
@@ -57,7 +57,7 @@ class Upsample(nn.Module):
                  upsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -93,7 +93,7 @@ class Downsample(nn.Module):
                  downsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -142,7 +142,7 @@ class ResBlock(TimestepBlock):
         down=False,
         dtype=None,
         device=None,
-        operations=comfy.ops
+        operations=comfy.imp
     ):
         super().__init__()
         self.channels = channels
@@ -302,7 +302,7 @@ class UNetModel(nn.Module):
         transformer_depth_middle=None,
         transformer_depth_output=None,
         device=None,
-        operations=comfy.ops,
+        operations=comfy.imp,
     ):
         super().__init__()
         assert use_spatial_transformer == True, "use_spatial_transformer has to be true"

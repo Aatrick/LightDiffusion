@@ -1,9 +1,9 @@
 import torch
 
-from . import latent_formats
+import imp as latent_formats
 from . import sd1_clip
 from . import supported_models_base
-from . import utils
+import imp as utils
 
 
 class SD15(supported_models_base.BASE):

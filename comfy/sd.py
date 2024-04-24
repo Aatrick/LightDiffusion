@@ -2,9 +2,9 @@ import torch
 
 import comfy.model_patcher
 import comfy.supported_models_base
-import comfy.utils as utils
+import comfy.imp as utils
 from comfy import model_detection
-from comfy import model_management
+import comfy.imp as model_management
 from comfy.ldm_util import AutoencoderKL
 
 
@@ -153,7 +153,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
         print("left over keys:", left_over)
 
     if output_model:
-        model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), current_device=inital_load_device)
+        model_patcher = comfy.imp.ModelPatcher(model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), current_device=inital_load_device)
         if inital_load_device != torch.device("cpu"):
             print("loaded straight to GPU")
             model_management.load_model_gpu(model_patcher)

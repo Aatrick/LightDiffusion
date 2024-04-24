@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from comfy.dm_util import make_beta_schedule
+from comfy.imp import make_beta_schedule
 
 
 class EPS:

@@ -2,7 +2,8 @@ import math
 
 import torch
 
-from comfy import model_management, sampling as k_diffusion_sampling
+from comfy import imp
+import comfy.imp as k_diffusion_sampling
 
 
 #The main sampling function shared by all the samplers
@@ -238,7 +239,7 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
             return out_cond, out_uncond
 
 
-        max_total_area = model_management.maximum_batch_area()
+        max_total_area = imp.maximum_batch_area()
         if math.isclose(cond_scale, 1.0):
             uncond = None
 

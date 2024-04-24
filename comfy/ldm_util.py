@@ -84,11 +84,11 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         ddconfig = kwargs.pop("ddconfig")
         super().__init__(
             encoder_config={
-                "target": "comfy.model.Encoder",
+                "target": "comfy.imp.Encoder",
                 "params": ddconfig,
             },
             decoder_config={
-                "target": "comfy.model.Decoder",
+                "target": "comfy.imp.Decoder",
                 "params": ddconfig,
             },
             **kwargs,

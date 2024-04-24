@@ -1,7 +1,6 @@
 import torch
 
-import comfy.model_management
-import comfy.utils as utils
+import comfy.imp
 
 
 class ModelPatcher:
@@ -95,14 +94,14 @@ class ModelPatcher:
                 self.backup[key] = weight.to(device=device_to, copy=inplace_update)
 
             if device_to is not None:
-                temp_weight = comfy.model_management.cast_to_device(weight, device_to, torch.float32, copy=True)
+                temp_weight = comfy.imp.cast_to_device(weight, device_to, torch.float32, copy=True)
             else:
                 temp_weight = weight.to(torch.float32, copy=True)
             out_weight = self.calculate_weight(self.patches[key], temp_weight, key).to(weight.dtype)
             if inplace_update:
-                utils.copy_to_param(self.model, key, out_weight)
+                comfy.imp.copy_to_param(self.model, key, out_weight)
             else:
-                utils.set_attr(self.model, key, out_weight)
+                comfy.imp.set_attr(self.model, key, out_weight)
             del temp_weight
 
         if device_to is not None:
@@ -116,10 +115,10 @@ class ModelPatcher:
 
         if self.weight_inplace_update:
             for k in keys:
-                utils.copy_to_param(self.model, k, self.backup[k])
+                comfy.imp.copy_to_param(self.model, k, self.backup[k])
         else:
             for k in keys:
-                utils.set_attr(self.model, k, self.backup[k])
+                comfy.imp.set_attr(self.model, k, self.backup[k])
 
         self.backup = {}
 

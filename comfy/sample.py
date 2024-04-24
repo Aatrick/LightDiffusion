@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 
-import comfy.conds as conds
-import comfy.model_management
+import comfy.imp as conds
+import comfy.imp
 import comfy.samplers as samplers
 
 
@@ -74,7 +74,7 @@ def prepare_sampling(model, noise_shape, positive, negative, noise_mask):
 
     real_model = None
     models, inference_memory = get_additional_models(positive, negative, model.model_dtype())
-    comfy.model_management.load_models_gpu([model] + models, comfy.model_management.batch_area_memory(noise_shape[0] * noise_shape[2] * noise_shape[3]) + inference_memory)
+    comfy.imp.load_models_gpu([model] + models, comfy.imp.batch_area_memory(noise_shape[0] * noise_shape[2] * noise_shape[3]) + inference_memory)
     real_model = model.model
 
     return real_model, positive, negative, noise_mask, models

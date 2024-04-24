@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "co
 
 import comfy.sample as sample
 import comfy.sd as sd
-import comfy.utils as utils
+import comfy.imp as utils
 import trace
 
 ################################################ Folder_paths #########################################################
@@ -308,7 +308,9 @@ def gen(prompt, w, h):
         )
 
 
-tracer = trace.Trace(countfuncs=1)
-tracer.runfunc(gen, prompt, w, h)
-r = tracer.results()
-print(r)
+#tracer = trace.Trace(countfuncs=1)
+#tracer.runfunc(gen, prompt, w, h)
+#r = tracer.results()
+#print(r)
+
+gen(prompt, w, h)

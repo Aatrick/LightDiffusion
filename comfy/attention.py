@@ -3,13 +3,13 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
-from comfy import model_management
-from comfy.dm_util import checkpoint
+from comfy import imp
+from comfy.imp import checkpoint
 
-if model_management.xformers_enabled():
+if imp.xformers_enabled():
     import xformers
     import xformers.ops
-import comfy.ops
+import comfy.imp
 
 _ATTN_PRECISION = "fp32"
 
@@ -24,7 +24,7 @@ def default(val, d):
 
 # feedforward
 class GEGLU(nn.Module):
-    def __init__(self, dim_in, dim_out, dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, dim_in, dim_out, dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         self.proj = operations.Linear(dim_in, dim_out * 2, dtype=dtype, device=device)
 
@@ -34,7 +34,7 @@ class GEGLU(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = default(dim_out, dim)
@@ -102,7 +102,7 @@ print("Using xformers cross attention")
 optimized_attention = attention_xformers
 
 class CrossAttention(nn.Module):
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., dtype=None, device=None, operations=comfy.ops):
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
@@ -135,7 +135,7 @@ class CrossAttention(nn.Module):
 
 class BasicTransformerBlock(nn.Module):
     def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True,
-                 disable_self_attn=False, dtype=None, device=None, operations=comfy.ops):
+                 disable_self_attn=False, dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         self.disable_self_attn = disable_self_attn
         self.attn1 = CrossAttention(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout,
@@ -277,7 +277,7 @@ class SpatialTransformer(nn.Module):
     def __init__(self, in_channels, n_heads, d_head,
                  depth=1, dropout=0., context_dim=None,
                  disable_self_attn=False, use_linear=False,
-                 use_checkpoint=True, dtype=None, device=None, operations=comfy.ops):
+                 use_checkpoint=True, dtype=None, device=None, operations=comfy.imp):
         super().__init__()
         if exists(context_dim) and not isinstance(context_dim, list):
             context_dim = [context_dim] * depth

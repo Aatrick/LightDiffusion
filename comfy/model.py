@@ -4,10 +4,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import comfy.ops
-from comfy import model_management
+import comfy.imp
+from comfy import imp
 
-if model_management.xformers_enabled_vae():
+if imp.xformers_enabled_vae():
     import xformers
     import xformers.ops
 
@@ -26,7 +26,7 @@ class Upsample(nn.Module):
         super().__init__()
         self.with_conv = with_conv
         if self.with_conv:
-            self.conv = comfy.ops.Conv2d(in_channels,
+            self.conv = comfy.imp.Conv2d(in_channels,
                                         in_channels,
                                         kernel_size=3,
                                         stride=1,
@@ -56,7 +56,7 @@ class Downsample(nn.Module):
         self.with_conv = with_conv
         if self.with_conv:
             # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = comfy.ops.Conv2d(in_channels,
+            self.conv = comfy.imp.Conv2d(in_channels,
                                         in_channels,
                                         kernel_size=3,
                                         stride=2,
@@ -74,30 +74,30 @@ class ResnetBlock(nn.Module):
 
         self.swish = torch.nn.SiLU(inplace=True)
         self.norm1 = Normalize(in_channels)
-        self.conv1 = comfy.ops.Conv2d(in_channels,
+        self.conv1 = comfy.imp.Conv2d(in_channels,
                                      out_channels,
                                      kernel_size=3,
                                      stride=1,
                                      padding=1)
         if temb_channels > 0:
-            self.temb_proj = comfy.ops.Linear(temb_channels,
+            self.temb_proj = comfy.imp.Linear(temb_channels,
                                              out_channels)
         self.norm2 = Normalize(out_channels)
         self.dropout = torch.nn.Dropout(dropout, inplace=True)
-        self.conv2 = comfy.ops.Conv2d(out_channels,
+        self.conv2 = comfy.imp.Conv2d(out_channels,
                                      out_channels,
                                      kernel_size=3,
                                      stride=1,
                                      padding=1)
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
-                self.conv_shortcut = comfy.ops.Conv2d(in_channels,
+                self.conv_shortcut = comfy.imp.Conv2d(in_channels,
                                                      out_channels,
                                                      kernel_size=3,
                                                      stride=1,
                                                      padding=1)
             else:
-                self.nin_shortcut = comfy.ops.Conv2d(in_channels,
+                self.nin_shortcut = comfy.imp.Conv2d(in_channels,
                                                     out_channels,
                                                     kernel_size=1,
                                                     stride=1,
@@ -132,12 +132,8 @@ def xformers_attention(q, k, v):
         lambda t: t.view(B, C, -1).transpose(1, 2).contiguous(),
         (q, k, v),
     )
-
-    try:
-        out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None)
-        out = out.transpose(1, 2).reshape(B, C, H, W)
-    except NotImplementedError as e:
-        out = slice_attention(q.view(B, -1, C), k.view(B, -1, C).transpose(1, 2), v.view(B, -1, C).transpose(1, 2)).reshape(B, C, H, W)
+    out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None)
+    out = out.transpose(1, 2).reshape(B, C, H, W)
     return out
 
 
@@ -147,36 +143,30 @@ class AttnBlock(nn.Module):
         self.in_channels = in_channels
 
         self.norm = Normalize(in_channels)
-        self.q = comfy.ops.Conv2d(in_channels,
+        self.q = comfy.imp.Conv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
                                  stride=1,
                                  padding=0)
-        self.k = comfy.ops.Conv2d(in_channels,
+        self.k = comfy.imp.Conv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
                                  stride=1,
                                  padding=0)
-        self.v = comfy.ops.Conv2d(in_channels,
+        self.v = comfy.imp.Conv2d(in_channels,
                                  in_channels,
                                  kernel_size=1,
                                  stride=1,
                                  padding=0)
-        self.proj_out = comfy.ops.Conv2d(in_channels,
+        self.proj_out = comfy.imp.Conv2d(in_channels,
                                         in_channels,
                                         kernel_size=1,
                                         stride=1,
                                         padding=0)
 
-        if model_management.xformers_enabled_vae():
+        if imp.xformers_enabled_vae():
             print("Using xformers attention in VAE")
             self.optimized_attention = xformers_attention
-        elif model_management.pytorch_attention_enabled():
-            print("Using pytorch attention in VAE")
-            self.optimized_attention = pytorch_attention
-        else:
-            print("Using split attention in VAE")
-            self.optimized_attention = normal_attention
 
     def forward(self, x):
         h_ = x
@@ -211,7 +201,7 @@ class Encoder(nn.Module):
         self.in_channels = in_channels
 
         # downsampling
-        self.conv_in = comfy.ops.Conv2d(in_channels,
+        self.conv_in = comfy.imp.Conv2d(in_channels,
                                        self.ch,
                                        kernel_size=3,
                                        stride=1,
@@ -256,7 +246,7 @@ class Encoder(nn.Module):
 
         # end
         self.norm_out = Normalize(block_in)
-        self.conv_out = comfy.ops.Conv2d(block_in,
+        self.conv_out = comfy.imp.Conv2d(block_in,
                                         2*z_channels if double_z else z_channels,
                                         kernel_size=3,
                                         stride=1,
@@ -267,7 +257,7 @@ class Decoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, z_channels, give_pre_end=False, tanh_out=False, use_linear_attn=False,
-                 conv_out_op=comfy.ops.Conv2d,
+                 conv_out_op=comfy.imp.Conv2d,
                  resnet_op=ResnetBlock,
                  attn_op=AttnBlock,
                 **ignorekwargs):
@@ -291,7 +281,7 @@ class Decoder(nn.Module):
             self.z_shape, np.prod(self.z_shape)))
 
         # z to block_in
-        self.conv_in = comfy.ops.Conv2d(z_channels,
+        self.conv_in = comfy.imp.Conv2d(z_channels,
                                        block_in,
                                        kernel_size=3,
                                        stride=1,

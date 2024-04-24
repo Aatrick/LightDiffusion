@@ -1,4 +1,5 @@
-from . import model_base, latent_formats
+from . import model_base
+import imp as latent_formats
 
 
 class ClipTarget:

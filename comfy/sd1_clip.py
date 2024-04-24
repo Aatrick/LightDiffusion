@@ -4,8 +4,8 @@ import os
 import torch
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 
-import comfy.ops
-from . import model_management
+import comfy.imp as model_management
+import comfy.imp as imp
 
 
 def gen_empty_tokens(special_tokens, length):
@@ -78,7 +78,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                 textmodel_json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)), "sd1_clip_config.json")
             config = config_class.from_json_file(textmodel_json_config)
             self.num_layers = config.num_hidden_layers
-            with comfy.ops.use_comfy_ops(device, dtype):
+            with imp.use_comfy_ops(device, dtype):
                 with modeling_utils.no_init_weights():
                     self.transformer = model_class(config)
 
