@@ -1,3 +1,4 @@
+
 import math
 import os
 import random
@@ -1940,6 +1941,7 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
     sampler = KSampler(real_model, steps=steps, device=model.load_device, sampler=sampler_name,
                        scheduler=scheduler, denoise=denoise, model_options=model.model_options)
 
+
     samples = sampler.sample(noise, positive_copy, negative_copy, cfg=cfg, latent_image=latent_image,
                              start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise,
                              denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar,
@@ -3095,7 +3097,6 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
             load_model_gpu(model_patcher)
 
     return (model_patcher, clip, vae, clipvision)
-
 
 ################################################ Folder_paths #########################################################
 
