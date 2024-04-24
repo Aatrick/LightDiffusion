@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy.imp
-from comfy.ldm_util import exists
+from comfy.imp import exists
 from .imp import (
     checkpoint,
     zero_module,

@@ -5,7 +5,7 @@ import comfy.supported_models_base
 import comfy.imp as utils
 from comfy import model_detection
 import comfy.imp as model_management
-from comfy.ldm_util import AutoencoderKL
+from comfy.imp import AutoencoderKL
 
 
 def load_model_weights(model, sd):
