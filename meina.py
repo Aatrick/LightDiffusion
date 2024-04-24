@@ -9,10 +9,9 @@ from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
-import comfy.imp as sample
-import comfy.sd as sd
-import comfy.imp as utils
-import trace
+import imp as sample
+import sd as sd
+import imp as utils
 
 ################################################ Folder_paths #########################################################
 

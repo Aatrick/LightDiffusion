@@ -1,11 +1,9 @@
 import torch
 
-import comfy.imp
-import comfy.supported_models_base
-import comfy.imp as utils
-from comfy import model_detection
-import comfy.imp as model_management
-from comfy.imp import AutoencoderKL
+import imp
+import imp as utils
+import imp as model_management
+from imp import AutoencoderKL
 
 
 def load_model_weights(model, sd):
@@ -42,7 +40,7 @@ class CLIP:
         self.cond_stage_model = clip(**(params))
 
         self.tokenizer = tokenizer(embedding_directory=embedding_directory)
-        self.patcher = comfy.imp.ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
+        self.patcher = imp.ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
         self.layer_idx = None
 
 
@@ -126,7 +124,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     class WeightsLoader(torch.nn.Module):
         pass
 
-    model_config = model_detection.model_config_from_unet(sd, "model.diffusion_model.", unet_dtype)
+    model_config = imp.model_config_from_unet(sd, "model.diffusion_model.", unet_dtype)
     if model_config is None:
         raise RuntimeError("ERROR: Could not detect model type of: {}".format(ckpt_path))
     if output_model:
@@ -153,7 +151,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
         print("left over keys:", left_over)
 
     if output_model:
-        model_patcher = comfy.imp.ModelPatcher(model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), current_device=inital_load_device)
+        model_patcher = imp.ModelPatcher(model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), current_device=inital_load_device)
         if inital_load_device != torch.device("cpu"):
             print("loaded straight to GPU")
             model_management.load_model_gpu(model_patcher)
