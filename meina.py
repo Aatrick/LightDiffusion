@@ -1,15 +1,32 @@
+import math
 import os
 import random
 import sys
-from typing import Sequence, Mapping, Any, Union
+from typing import Dict, Union
+from typing import Sequence, Mapping, Any
 
 import numpy as np
-import torch
 from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
 import safetensors.torch
+import importlib
+from contextlib import contextmanager
+
+from tqdm.auto import tqdm
+import psutil
+import contextlib
+import os
+
+import torch
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
+from einops import rearrange
+from abc import abstractmethod
+
+import torch as th
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def load_torch_file(ckpt, safe_load=False, device=None):
@@ -43,10 +60,6 @@ def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
 
 
 def repeat_to_batch_size(tensor, batch_size):
-    if tensor.shape[0] > batch_size:
-        return tensor[:batch_size]
-    elif tensor.shape[0] < batch_size:
-        return tensor.repeat([math.ceil(batch_size / tensor.shape[0])] + [1] * (len(tensor.shape) - 1))[:batch_size]
     return tensor
 
 
@@ -64,14 +77,7 @@ class ProgressBar:
     def update_absolute(self, value, total=None, preview=None):
         if total is not None:
             self.total = total
-        if value > self.total:
-            value = self.total
         self.current = value
-        if self.hook is not None:
-            self.hook(self.current, self.total, preview)
-
-    def update(self, value):
-        self.update_absolute(self.current + value)
 
 
 class LatentFormat:
@@ -99,36 +105,20 @@ class SD15(LatentFormat):
         self.taesd_decoder_name = "taesd_decoder"
 
 
-# Start with the imports and functions from `comfy/ldm_util.py`
-import importlib
+
 
 
 def exists(x):
-    return x is not None
+    pass
 
 
 def instantiate_from_config(config):
-    if not "target" in config:
-        if config == '__is_first_stage__':
-            return None
-        elif config == "__is_unconditional__":
-            return None
-        raise KeyError("Expected key `target` to instantiate.")
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
 
 def get_obj_from_str(string, reload=False):
     module, cls = string.rsplit(".", 1)
-    if reload:
-        module_imp = importlib.import_module(module)
-        importlib.reload(module_imp)
     return getattr(importlib.import_module(module, package=None), cls)
-
-
-# Then add the imports and classes from `comfy/autoencoder.py`
-from typing import Dict, Union
-
-import torch
 
 
 class DiagonalGaussianRegularizer(torch.nn.Module):
@@ -155,8 +145,6 @@ class AbstractAutoencoder(torch.nn.Module):
 
         self.input_key = input_key
         self.use_ema = ema_decay is not None
-        if monitor is not None:
-            self.monitor = monitor
 
 
 class AutoencodingEngine(AbstractAutoencoder):
@@ -198,36 +186,17 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
             },
             **kwargs,
         )
-        self.quant_conv = torch.nn.Conv2d(
-            (1 + ddconfig["double_z"]) * ddconfig["z_channels"],
-            (1 + ddconfig["double_z"]) * embed_dim,
-            1,
-        )
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
         self.embed_dim = embed_dim
 
     def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
-        if self.max_batch_size is None:
-            dec = self.post_quant_conv(z)
-            dec = self.decoder(dec, **decoder_kwargs)
-        else:
-            N = z.shape[0]
-            bs = self.max_batch_size
-            n_batches = int(math.ceil(N / bs))
-            dec = list()
-            for i_batch in range(n_batches):
-                dec_batch = self.post_quant_conv(z[i_batch * bs: (i_batch + 1) * bs])
-                dec_batch = self.decoder(dec_batch, **decoder_kwargs)
-                dec.append(dec_batch)
-            dec = torch.cat(dec, 0)
-
+        dec = self.post_quant_conv(z)
+        dec = self.decoder(dec, **decoder_kwargs)
         return dec
 
 
 class AutoencoderKL(AutoencodingEngineLegacy):
     def __init__(self, **kwargs):
-        if "lossconfig" in kwargs:
-            kwargs["loss_config"] = kwargs.pop("lossconfig")
         super().__init__(
             regularizer_config={
                 "target": (
@@ -238,9 +207,7 @@ class AutoencoderKL(AutoencodingEngineLegacy):
         )
 
 
-from contextlib import contextmanager
 
-import torch
 
 
 class Linear(torch.nn.Linear):
@@ -258,10 +225,6 @@ class Conv3d(torch.nn.Conv3d):
 def conv_nd(dims, *args, **kwargs):
     if dims == 2:
         return Conv2d(*args, **kwargs)
-    elif dims == 3:
-        return Conv3d(*args, **kwargs)
-    else:
-        raise ValueError(f"unsupported dimensions: {dims}")
 
 
 @contextmanager
@@ -284,9 +247,6 @@ def use_comfy_ops(device=None, dtype=None):  # Kind of an ugly hack but I can't 
         torch.nn.Linear = old_torch_nn_linear
 
 
-import torch
-from torch import nn
-from tqdm.auto import tqdm
 
 
 def append_zero(x):
@@ -380,7 +340,7 @@ class DPMSolver(nn.Module):
         u1 = x - self.sigma(s1) * (r1 * h).expm1() * eps
         eps_r1, eps_cache = self.eps(eps_cache, 'eps_r1', u1, s1)
         u2 = x - self.sigma(s2) * (r2 * h).expm1() * eps - self.sigma(s2) * (r2 / r1) * (
-                    (r2 * h).expm1() / (r2 * h) - 1) * (eps_r1 - eps)
+                (r2 * h).expm1() / (r2 * h) - 1) * (eps_r1 - eps)
         eps_r2, eps_cache = self.eps(eps_cache, 'eps_r2', u2, s2)
         x_3 = x - self.sigma(t_next) * h.expm1() * eps - self.sigma(t_next) / r2 * (h.expm1() / h - 1) * (eps_r2 - eps)
         return x_3, eps_cache
@@ -388,11 +348,7 @@ class DPMSolver(nn.Module):
     def dpm_solver_adaptive(self, x, t_start, t_end, order=3, rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1.,
                             dcoeff=0., accept_safety=0.81, eta=0., s_noise=1., noise_sampler=None):
         noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
-        if order not in {2, 3}:
-            raise ValueError('order should be 2 or 3')
         forward = t_end > t_start
-        if not forward and eta:
-            raise ValueError('eta must be 0 for reverse sampling')
         h_init = abs(h_init) * (1 if forward else -1)
         atol = torch.tensor(atol)
         rtol = torch.tensor(rtol)
@@ -420,8 +376,6 @@ class DPMSolver(nn.Module):
                 x = x_high + su * s_noise * noise_sampler(self.sigma(s), self.sigma(t))
                 s = t
                 info['n_accept'] += 1
-            else:
-                info['n_reject'] += 1
             info['nfe'] += order
             info['steps'] += 1
 
@@ -438,8 +392,6 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
                         rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1., dcoeff=0., accept_safety=0.81,
                         eta=0., s_noise=1., noise_sampler=None, return_info=False):
     """DPM-Solver-12 and 23 (adaptive step size). See https://arxiv.org/abs/2206.00927."""
-    if sigma_min <= 0 or sigma_max <= 0:
-        raise ValueError('sigma_min and sigma_max must not be 0')
     with tqdm(disable=disable) as pbar:
         dpm_solver = DPMSolver(model, extra_args, eps_callback=pbar.update)
         if callback is not None:
@@ -448,8 +400,6 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
         x, info = dpm_solver.dpm_solver_adaptive(x, dpm_solver.t(torch.tensor(sigma_max)),
                                                  dpm_solver.t(torch.tensor(sigma_min)), order, rtol, atol, h_init,
                                                  pcoeff, icoeff, dcoeff, accept_safety, eta, s_noise, noise_sampler)
-    if return_info:
-        return x, info
     return x
 
 
@@ -472,14 +422,6 @@ class CONDCrossAttn(CONDRegular):
     def can_concat(self, other):
         s1 = self.cond.shape
         s2 = other.cond.shape
-        if s1 != s2:
-            if s1[0] != s2[0] or s1[2] != s2[2]:  # these 2 cases should not happen
-                return False
-
-            mult_min = lcm(s1[1], s2[1])
-            diff = mult_min // min(s1[1], s2[1])
-            if diff > 4:  # arbitrary limit on the padding because it's probably going to impact performance negatively if it's too much
-                return False
         return True
 
     def concat(self, others):
@@ -498,77 +440,24 @@ class CONDCrossAttn(CONDRegular):
         return torch.cat(out)
 
 
-# adopted from
-# https://github.com/openai/improved-diffusion/blob/main/improved_diffusion/gaussian_diffusion.py
-# and
-# https://github.com/lucidrains/denoising-diffusion-pytorch/blob/7706bdfc6f527f58d33f84b7b522e61e6e3164b3/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
-# and
-# https://github.com/openai/guided-diffusion/blob/0ba878e517b276c45d1195eb29f6f5f72659a05b/guided_diffusion/nn.py
-#
-# thanks!
-
-
-from einops import repeat
-
-
 def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
-    if schedule == "linear":
-        betas = (
+    betas = (
                 torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
-        )
-
-    elif schedule == "cosine":
-        timesteps = (
-                torch.arange(n_timestep + 1, dtype=torch.float64) / n_timestep + cosine_s
-        )
-        alphas = timesteps / (1 + cosine_s) * np.pi / 2
-        alphas = torch.cos(alphas).pow(2)
-        alphas = alphas / alphas[0]
-        betas = 1 - alphas[1:] / alphas[:-1]
-        betas = np.clip(betas, a_min=0, a_max=0.999)
-
-    elif schedule == "sqrt_linear":
-        betas = torch.linspace(linear_start, linear_end, n_timestep, dtype=torch.float64)
-    elif schedule == "sqrt":
-        betas = torch.linspace(linear_start, linear_end, n_timestep, dtype=torch.float64) ** 0.5
-    else:
-        raise ValueError(f"schedule '{schedule}' unknown.")
+    )
     return betas.numpy()
 
 
 def checkpoint(func, inputs, params, flag):
-    """
-    Evaluate a function without caching intermediate activations, allowing for
-    reduced memory at the expense of extra compute in the backward pass.
-    :param func: the function to evaluate.
-    :param inputs: the argument sequence to pass to `func`.
-    :param params: a sequence of parameters `func` depends on but does not
-                   explicitly take as arguments.
-    :param flag: if False, disable gradient checkpointing.
-    """
     return func(*inputs)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    """
-    Create sinusoidal timestep embeddings.
-    :param timesteps: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an [N x dim] Tensor of positional embeddings.
-    """
-    if not repeat_only:
-        half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device) / half
-        )
-        args = timesteps[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    else:
-        embedding = repeat(timesteps, 'b -> b d', d=dim)
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device) / half
+    )
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     return embedding
 
 
@@ -581,8 +470,7 @@ def zero_module(module):
     return module
 
 
-import psutil
-import torch
+
 
 # Determine VRAM State
 vram_state = 3
@@ -591,39 +479,12 @@ cpu_state = 0
 
 total_vram = 0
 
-lowvram_available = True
-xpu_available = False
-
-directml_enabled = False
-try:
-    import intel_extension_for_pytorch as ipex
-
-    if torch.xpu.is_available():
-        xpu_available = True
-except:
-    pass
-
-
-def is_intel_xpu():
-    global cpu_state
-    global xpu_available
-    if cpu_state == 0:
-        if xpu_available:
-            return True
-    return False
 
 
 def get_torch_device():
     global directml_enabled
     global cpu_state
-    if directml_enabled:
-        global directml_device
-        return directml_device
-    else:
-        if is_intel_xpu():
-            return torch.device("xpu")
-        else:
-            return torch.device(torch.cuda.current_device())
+    return torch.device(torch.cuda.current_device())
 
 
 total_ram = psutil.virtual_memory().total / (1024 * 1024)
@@ -634,48 +495,25 @@ try:
 except:
     OOM_EXCEPTION = Exception
 
-XFORMERS_VERSION = ""
 XFORMERS_ENABLED_VAE = True
-try:
-    import xformers
-    import xformers.ops
 
-    XFORMERS_IS_AVAILABLE = True
-    try:
-        XFORMERS_VERSION = xformers.version.__version__
-        print("xformers version:", XFORMERS_VERSION)
-        if XFORMERS_VERSION.startswith("0.0.18"):
-            print()
-            print(
-                "WARNING: This version of xformers has a major bug where you will get black images when generating high resolution images.")
-            print("Please downgrade or upgrade xformers to a different version.")
-            print()
-            XFORMERS_ENABLED_VAE = False
-    except:
-        pass
-except:
-    XFORMERS_IS_AVAILABLE = False
+import xformers.ops
+
+XFORMERS_IS_AVAILABLE = True
+XFORMERS_VERSION = xformers.version.__version__
+print("xformers version:", XFORMERS_VERSION)
+
 
 
 def is_nvidia():
     global cpu_state
-    if cpu_state == 0:
-        if torch.version.cuda:
-            return True
-    return False
+    if torch.version.cuda:
+        return True
 
 
 ENABLE_PYTORCH_ATTENTION = False
 
 VAE_DTYPE = torch.float32
-
-if is_intel_xpu():
-    VAE_DTYPE = torch.bfloat16
-
-if ENABLE_PYTORCH_ATTENTION:
-    torch.backends.cuda.enable_math_sdp(True)
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 FORCE_FP32 = False
 FORCE_FP16 = False
@@ -689,14 +527,9 @@ class LoadedModel:
         self.model_accelerated = False
         self.device = model.load_device
 
-    def model_memory(self):
-        return self.model.model_size()
-
     def model_memory_required(self, device):
         if device == self.model.current_device:
             return 0
-        else:
-            return self.model_memory()
 
     def model_load(self, lowvram_model_memory=0):
         patch_model_to = None
@@ -706,13 +539,8 @@ class LoadedModel:
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
-        try:
-            self.real_model = self.model.patch_model(
+        self.real_model = self.model.patch_model(
                 device_to=patch_model_to)  # TODO: do something with loras and offloading to CPU
-        except Exception as e:
-            self.model.unpatch_model(self.model.offload_device)
-            self.model_unload()
-            raise e
 
         if lowvram_model_memory > 0:
             print("loading in lowvram mode", lowvram_model_memory / (1024 * 1024))
@@ -720,9 +548,6 @@ class LoadedModel:
         return self.real_model
 
     def model_unload(self):
-        if self.model_accelerated:
-            self.model_accelerated = False
-
         self.model.unpatch_model(self.model.offload_device)
         self.model.model_patches_to(self.model.offload_device)
 
@@ -732,17 +557,6 @@ class LoadedModel:
 
 def minimum_inference_memory():
     return (1024 * 1024 * 1024)
-
-
-def unload_model_clones(model):
-    to_unload = []
-    for i in range(len(current_loaded_models)):
-        if model.is_clone(current_loaded_models[i].model):
-            to_unload = [i] + to_unload
-
-    for i in to_unload:
-        print("unload clone", i)
-        current_loaded_models.pop(i).model_unload()
 
 
 def free_memory1(memory_required, device, keep_loaded=[]):
@@ -796,7 +610,6 @@ def load_models_gpu(models, memory_required=0):
 
     total_memory_required = {}
     for loaded_model in models_to_load:
-        unload_model_clones(loaded_model.model)
         total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
                                                                                0) + loaded_model.model_memory_required(
             loaded_model.device)
@@ -810,7 +623,7 @@ def load_models_gpu(models, memory_required=0):
         torch_dev = model.load_device
         vram_set_state = vram_state
         lowvram_model_memory = 0
-        if lowvram_available and (vram_set_state == 2 or vram_set_state == 3):
+        if (vram_set_state == 2 or vram_set_state == 3):
             model_size = loaded_model.model_memory_required(torch_dev)
             current_free_mem = get_free_memory(torch_dev)
             lowvram_model_memory = int(max(256 * (1024 * 1024), (current_free_mem - 1024 * (1024 * 1024)) / 1.3))
@@ -818,9 +631,6 @@ def load_models_gpu(models, memory_required=0):
                 vram_set_state = 2
             else:
                 lowvram_model_memory = 0
-
-        if vram_set_state == 1:
-            lowvram_model_memory = 256 * 1024 * 1024
 
         cur_loaded_model = loaded_model.model_load(lowvram_model_memory)
         current_loaded_models.insert(0, loaded_model)
@@ -839,16 +649,11 @@ def dtype_size(dtype):
 
 
 def unet_offload_device():
-    if vram_state == 4:
-        return get_torch_device()
-    else:
-        return torch.device("cpu")
+    return torch.device("cpu")
 
 
 def unet_inital_load_device(parameters, dtype):
     torch_dev = get_torch_device()
-    if vram_state == 4:
-        return torch_dev
 
     cpu_dev = torch.device("cpu")
 
@@ -858,14 +663,11 @@ def unet_inital_load_device(parameters, dtype):
     mem_cpu = get_free_memory(cpu_dev)
     if mem_dev > mem_cpu and model_size < mem_dev:
         return torch_dev
-    else:
-        return cpu_dev
 
 
 def unet_dtype1(device=None, model_params=0):
     if should_use_fp16(device=device, model_params=model_params):
         return torch.float16
-    return torch.float32
 
 
 def text_encoder_offload_device():
@@ -873,15 +675,7 @@ def text_encoder_offload_device():
 
 
 def text_encoder_device():
-    if vram_state == 4 or vram_state == 4:
-        if is_intel_xpu():
-            return torch.device("cpu")
-        if should_use_fp16(prioritize_performance=False):
-            return get_torch_device()
-        else:
-            return torch.device("cpu")
-    else:
-        return torch.device("cpu")
+    return torch.device("cpu")
 
 
 def vae_device():
@@ -900,31 +694,20 @@ def vae_dtype():
 def get_autocast_device(dev):
     if hasattr(dev, 'type'):
         return dev.type
-    return "cuda"
 
 
 def xformers_enabled():
     global directml_enabled
     global cpu_state
-    if cpu_state != 0:
-        return False
-    if is_intel_xpu():
-        return False
-    if directml_enabled:
-        return False
     return XFORMERS_IS_AVAILABLE
 
 
 def xformers_enabled_vae():
     enabled = xformers_enabled()
-    if not enabled:
-        return False
-
     return XFORMERS_ENABLED_VAE
 
 
 def get_free_memory(dev=None, torch_free_too=False):
-    global directml_enabled
     if dev is None:
         dev = get_torch_device()
 
@@ -932,23 +715,12 @@ def get_free_memory(dev=None, torch_free_too=False):
         mem_free_total = psutil.virtual_memory().available
         mem_free_torch = mem_free_total
     else:
-        if directml_enabled:
-            mem_free_total = 1024 * 1024 * 1024  # TODO
-            mem_free_torch = mem_free_total
-        elif is_intel_xpu():
-            stats = torch.xpu.memory_stats(dev)
-            mem_active = stats['active_bytes.all.current']
-            mem_allocated = stats['allocated_bytes.all.current']
-            mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_torch = mem_reserved - mem_active
-            mem_free_total = torch.xpu.get_device_properties(dev).total_memory - mem_allocated
-        else:
-            stats = torch.cuda.memory_stats(dev)
-            mem_active = stats['active_bytes.all.current']
-            mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
-            mem_free_torch = mem_reserved - mem_active
-            mem_free_total = mem_free_cuda + mem_free_torch
+        stats = torch.cuda.memory_stats(dev)
+        mem_active = stats['active_bytes.all.current']
+        mem_reserved = stats['reserved_bytes.all.current']
+        mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
+        mem_free_torch = mem_reserved - mem_active
+        mem_free_total = mem_free_cuda + mem_free_torch
 
     if torch_free_too:
         return (mem_free_total, mem_free_torch)
@@ -960,22 +732,13 @@ def batch_area_memory(area):
     if xformers_enabled():
         # TODO: these formulas are copied from maximum_batch_area below
         return (area / 20) * (1024 * 1024)
-    else:
-        return (((area * 0.6) / 0.9) + 1024) * (1024 * 1024)
 
 
 def maximum_batch_area():
     global vram_state
-    if vram_state == 1:
-        return 0
 
     memory_free = get_free_memory() / (1024 * 1024)
-    if xformers_enabled():
-        # TODO: this needs to be tweaked
-        area = 20 * memory_free
-    else:
-        # TODO: this formula is because AMD sucks and has memory management issues which might be fixed in the future
-        area = ((memory_free - 1024) * 0.9) / (0.6)
+    area = 20 * memory_free
     return int(max(area, 0))
 
 
@@ -993,14 +756,6 @@ def is_device_cpu(device):
     if hasattr(device, 'type'):
         if (device.type == 'cpu'):
             return True
-    return False
-
-
-def is_device_mps(device):
-    if hasattr(device, 'type'):
-        if (device.type == 'mps'):
-            return True
-    return False
 
 
 def should_use_fp16(device=None, model_params=0, prioritize_performance=True):
@@ -1010,67 +765,13 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True):
         if is_device_cpu(device):
             return False
 
-    if FORCE_FP16:
-        return True
-
-    if device is not None:  # TODO
-        if is_device_mps(device):
-            return False
-
-    if FORCE_FP32:
-        return False
-
-    if directml_enabled:
-        return False
-
-    if cpu_mode() or mps_mode():
-        return False  # TODO ?
-
-    if is_intel_xpu():
-        return True
-
     if torch.cuda.is_bf16_supported():
         return True
-
-    props = torch.cuda.get_device_properties("cuda")
-    if props.major < 6:
-        return False
-
-    fp16_works = False
-    # FP16 is confirmed working on a 1080 (GP104) but it's a bit slower than FP32 so it should only be enabled
-    # when the model doesn't actually fit on the card
-    # TODO: actually test if GP106 and others have the same type of behavior
-    nvidia_10_series = ["1080", "1070", "titan x", "p3000", "p3200", "p4000", "p4200", "p5000", "p5200", "p6000",
-                        "1060", "1050"]
-    for x in nvidia_10_series:
-        if x in props.name.lower():
-            fp16_works = True
-
-    if fp16_works:
-        free_model_memory = (get_free_memory() * 0.9 - minimum_inference_memory())
-        if (not prioritize_performance) or model_params * 4 > free_model_memory:
-            return True
-
-    if props.major < 7:
-        return False
-
-    # FP16 is just broken on these cards
-    nvidia_16_series = ["1660", "1650", "1630", "T500", "T550", "T600", "MX550", "MX450", "CMP 30HX", "T2000", "T1000",
-                        "T1200"]
-    for x in nvidia_16_series:
-        if x in props.name:
-            return False
-
-    return True
 
 
 def soft_empty_cache(force=False):
     global cpu_state
-    if cpu_state == 2:
-        torch.mps.empty_cache()
-    elif is_intel_xpu():
-        torch.xpu.empty_cache()
-    elif torch.cuda.is_available():
+    if torch.cuda.is_available():
         if force or is_nvidia():  # This seems to make things worse on ROCm so I only do it for cuda
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -1096,8 +797,6 @@ class ModelPatcher:
         self.weight_inplace_update = weight_inplace_update
 
     def model_size(self):
-        if self.size > 0:
-            return self.size
         model_sd = self.model.state_dict()
         size = 0
         for k in model_sd:
@@ -1108,30 +807,10 @@ class ModelPatcher:
         return size
 
     def is_clone(self, other):
-        if hasattr(other, 'model') and self.model is other.model:
-            return True
         return False
 
     def model_patches_to(self, device):
         to = self.model_options["transformer_options"]
-        if "patches" in to:
-            patches = to["patches"]
-            for name in patches:
-                patch_list = patches[name]
-                for i in range(len(patch_list)):
-                    if hasattr(patch_list[i], "to"):
-                        patch_list[i] = patch_list[i].to(device)
-        if "patches_replace" in to:
-            patches = to["patches_replace"]
-            for name in patches:
-                patch_list = patches[name]
-                for k in patch_list:
-                    if hasattr(patch_list[k], "to"):
-                        patch_list[k] = patch_list[k].to(device)
-        if "model_function_wrapper" in self.model_options:
-            wrap_func = self.model_options["model_function_wrapper"]
-            if hasattr(wrap_func, "to"):
-                self.model_options["model_function_wrapper"] = wrap_func.to(device)
 
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
@@ -1140,79 +819,24 @@ class ModelPatcher:
     def model_state_dict(self, filter_prefix=None):
         sd = self.model.state_dict()
         keys = list(sd.keys())
-        if filter_prefix is not None:
-            for k in keys:
-                if not k.startswith(filter_prefix):
-                    sd.pop(k)
         return sd
 
     def patch_model(self, device_to=None):
-        for k in self.object_patches:
-            old = getattr(self.model, k)
-            if k not in self.object_patches_backup:
-                self.object_patches_backup[k] = old
-            setattr(self.model, k, self.object_patches[k])
-
         model_sd = self.model_state_dict()
-        for key in self.patches:
-            if key not in model_sd:
-                print("could not patch. key doesn't exist in model:", key)
-                continue
-
-            weight = model_sd[key]
-
-            inplace_update = self.weight_inplace_update
-
-            if key not in self.backup:
-                self.backup[key] = weight.to(device=device_to, copy=inplace_update)
-
-            if device_to is not None:
-                temp_weight = cast_to_device(weight, device_to, torch.float32, copy=True)
-            else:
-                temp_weight = weight.to(torch.float32, copy=True)
-            out_weight = self.calculate_weight(self.patches[key], temp_weight, key).to(weight.dtype)
-            if inplace_update:
-                copy_to_param(self.model, key, out_weight)
-            else:
-                set_attr(self.model, key, out_weight)
-            del temp_weight
-
         if device_to is not None:
             self.model.to(device_to)
             self.current_device = device_to
-
         return self.model
 
     def unpatch_model(self, device_to=None):
         keys = list(self.backup.keys())
-
-        if self.weight_inplace_update:
-            for k in keys:
-                copy_to_param(self.model, k, self.backup[k])
-        else:
-            for k in keys:
-                set_attr(self.model, k, self.backup[k])
-
         self.backup = {}
 
         if device_to is not None:
             self.model.to(device_to)
             self.current_device = device_to
 
-        keys = list(self.object_patches_backup.keys())
-        for k in keys:
-            setattr(self.model, k, self.object_patches_backup[k])
-
         self.object_patches_backup = {}
-
-
-# pytorch_diffusion + derived encoder decoder
-
-import torch.nn as nn
-
-if xformers_enabled_vae():
-    import xformers
-    import xformers.ops
 
 
 def nonlinearity(x):
@@ -1220,51 +844,11 @@ def nonlinearity(x):
     return x * torch.sigmoid(x)
 
 
-def Normalize(in_channels, num_groups=32):
-    return torch.nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True)
-
-
 class Upsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            self.conv = Conv2d(in_channels,
-                               in_channels,
-                               kernel_size=3,
-                               stride=1,
-                               padding=1)
-
-    def forward(self, x):
-        try:
-            x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
-        except:  # operation not implemented for bf16
-            b, c, h, w = x.shape
-            out = torch.empty((b, c, h * 2, w * 2), dtype=x.dtype, layout=x.layout, device=x.device)
-            split = 8
-            l = out.shape[1] // split
-            for i in range(0, out.shape[1], l):
-                out[:, i:i + l] = torch.nn.functional.interpolate(x[:, i:i + l].to(torch.float32), scale_factor=2.0,
-                                                                  mode="nearest").to(x.dtype)
-            del x
-            x = out
-
-        if self.with_conv:
-            x = self.conv(x)
-        return x
-
+    pass
 
 class Downsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = Conv2d(in_channels,
-                               in_channels,
-                               kernel_size=3,
-                               stride=2,
-                               padding=0)
+    pass
 
 
 class ResnetBlock(nn.Module):
@@ -1283,9 +867,6 @@ class ResnetBlock(nn.Module):
                             kernel_size=3,
                             stride=1,
                             padding=1)
-        if temb_channels > 0:
-            self.temb_proj = Linear(temb_channels,
-                                    out_channels)
         self.norm2 = Normalize(out_channels)
         self.dropout = torch.nn.Dropout(dropout, inplace=True)
         self.conv2 = Conv2d(out_channels,
@@ -1294,14 +875,7 @@ class ResnetBlock(nn.Module):
                             stride=1,
                             padding=1)
         if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                self.conv_shortcut = Conv2d(in_channels,
-                                            out_channels,
-                                            kernel_size=3,
-                                            stride=1,
-                                            padding=1)
-            else:
-                self.nin_shortcut = Conv2d(in_channels,
+            self.nin_shortcut = Conv2d(in_channels,
                                            out_channels,
                                            kernel_size=1,
                                            stride=1,
@@ -1313,19 +887,13 @@ class ResnetBlock(nn.Module):
         h = self.swish(h)
         h = self.conv1(h)
 
-        if temb is not None:
-            h = h + self.temb_proj(self.swish(temb))[:, :, None, None]
-
         h = self.norm2(h)
         h = self.swish(h)
         h = self.dropout(h)
         h = self.conv2(h)
 
         if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                x = self.conv_shortcut(x)
-            else:
-                x = self.nin_shortcut(x)
+            x = self.nin_shortcut(x)
 
         return x + h
 
@@ -1427,8 +995,6 @@ class Encoder(nn.Module):
                                          temb_channels=self.temb_ch,
                                          dropout=dropout))
                 block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(make_attn(block_in, attn_type=attn_type))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -1516,8 +1082,6 @@ class Decoder(nn.Module):
                                        temb_channels=self.temb_ch,
                                        dropout=dropout))
                 block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(attn_op(block_in))
             up = nn.Module()
             up.block = block
             up.attn = attn
@@ -1552,24 +1116,15 @@ class Decoder(nn.Module):
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h, temb, **kwargs)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h, **kwargs)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
         # end
-        if self.give_pre_end:
-            return h
 
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h, **kwargs)
-        if self.tanh_out:
-            h = torch.tanh(h)
         return h
-
-
-import torch
 
 
 class EPS:
@@ -1594,23 +1149,15 @@ class ModelSamplingDiscrete(torch.nn.Module):
 
     def _register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                            linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
-        if given_betas is not None:
-            betas = given_betas
-        else:
-            betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end,
+        betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end,
                                        cosine_s=cosine_s)
         alphas = 1. - betas
         alphas_cumprod = torch.tensor(np.cumprod(alphas, axis=0), dtype=torch.float32)
-        # alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
 
         timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
         self.linear_start = linear_start
         self.linear_end = linear_end
-
-        # self.register_buffer('betas', torch.tensor(betas, dtype=torch.float32))
-        # self.register_buffer('alphas_cumprod', torch.tensor(alphas_cumprod, dtype=torch.float32))
-        # self.register_buffer('alphas_cumprod_prev', torch.tensor(alphas_cumprod_prev, dtype=torch.float32))
 
         sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
         self.set_sigmas(sigmas)
@@ -1631,13 +1178,6 @@ class ModelSamplingDiscrete(torch.nn.Module):
         log_sigma = sigma.log()
         dists = log_sigma.to(self.log_sigmas.device) - self.log_sigmas[:, None]
         return dists.abs().argmin(dim=0).view(sigma.shape)
-
-
-import contextlib
-import os
-
-import torch
-from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 
 
 def gen_empty_tokens(special_tokens, length):
@@ -1671,8 +1211,6 @@ class ClipTokenWeightEncoder:
         out, pooled = self.encode(to_encode)
         if pooled is not None:
             first_pooled = pooled[0:1].cpu()
-        else:
-            first_pooled = pooled
 
         output = []
         for k in range(0, sections):
@@ -1685,9 +1223,6 @@ class ClipTokenWeightEncoder:
                         if weight != 1.0:
                             z[i][j] = (z[i][j] - z_empty[j]) * weight + z_empty[j]
             output.append(z)
-
-        if (len(output) == 0):
-            return out[-1:].cpu(), first_pooled
         return torch.cat(output, dim=-2).cpu(), first_pooled
 
 
@@ -1707,17 +1242,15 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         super().__init__()
         assert layer in self.LAYERS
         self.num_layers = 12
-        if textmodel_path is not None:
-            self.transformer = model_class.from_pretrained(textmodel_path)
-        else:
-            if textmodel_json_config is None:
-                textmodel_json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+
+        if textmodel_json_config is None:
+            textmodel_json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)),
                                                      "sd1_clip_config.json")
-            config = config_class.from_json_file(textmodel_json_config)
-            self.num_layers = config.num_hidden_layers
-            with use_comfy_ops(device, dtype):
-                with modeling_utils.no_init_weights():
-                    self.transformer = model_class(config)
+        config = config_class.from_json_file(textmodel_json_config)
+        self.num_layers = config.num_hidden_layers
+        with use_comfy_ops(device, dtype):
+            with modeling_utils.no_init_weights():
+                self.transformer = model_class(config)
 
         self.inner_name = inner_name
         if dtype is not None:
@@ -1725,8 +1258,6 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
             inner_model = getattr(self.transformer, self.inner_name)
             if hasattr(inner_model, "embeddings"):
                 inner_model.embeddings.to(torch.float32)
-            else:
-                self.transformer.set_input_embeddings(self.transformer.get_input_embeddings().to(torch.float32))
 
         self.max_length = max_length
         if freeze:
@@ -1738,10 +1269,6 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.enable_attention_masks = False
 
         self.layer_norm_hidden_state = layer_norm_hidden_state
-        if layer == "hidden":
-            assert layer_idx is not None
-            assert abs(layer_idx) <= self.num_layers
-            self.clip_layer(layer_idx)
         self.layer_default = (self.layer, self.layer_idx)
 
     def freeze(self):
@@ -1766,28 +1293,9 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                     if y == token_dict_size:  # EOS token
                         y = -1
                     tokens_temp += [y]
-                else:
-                    if y.shape[0] == current_embeds.weight.shape[1]:
-                        embedding_weights += [y]
-                        tokens_temp += [next_new_token]
-                        next_new_token += 1
-                    else:
-                        print("WARNING: shape mismatch when trying to apply embedding, embedding will be ignored",
-                              y.shape[0], current_embeds.weight.shape[1])
-            while len(tokens_temp) < len(x):
-                tokens_temp += [self.special_tokens["pad"]]
             out_tokens += [tokens_temp]
 
         n = token_dict_size
-        if len(embedding_weights) > 0:
-            new_embedding = torch.nn.Embedding(next_new_token + 1, current_embeds.weight.shape[1],
-                                               device=current_embeds.weight.device, dtype=current_embeds.weight.dtype)
-            new_embedding.weight[:token_dict_size] = current_embeds.weight[:-1]
-            for x in embedding_weights:
-                new_embedding.weight[n] = x
-                n += 1
-            new_embedding.weight[n] = current_embeds.weight[-1]  # EOS embedding
-            self.transformer.set_input_embeddings(new_embedding)
 
         processed_tokens = []
         for x in out_tokens:
@@ -1802,21 +1310,10 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         tokens = self.set_up_textual_embeddings(tokens, backup_embeds)
         tokens = torch.LongTensor(tokens).to(device)
 
-        if getattr(self.transformer, self.inner_name).final_layer_norm.weight.dtype != torch.float32:
-            precision_scope = torch.autocast
-        else:
-            precision_scope = lambda a, b: contextlib.nullcontext(a)
+        precision_scope = lambda a, b: contextlib.nullcontext(a)
 
         with precision_scope(get_autocast_device(device), torch.float32):
             attention_mask = None
-            if self.enable_attention_masks:
-                attention_mask = torch.zeros_like(tokens)
-                max_token = self.transformer.get_input_embeddings().weight.shape[0] - 1
-                for x in range(attention_mask.shape[0]):
-                    for y in range(attention_mask.shape[1]):
-                        attention_mask[x, y] = 1
-                        if tokens[x, y] == max_token:
-                            break
 
             outputs = self.transformer(input_ids=tokens, attention_mask=attention_mask,
                                        output_hidden_states=self.layer == "hidden")
@@ -1824,17 +1321,9 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
 
             if self.layer == "last":
                 z = outputs.last_hidden_state
-            elif self.layer == "pooled":
-                z = outputs.pooler_output[:, None, :]
-            else:
-                z = outputs.hidden_states[self.layer_idx]
-                if self.layer_norm_hidden_state:
-                    z = getattr(self.transformer, self.inner_name).final_layer_norm(z)
 
             if hasattr(outputs, "pooler_output"):
                 pooled_output = outputs.pooler_output.float()
-            else:
-                pooled_output = None
 
             if self.text_projection is not None and pooled_output is not None:
                 pooled_output = pooled_output.float().to(self.text_projection.device) @ self.text_projection.float()
@@ -1883,11 +1372,8 @@ def token_weights(string, current_weight):
             xx = x.rfind(":")
             weight *= 1.1
             if xx > 0:
-                try:
-                    weight = float(x[xx + 1:])
-                    x = x[:xx]
-                except:
-                    pass
+                weight = float(x[xx + 1:])
+                x = x[:xx]
             out += token_weights(x, weight)
         else:
             out += [(x, current_weight)]
@@ -1920,10 +1406,6 @@ class SDTokenizer:
             self.tokens_start = 1
             self.start_token = empty[0]
             self.end_token = empty[1]
-        else:
-            self.tokens_start = 0
-            self.start_token = None
-            self.end_token = empty[0]
         self.pad_with_end = pad_with_end
         self.pad_to_max_length = pad_to_max_length
 
@@ -1944,8 +1426,6 @@ class SDTokenizer:
         '''
         if self.pad_with_end:
             pad_token = self.end_token
-        else:
-            pad_token = 0
 
         text = escape_important(text)
         parsed_weights = token_weights(text, 1.0)
@@ -1956,23 +1436,6 @@ class SDTokenizer:
             to_tokenize = unescape_important(weighted_segment).replace("\n", " ").split(' ')
             to_tokenize = [x for x in to_tokenize if x != ""]
             for word in to_tokenize:
-                # if we find an embedding, deal with the embedding
-                if word.startswith(self.embedding_identifier) and self.embedding_directory is not None:
-                    embedding_name = word[len(self.embedding_identifier):].strip('\n')
-                    embed, leftover = self._try_get_embedding(embedding_name)
-                    if embed is None:
-                        print(f"warning, embedding:{embedding_name} does not exist, ignoring")
-                    else:
-                        if len(embed.shape) == 1:
-                            tokens.append([(embed, weight)])
-                        else:
-                            tokens.append([(embed[x], weight) for x in range(embed.shape[0])])
-                    # if we accidentally have leftover text, continue parsing using leftover, else move on to next word
-                    if leftover != "":
-                        word = leftover
-                    else:
-                        continue
-                # parse word
                 tokens.append([(t, weight) for t in self.tokenizer(word)["input_ids"][self.tokens_start:-1]])
 
         # reshape token array to CLIP input size
@@ -1989,15 +1452,10 @@ class SDTokenizer:
                 if len(t_group) + len(batch) > self.max_length - 1:
                     remaining_length = self.max_length - len(batch) - 1
                     # break word in two and add end token
-                    if is_large:
-                        batch.extend([(t, w, i + 1) for t, w in t_group[:remaining_length]])
-                        batch.append((self.end_token, 1.0, 0))
-                        t_group = t_group[remaining_length:]
                     # add end token and pad
-                    else:
-                        batch.append((self.end_token, 1.0, 0))
-                        if self.pad_to_max_length:
-                            batch.extend([(pad_token, 1.0, 0)] * (remaining_length))
+                    batch.append((self.end_token, 1.0, 0))
+                    if self.pad_to_max_length:
+                        batch.extend([(pad_token, 1.0, 0)] * (remaining_length))
                     # start new batch
                     batch = []
                     if self.start_token is not None:
@@ -2045,12 +1503,6 @@ class SD1ClipModel(torch.nn.Module):
         out, pooled = getattr(self, self.clip).encode_token_weights(token_weight_pairs)
         return out, pooled
 
-
-import math
-
-import torch
-
-
 # The main sampling function shared by all the samplers
 # Returns denoised
 def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None):
@@ -2058,49 +1510,9 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
         area = (x_in.shape[2], x_in.shape[3], 0, 0)
         strength = 1.0
 
-        if 'timestep_start' in conds:
-            timestep_start = conds['timestep_start']
-            if timestep_in[0] > timestep_start:
-                return None
-        if 'timestep_end' in conds:
-            timestep_end = conds['timestep_end']
-            if timestep_in[0] < timestep_end:
-                return None
-        if 'area' in conds:
-            area = conds['area']
-        if 'strength' in conds:
-            strength = conds['strength']
-
         input_x = x_in[:, :, area[2]:area[0] + area[2], area[3]:area[1] + area[3]]
-        if 'mask' in conds:
-            # Scale the mask to the size of the input
-            # The mask should have been resized as we began the sampling process
-            mask_strength = 1.0
-            if "mask_strength" in conds:
-                mask_strength = conds["mask_strength"]
-            mask = conds['mask']
-            assert (mask.shape[1] == x_in.shape[2])
-            assert (mask.shape[2] == x_in.shape[3])
-            mask = mask[:, area[2]:area[0] + area[2], area[3]:area[1] + area[3]] * mask_strength
-            mask = mask.unsqueeze(1).repeat(input_x.shape[0] // mask.shape[0], input_x.shape[1], 1, 1)
-        else:
-            mask = torch.ones_like(input_x)
+        mask = torch.ones_like(input_x)
         mult = mask * strength
-
-        if 'mask' not in conds:
-            rr = 8
-            if area[2] != 0:
-                for t in range(rr):
-                    mult[:, :, t:1 + t, :] *= ((1.0 / rr) * (t + 1))
-            if (area[0] + area[2]) < x_in.shape[2]:
-                for t in range(rr):
-                    mult[:, :, area[0] - 1 - t:area[0] - t, :] *= ((1.0 / rr) * (t + 1))
-            if area[3] != 0:
-                for t in range(rr):
-                    mult[:, :, :, t:1 + t] *= ((1.0 / rr) * (t + 1))
-            if (area[1] + area[3]) < x_in.shape[3]:
-                for t in range(rr):
-                    mult[:, :, :, area[1] - 1 - t:area[1] - t] *= ((1.0 / rr) * (t + 1))
 
         conditionning = {}
         model_conds = conds["model_conds"]
@@ -2108,52 +1520,17 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
             conditionning[c] = model_conds[c].process_cond(batch_size=x_in.shape[0], device=x_in.device, area=area)
 
         control = None
-        if 'control' in conds:
-            control = conds['control']
 
         patches = None
-        if 'gligen' in conds:
-            gligen = conds['gligen']
-            patches = {}
-            gligen_type = gligen[0]
-            gligen_model = gligen[1]
-            if gligen_type == "position":
-                gligen_patch = gligen_model.model.set_position(input_x.shape, gligen[2], input_x.device)
-            else:
-                gligen_patch = gligen_model.model.set_empty(input_x.shape, input_x.device)
-
-            patches['middle_patch'] = [gligen_patch]
 
         return (input_x, mult, conditionning, area, control, patches)
 
     def cond_equal_size(c1, c2):
         if c1 is c2:
             return True
-        if c1.keys() != c2.keys():
-            return False
-        for k in c1:
-            if not c1[k].can_concat(c2[k]):
-                return False
         return True
 
     def can_concat_cond(c1, c2):
-        if c1[0].shape != c2[0].shape:
-            return False
-
-        # control
-        if (c1[4] is None) != (c2[4] is None):
-            return False
-        if c1[4] is not None:
-            if c1[4] is not c2[4]:
-                return False
-
-        # patches
-        if (c1[5] is None) != (c2[5] is None):
-            return False
-        if (c1[5] is not None):
-            if c1[5] is not c2[5]:
-                return False
-
         return cond_equal_size(c1[2], c2[2])
 
     def cond_cat(c_list):
@@ -2189,15 +1566,11 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
         to_run = []
         for x in cond:
             p = get_area_and_mult(x, x_in, timestep)
-            if p is None:
-                continue
 
             to_run += [(p, COND)]
         if uncond is not None:
             for x in uncond:
                 p = get_area_and_mult(x, x_in, timestep)
-                if p is None:
-                    continue
 
                 to_run += [(p, UNCOND)]
 
@@ -2241,33 +1614,14 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
             c = cond_cat(c)
             timestep_ = torch.cat([timestep] * batch_chunks)
 
-            if control is not None:
-                c['control'] = control.get_control(input_x, timestep_, c, len(cond_or_uncond))
-
             transformer_options = {}
             if 'transformer_options' in model_options:
                 transformer_options = model_options['transformer_options'].copy()
 
-            if patches is not None:
-                if "patches" in transformer_options:
-                    cur_patches = transformer_options["patches"].copy()
-                    for p in patches:
-                        if p in cur_patches:
-                            cur_patches[p] = cur_patches[p] + patches[p]
-                        else:
-                            cur_patches[p] = patches[p]
-                else:
-                    transformer_options["patches"] = patches
-
             transformer_options["cond_or_uncond"] = cond_or_uncond[:]
             c['transformer_options'] = transformer_options
 
-            if 'model_function_wrapper' in model_options:
-                output = model_options['model_function_wrapper'](model_function,
-                                                                 {"input": input_x, "timestep": timestep_, "c": c,
-                                                                  "cond_or_uncond": cond_or_uncond}).chunk(batch_chunks)
-            else:
-                output = model_function(input_x, timestep_, **c).chunk(batch_chunks)
+            output = model_function(input_x, timestep_, **c).chunk(batch_chunks)
             del input_x
 
             for o in range(batch_chunks):
@@ -2281,7 +1635,7 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
                                                                                                                     o] * \
                                                                                                                 mult[o]
                     out_uncond_count[:, :, area[o][2]:area[o][0] + area[o][2], area[o][3]:area[o][1] + area[o][3]] += \
-                    mult[o]
+                        mult[o]
             del mult
 
         out_cond /= out_count
@@ -2291,16 +1645,9 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
         return out_cond, out_uncond
 
     max_total_area = maximum_batch_area()
-    if math.isclose(cond_scale, 1.0):
-        uncond = None
 
     cond, uncond = calc_cond_uncond_batch(model_function, cond, uncond, x, timestep, max_total_area, model_options)
-    if "sampler_cfg_function" in model_options:
-        args = {"cond": x - cond, "uncond": x - uncond, "cond_scale": cond_scale, "timestep": timestep, "input": x,
-                "sigma": timestep}
-        return x - model_options["sampler_cfg_function"](args)
-    else:
-        return uncond + (cond - uncond) * cond_scale
+    return uncond + (cond - uncond) * cond_scale
 
 
 class CFGNoisePredictor(torch.nn.Module):
@@ -2323,17 +1670,8 @@ class KSamplerX0Inpaint(torch.nn.Module):
         self.inner_model = model
 
     def forward(self, x, sigma, uncond, cond, cond_scale, denoise_mask, model_options={}, seed=None):
-        if denoise_mask is not None:
-            latent_mask = 1. - denoise_mask
-            x = x * denoise_mask + (self.latent_image + self.noise * sigma.reshape(
-                [sigma.shape[0]] + [1] * (len(self.noise.shape) - 1))) * latent_mask
         out = self.inner_model(x, sigma, cond=cond, uncond=uncond, cond_scale=cond_scale, model_options=model_options,
                                seed=seed)
-        if denoise_mask is not None:
-            out *= denoise_mask
-
-        if denoise_mask is not None:
-            out += self.latent_image * latent_mask
         return out
 
 
@@ -2342,74 +1680,11 @@ def resolve_areas_and_cond_masks(conditions, h, w, device):
     # While we're doing this, we can also resolve the mask device and scaling for performance reasons
     for i in range(len(conditions)):
         c = conditions[i]
-        if 'area' in c:
-            area = c['area']
-            if area[0] == "percentage":
-                modified = c.copy()
-                area = (max(1, round(area[1] * h)), max(1, round(area[2] * w)), round(area[3] * h), round(area[4] * w))
-                modified['area'] = area
-                c = modified
-                conditions[i] = c
-
-        if 'mask' in c:
-            mask = c['mask']
-            mask = mask.to(device=device)
-            modified = c.copy()
-            if len(mask.shape) == 2:
-                mask = mask.unsqueeze(0)
-            if mask.shape[1] != h or mask.shape[2] != w:
-                mask = torch.nn.functional.interpolate(mask.unsqueeze(1), size=(h, w), mode='bilinear',
-                                                       align_corners=False).squeeze(1)
-
-            if modified.get("set_area_to_bounds", False):
-                bounds = torch.max(torch.abs(mask), dim=0).values.unsqueeze(0)
-                boxes, is_empty = get_mask_aabb(bounds)
-                if is_empty[0]:
-                    # Use the minimum possible size for efficiency reasons. (Since the mask is all-0, this becomes a noop anyway)
-                    modified['area'] = (8, 8, 0, 0)
-                else:
-                    box = boxes[0]
-                    H, W, Y, X = (box[3] - box[1] + 1, box[2] - box[0] + 1, box[1], box[0])
-                    H = max(8, H)
-                    W = max(8, W)
-                    area = (int(H), int(W), int(Y), int(X))
-                    modified['area'] = area
-
-            modified['mask'] = mask
-            conditions[i] = modified
 
 
 def create_cond_with_same_area_if_none(conds, c):
     if 'area' not in c:
         return
-
-    c_area = c['area']
-    smallest = None
-    for x in conds:
-        if 'area' in x:
-            a = x['area']
-            if c_area[2] >= a[2] and c_area[3] >= a[3]:
-                if a[0] + a[2] >= c_area[0] + c_area[2]:
-                    if a[1] + a[3] >= c_area[1] + c_area[3]:
-                        if smallest is None:
-                            smallest = x
-                        elif 'area' not in smallest:
-                            smallest = x
-                        else:
-                            if smallest['area'][0] * smallest['area'][1] > a[0] * a[1]:
-                                smallest = x
-        else:
-            if smallest is None:
-                smallest = x
-    if smallest is None:
-        return
-    if 'area' in smallest:
-        if smallest['area'] == c_area:
-            return
-
-    out = c.copy()
-    out['model_conds'] = smallest['model_conds'].copy()  # TODO: which fields should be copied?
-    conds += [out]
 
 
 def calculate_start_end_timesteps(model, conds):
@@ -2419,18 +1694,6 @@ def calculate_start_end_timesteps(model, conds):
 
         timestep_start = None
         timestep_end = None
-        if 'start_percent' in x:
-            timestep_start = s.percent_to_sigma(x['start_percent'])
-        if 'end_percent' in x:
-            timestep_end = s.percent_to_sigma(x['end_percent'])
-
-        if (timestep_start is not None) or (timestep_end is not None):
-            n = x.copy()
-            if (timestep_start is not None):
-                n['timestep_start'] = timestep_start
-            if (timestep_end is not None):
-                n['timestep_end'] = timestep_end
-            conds[t] = n
 
 
 def pre_run_control(model, conds):
@@ -2441,8 +1704,6 @@ def pre_run_control(model, conds):
         timestep_start = None
         timestep_end = None
         percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
-        if 'control' in x:
-            x['control'].pre_run(model, percent_to_timestep_function)
 
 
 def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
@@ -2453,32 +1714,11 @@ def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
     for t in range(len(conds)):
         x = conds[t]
         if 'area' not in x:
-            if name in x and x[name] is not None:
-                cond_cnets.append(x[name])
-            else:
-                cond_other.append((x, t))
+            cond_other.append((x, t))
     for t in range(len(uncond)):
         x = uncond[t]
         if 'area' not in x:
-            if name in x and x[name] is not None:
-                uncond_cnets.append(x[name])
-            else:
-                uncond_other.append((x, t))
-
-    if len(uncond_cnets) > 0:
-        return
-
-    for x in range(len(cond_cnets)):
-        temp = uncond_other[x % len(uncond_other)]
-        o = temp[0]
-        if name in o and o[name] is not None:
-            n = o.copy()
-            n[name] = uncond_fill_func(cond_cnets, x)
-            uncond += [n]
-        else:
-            n = o.copy()
-            n[name] = uncond_fill_func(cond_cnets, x)
-            uncond[temp[1]] = n
+            uncond_other.append((x, t))
 
 
 def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwargs):
@@ -2497,8 +1737,6 @@ def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwar
         out = model_function(**params)
         x = x.copy()
         model_conds = x['model_conds'].copy()
-        for k in out:
-            model_conds[k] = out[k]
         x['model_conds'] = model_conds
         conds[t] = x
     return conds
@@ -2522,17 +1760,10 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
             extra_args["denoise_mask"] = denoise_mask
             model_k = KSamplerX0Inpaint(model_wrap)
             model_k.latent_image = latent_image
-            if inpaint_options.get("random", False):  # TODO: Should this be the default?
-                generator = torch.manual_seed(extra_args.get("seed", 41) + 1)
-                model_k.noise = torch.randn(noise.shape, generator=generator, device="cpu").to(noise.dtype).to(
-                    noise.device)
-            else:
-                model_k.noise = noise
+            model_k.noise = noise
 
             if self.max_denoise(model_wrap, sigmas):
                 noise = noise * torch.sqrt(1.0 + sigmas[0] ** 2.0)
-            else:
-                noise = noise * sigmas[0]
 
             k_callback = None
             total_steps = len(sigmas) - 1
@@ -2602,19 +1833,13 @@ SAMPLER_NAMES = KSAMPLER_NAMES + ["ddim", "uni_pc", "uni_pc_bh2"]
 
 
 def calculate_sigmas_scheduler(model, scheduler_name, steps):
-    if scheduler_name == "karras":
-        sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
-                                   sigma_max=float(model.model_sampling.sigma_max))
-    else:
-        print("error invalid scheduler", self.scheduler)
+    sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
+                               sigma_max=float(model.model_sampling.sigma_max))
     return sigmas
 
 
 def sampler_class(name):
-    if name == "ddim":
-        sampler = ksampler("euler", inpaint_options={"random": True})
-    else:
-        sampler = ksampler(name)
+    sampler = ksampler(name)
     return sampler
 
 
@@ -2625,10 +1850,6 @@ class KSampler:
     def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
         self.model = model
         self.device = device
-        if scheduler not in self.SCHEDULERS:
-            scheduler = self.SCHEDULERS[0]
-        if sampler not in self.SAMPLERS:
-            sampler = self.SAMPLERS[0]
         self.scheduler = scheduler
         self.sampler = sampler
         self.set_steps(steps, denoise)
@@ -2636,46 +1857,18 @@ class KSampler:
         self.model_options = model_options
 
     def calculate_sigmas(self, steps):
-        sigmas = None
-
-        discard_penultimate_sigma = False
-        if self.sampler in ['dpm_2', 'dpm_2_ancestral', 'uni_pc', 'uni_pc_bh2']:
-            steps += 1
-            discard_penultimate_sigma = True
-
         sigmas = calculate_sigmas_scheduler(self.model, self.scheduler, steps)
-
-        if discard_penultimate_sigma:
-            sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
         return sigmas
 
     def set_steps(self, steps, denoise=None):
         self.steps = steps
         if denoise is None or denoise > 0.9999:
             self.sigmas = self.calculate_sigmas(steps).to(self.device)
-        else:
-            new_steps = int(steps / denoise)
-            sigmas = self.calculate_sigmas(new_steps).to(self.device)
-            self.sigmas = sigmas[-(steps + 1):]
 
     def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None,
                force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
         if sigmas is None:
             sigmas = self.sigmas
-
-        if last_step is not None and last_step < (len(sigmas) - 1):
-            sigmas = sigmas[:last_step + 1]
-            if force_full_denoise:
-                sigmas[-1] = 0
-
-        if start_step is not None:
-            if start_step < (len(sigmas) - 1):
-                sigmas = sigmas[start_step:]
-            else:
-                if latent_image is not None:
-                    return latent_image
-                else:
-                    return torch.zeros_like(noise)
 
         sampler = sampler_class(self.sampler)
 
@@ -2684,36 +1877,15 @@ class KSampler:
                       disable_pbar=disable_pbar, seed=seed)
 
 
-import numpy as np
-
-
 def prepare_noise(latent_image, seed, noise_inds=None):
-    """
-    creates random noise given a latent image and a seed.
-    optional arg skip can be used to skip and discard x number of noise generations for a given seed
-    """
     generator = torch.manual_seed(seed)
     if noise_inds is None:
         return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout,
                            generator=generator, device="cpu")
 
-    unique_inds, inverse = np.unique(noise_inds, return_inverse=True)
-    noises = []
-    for i in range(unique_inds[-1] + 1):
-        noise = torch.randn([1] + list(latent_image.size())[1:], dtype=latent_image.dtype, layout=latent_image.layout,
-                            generator=generator, device="cpu")
-        if i in unique_inds:
-            noises.append(noise)
-    noises = [noises[i] for i in inverse]
-    noises = torch.cat(noises, axis=0)
-    return noises
-
 
 def get_models_from_cond(cond, model_type):
     models = []
-    for c in cond:
-        if model_type in c:
-            models += [c[model_type]]
     return models
 
 
@@ -2735,9 +1907,6 @@ def get_additional_models(positive, negative, dtype):
 
     inference_memory = 0
     control_models = []
-    for m in control_nets:
-        control_models += m.get_models()
-        inference_memory += m.inference_memory_requirements(dtype)
 
     gligen = get_models_from_cond(positive, "gligen") + get_models_from_cond(negative, "gligen")
     gligen = [x[1] for x in gligen]
@@ -2745,21 +1914,10 @@ def get_additional_models(positive, negative, dtype):
     return models, inference_memory
 
 
-def cleanup_additional_models(models):
-    """cleanup additional models that were loaded"""
-    for m in models:
-        if hasattr(m, 'cleanup'):
-            m.cleanup()
-
-
 def prepare_sampling(model, noise_shape, positive, negative, noise_mask):
     device = model.load_device
     positive = convert_cond(positive)
     negative = convert_cond(negative)
-
-    if noise_mask is not None:
-        noise_mask = prepare_mask(noise_mask, noise_shape, device)
-
     real_model = None
     models, inference_memory = get_additional_models(positive, negative, model.model_dtype())
     load_models_gpu([model] + models, batch_area_memory(
@@ -2787,19 +1945,7 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
                              denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar,
                              seed=seed)
     samples = samples.cpu()
-
-    cleanup_additional_models(models)
-    cleanup_additional_models(
-        set(get_models_from_cond(positive, "control") + get_models_from_cond(negative, "control")))
     return samples
-
-
-from einops import rearrange
-from torch import nn
-
-if xformers_enabled():
-    import xformers
-    import xformers.ops
 
 _ATTN_PRECISION = "fp32"
 
@@ -2865,29 +2011,11 @@ def attention_xformers(q, k, v, heads, mask=None):
 
     # actually compute the attention, what we cannot get enough of
     out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None)
-
-    if exists(mask):
-        raise NotImplementedError
     out = (
         out.unsqueeze(0)
         .reshape(b, heads, -1, dim_head)
         .permute(0, 2, 1, 3)
         .reshape(b, -1, heads * dim_head)
-    )
-    return out
-
-
-def attention_pytorch(q, k, v, heads, mask=None):
-    b, _, dim_head = q.shape
-    dim_head //= heads
-    q, k, v = map(
-        lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
-        (q, k, v),
-    )
-
-    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
-    out = (
-        out.transpose(1, 2).reshape(b, -1, heads * dim_head)
     )
     return out
 
@@ -2916,16 +2044,10 @@ class CrossAttention(nn.Module):
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
-        if value is not None:
-            v = self.to_v(value)
-            del value
-        else:
-            v = self.to_v(context)
+        v = self.to_v(context)
 
         if mask is None:
             out = optimized_attention(q, k, v, self.heads)
-        else:
-            out = optimized_attention_masked(q, k, v, self.heads, mask)
         return self.to_out(out)
 
 
@@ -2967,96 +2089,40 @@ class BasicTransformerBlock(nn.Module):
             extra_options["block"] = block
         if "cond_or_uncond" in transformer_options:
             extra_options["cond_or_uncond"] = transformer_options["cond_or_uncond"]
-        if "patches" in transformer_options:
-            transformer_patches = transformer_options["patches"]
         else:
             transformer_patches = {}
 
         extra_options["n_heads"] = self.n_heads
         extra_options["dim_head"] = self.d_head
 
-        if "patches_replace" in transformer_options:
-            transformer_patches_replace = transformer_options["patches_replace"]
-        else:
-            transformer_patches_replace = {}
+        transformer_patches_replace = {}
 
         n = self.norm1(x)
-        if self.disable_self_attn:
-            context_attn1 = context
-        else:
-            context_attn1 = None
+        context_attn1 = None
         value_attn1 = None
-
-        if "attn1_patch" in transformer_patches:
-            patch = transformer_patches["attn1_patch"]
-            if context_attn1 is None:
-                context_attn1 = n
-            value_attn1 = context_attn1
-            for p in patch:
-                n, context_attn1, value_attn1 = p(n, context_attn1, value_attn1, extra_options)
 
         if block is not None:
             transformer_block = (block[0], block[1], block_index)
-        else:
-            transformer_block = None
         attn1_replace_patch = transformer_patches_replace.get("attn1", {})
         block_attn1 = transformer_block
         if block_attn1 not in attn1_replace_patch:
             block_attn1 = block
 
-        if block_attn1 in attn1_replace_patch:
-            if context_attn1 is None:
-                context_attn1 = n
-                value_attn1 = n
-            n = self.attn1.to_q(n)
-            context_attn1 = self.attn1.to_k(context_attn1)
-            value_attn1 = self.attn1.to_v(value_attn1)
-            n = attn1_replace_patch[block_attn1](n, context_attn1, value_attn1, extra_options)
-            n = self.attn1.to_out(n)
-        else:
-            n = self.attn1(n, context=context_attn1, value=value_attn1)
-
-        if "attn1_output_patch" in transformer_patches:
-            patch = transformer_patches["attn1_output_patch"]
-            for p in patch:
-                n = p(n, extra_options)
+        n = self.attn1(n, context=context_attn1, value=value_attn1)
 
         x += n
-        if "middle_patch" in transformer_patches:
-            patch = transformer_patches["middle_patch"]
-            for p in patch:
-                x = p(x, extra_options)
 
         n = self.norm2(x)
 
         context_attn2 = context
         value_attn2 = None
-        if "attn2_patch" in transformer_patches:
-            patch = transformer_patches["attn2_patch"]
-            value_attn2 = context_attn2
-            for p in patch:
-                n, context_attn2, value_attn2 = p(n, context_attn2, value_attn2, extra_options)
 
         attn2_replace_patch = transformer_patches_replace.get("attn2", {})
         block_attn2 = transformer_block
         if block_attn2 not in attn2_replace_patch:
             block_attn2 = block
 
-        if block_attn2 in attn2_replace_patch:
-            if value_attn2 is None:
-                value_attn2 = context_attn2
-            n = self.attn2.to_q(n)
-            context_attn2 = self.attn2.to_k(context_attn2)
-            value_attn2 = self.attn2.to_v(value_attn2)
-            n = attn2_replace_patch[block_attn2](n, context_attn2, value_attn2, extra_options)
-            n = self.attn2.to_out(n)
-        else:
-            n = self.attn2(n, context=context_attn2, value=value_attn2)
-
-        if "attn2_output_patch" in transformer_patches:
-            patch = transformer_patches["attn2_output_patch"]
-            for p in patch:
-                n = p(n, extra_options)
+        n = self.attn2(n, context=context_attn2, value=value_attn2)
 
         x += n
         x = self.ff(self.norm3(x)) + x
@@ -3089,8 +2155,6 @@ class SpatialTransformer(nn.Module):
                                   kernel_size=1,
                                   stride=1,
                                   padding=0, dtype=dtype, device=device)
-        else:
-            self.proj_in = Linear(in_channels, inner_dim, dtype=dtype, device=device)
 
         self.transformer_blocks = nn.ModuleList(
             [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
@@ -3103,8 +2167,6 @@ class SpatialTransformer(nn.Module):
                                    kernel_size=1,
                                    stride=1,
                                    padding=0, dtype=dtype, device=device)
-        else:
-            self.proj_out = Linear(in_channels, inner_dim, dtype=dtype, device=device)
         self.use_linear = use_linear
 
     def forward(self, x, context=None, transformer_options={}):
@@ -3117,24 +2179,14 @@ class SpatialTransformer(nn.Module):
         if not self.use_linear:
             x = self.proj_in(x)
         x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
-        if self.use_linear:
-            x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
             transformer_options["block_index"] = i
             x = block(x, context=context[i], transformer_options=transformer_options)
-        if self.use_linear:
-            x = self.proj_out(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
         return x + x_in
 
-
-from abc import abstractmethod
-
-import torch as th
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 class TimestepBlock(nn.Module):
@@ -3193,16 +2245,10 @@ class Upsample(nn.Module):
 
     def forward(self, x, output_shape=None):
         assert x.shape[1] == self.channels
-        if self.dims == 3:
-            shape = [x.shape[2], x.shape[3] * 2, x.shape[4] * 2]
-            if output_shape is not None:
-                shape[1] = output_shape[3]
-                shape[2] = output_shape[4]
-        else:
-            shape = [x.shape[2] * 2, x.shape[3] * 2]
-            if output_shape is not None:
-                shape[0] = output_shape[2]
-                shape[1] = output_shape[3]
+        shape = [x.shape[2] * 2, x.shape[3] * 2]
+        if output_shape is not None:
+            shape[0] = output_shape[2]
+            shape[1] = output_shape[3]
 
         x = F.interpolate(x, size=shape, mode="nearest")
         if self.use_conv:
@@ -3230,8 +2276,6 @@ class Downsample(nn.Module):
             self.op = conv_nd(
                 dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, dtype=dtype, device=device
             )
-        else:
-            assert self.channels == self.out_channels
 
     def forward(self, x):
         assert x.shape[1] == self.channels
@@ -3286,14 +2330,7 @@ class ResBlock(TimestepBlock):
 
         self.updown = up or down
 
-        if up:
-            self.h_upd = Upsample(channels, False, dims, dtype=dtype, device=device)
-            self.x_upd = Upsample(channels, False, dims, dtype=dtype, device=device)
-        elif down:
-            self.h_upd = Downsample(channels, False, dims, dtype=dtype, device=device)
-            self.x_upd = Downsample(channels, False, dims, dtype=dtype, device=device)
-        else:
-            self.h_upd = self.x_upd = nn.Identity()
+        self.h_upd = self.x_upd = nn.Identity()
 
         self.emb_layers = nn.Sequential(
             nn.SiLU(),
@@ -3313,10 +2350,6 @@ class ResBlock(TimestepBlock):
 
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
-        elif use_conv:
-            self.skip_connection = conv_nd(
-                dims, channels, self.out_channels, 3, padding=1, dtype=dtype, device=device
-            )
         else:
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1, dtype=dtype, device=device)
 
@@ -3332,42 +2365,16 @@ class ResBlock(TimestepBlock):
         )
 
     def _forward(self, x, emb):
-        if self.updown:
-            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
-            h = in_rest(x)
-            h = self.h_upd(h)
-            x = self.x_upd(x)
-            h = in_conv(h)
-        else:
-            h = self.in_layers(x)
+        h = self.in_layers(x)
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
-        if self.use_scale_shift_norm:
-            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
-            scale, shift = th.chunk(emb_out, 2, dim=1)
-            h = out_norm(h) * (1 + scale) + shift
-            h = out_rest(h)
-        else:
-            h = h + emb_out
-            h = self.out_layers(h)
+        h = h + emb_out
+        h = self.out_layers(h)
         return self.skip_connection(x) + h
 
 
-class Timestep(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, t):
-        return timestep_embedding(t, self.dim)
-
-
 def apply_control(h, control, name):
-    if control is not None and name in control and len(control[name]) > 0:
-        ctrl = control[name].pop()
-        if ctrl is not None:
-            h += ctrl
     return h
 
 
@@ -3444,9 +2451,6 @@ class UNetModel(nn.Module):
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
 
-        if num_heads == -1:
-            assert num_head_channels != -1, 'Either num_heads or num_head_channels has to be set'
-
         if num_head_channels == -1:
             assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
 
@@ -3455,19 +2459,7 @@ class UNetModel(nn.Module):
         self.model_channels = model_channels
         self.out_channels = out_channels
 
-        if isinstance(num_res_blocks, int):
-            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
-        else:
-            if len(num_res_blocks) != len(channel_mult):
-                raise ValueError("provide num_res_blocks either as an int (globally constant) or "
-                                 "as a list/tuple (per-level) with the same length as channel_mult")
-            self.num_res_blocks = num_res_blocks
-
-        if disable_self_attentions is not None:
-            # should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
-            assert len(disable_self_attentions) == len(channel_mult)
-        if num_attention_blocks is not None:
-            assert len(num_attention_blocks) == len(self.num_res_blocks)
+        self.num_res_blocks = num_res_blocks
 
         transformer_depth = transformer_depth[:]
         transformer_depth_output = transformer_depth_output[:]
@@ -3489,24 +2481,6 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
         )
-
-        if self.num_classes is not None:
-            if isinstance(self.num_classes, int):
-                self.label_emb = nn.Embedding(num_classes, time_embed_dim)
-            elif self.num_classes == "continuous":
-                print("setting up linear c_adm embedding layer")
-                self.label_emb = nn.Linear(1, time_embed_dim)
-            elif self.num_classes == "sequential":
-                assert adm_in_channels is not None
-                self.label_emb = nn.Sequential(
-                    nn.Sequential(
-                        Linear(adm_in_channels, time_embed_dim, dtype=self.dtype, device=device),
-                        nn.SiLU(),
-                        Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-                    )
-                )
-            else:
-                raise ValueError()
 
         self.input_blocks = nn.ModuleList(
             [
@@ -3539,20 +2513,12 @@ class UNetModel(nn.Module):
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
                     else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        # num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
                         disabled_sa = False
 
                     if not exists(num_attention_blocks) or nr < num_attention_blocks[level]:
                         layers.append(SpatialTransformer(
-                            ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
-                            disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
+                            ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim
+                            , use_linear=use_linear_in_transformer,
                             use_checkpoint=use_checkpoint, dtype=self.dtype, device=device
                         )
                         )
@@ -3586,12 +2552,6 @@ class UNetModel(nn.Module):
 
         if num_head_channels == -1:
             dim_head = ch // num_heads
-        else:
-            num_heads = ch // num_head_channels
-            dim_head = num_head_channels
-        if legacy:
-            # num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
         mid_block = [
             ResBlock(
                 ch,
@@ -3644,21 +2604,12 @@ class UNetModel(nn.Module):
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
                     else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        # num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
                         disabled_sa = False
 
                     if not exists(num_attention_blocks) or i < num_attention_blocks[level]:
                         layers.append(
                             SpatialTransformer(
-                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
-                                disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
+                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim, use_linear=use_linear_in_transformer,
                                 use_checkpoint=use_checkpoint, dtype=self.dtype, device=device
                             )
                         )
@@ -3689,12 +2640,6 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1, dtype=self.dtype, device=device)),
         )
-        if self.predict_codebook_ids:
-            self.id_predictor = nn.Sequential(
-                nn.GroupNorm(32, ch, dtype=self.dtype, device=device),
-                conv_nd(dims, model_channels, n_embed, 1, dtype=self.dtype, device=device),
-                # nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
-            )
 
     def forward(self, x, timesteps=None, context=None, y=None, control=None, transformer_options={}, **kwargs):
         """
@@ -3716,10 +2661,6 @@ class UNetModel(nn.Module):
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(self.dtype)
         emb = self.time_embed(t_emb)
 
-        if self.num_classes is not None:
-            assert y.shape[0] == x.shape[0]
-            emb = emb + self.label_emb(y)
-
         h = x.type(self.dtype)
         for id, module in enumerate(self.input_blocks):
             transformer_options["block"] = ("input", id)
@@ -3736,11 +2677,6 @@ class UNetModel(nn.Module):
             hsp = hs.pop()
             hsp = apply_control(hsp, control, 'output')
 
-            if "output_block_patch" in transformer_patches:
-                patch = transformer_patches["output_block_patch"]
-                for p in patch:
-                    h, hsp = p(h, hsp, transformer_options)
-
             h = th.cat([h, hsp], dim=1)
             del hsp
             if len(hs) > 0:
@@ -3749,13 +2685,8 @@ class UNetModel(nn.Module):
                 output_shape = None
             h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape)
         h = h.type(x.dtype)
-        if self.predict_codebook_ids:
-            return self.id_predictor(h)
-        else:
-            return self.out(h)
+        return self.out(h)
 
-
-import torch
 
 
 def model_sampling(model_config, model_type):
@@ -3792,8 +2723,6 @@ class BaseModel(torch.nn.Module):
     def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
         sigma = t
         xc = self.model_sampling.calculate_input(sigma, x)
-        if c_concat is not None:
-            xc = torch.cat([xc] + [c_concat], dim=1)
 
         context = c_crossattn
         dtype = self.get_dtype()
@@ -3801,11 +2730,6 @@ class BaseModel(torch.nn.Module):
         t = self.model_sampling.timestep(t).float()
         context = context.to(dtype)
         extra_conds = {}
-        for o in kwargs:
-            extra = kwargs[o]
-            if hasattr(extra, "to"):
-                extra = extra.to(dtype)
-            extra_conds[o] = extra
         model_output = self.diffusion_model(xc, t, context=context, control=control,
                                             transformer_options=transformer_options, **extra_conds).float()
         return self.model_sampling.calculate_denoised(sigma, model_output, x)
@@ -3813,34 +2737,9 @@ class BaseModel(torch.nn.Module):
     def get_dtype(self):
         return self.diffusion_model.dtype
 
-    def encode_adm(self, **kwargs):
-        return None
 
     def extra_conds(self, **kwargs):
         out = {}
-        if self.inpaint_model:
-            concat_keys = ("mask", "masked_image")
-            cond_concat = []
-            denoise_mask = kwargs.get("denoise_mask", None)
-            latent_image = kwargs.get("latent_image", None)
-            noise = kwargs.get("noise", None)
-            device = kwargs["device"]
-
-            for ck in concat_keys:
-                if denoise_mask is not None:
-                    if ck == "mask":
-                        cond_concat.append(denoise_mask[:, :1].to(device))
-                    elif ck == "masked_image":
-                        cond_concat.append(latent_image.to(
-                            device))  # NOTE: the latent_image should be masked by the mask in pixel space
-                else:
-                    if ck == "mask":
-                        cond_concat.append(torch.ones_like(noise)[:, :1])
-            data = torch.cat(cond_concat, dim=1)
-            out['c_concat'] = CONDNoiseShape(data)
-        adm = self.encode_adm(**kwargs)
-        if adm is not None:
-            out['y'] = CONDRegular(adm)
         return out
 
     def load_model_weights(self, sd, unet_prefix=""):
@@ -3851,11 +2750,6 @@ class BaseModel(torch.nn.Module):
                 to_load[k[len(unet_prefix):]] = sd.pop(k)
 
         m, u = self.diffusion_model.load_state_dict(to_load, strict=False)
-        if len(m) > 0:
-            print("unet missing:", m)
-
-        if len(u) > 0:
-            print("unet unexpected:", u)
         del to_load
         return self
 
@@ -3886,9 +2780,6 @@ class BASE:
 
     @classmethod
     def matches(s, unet_config):
-        for k in s.unet_config:
-            if s.unet_config[k] != unet_config[k]:
-                return False
         return True
 
     def model_type(self, state_dict, prefix=""):
@@ -3905,12 +2796,7 @@ class BASE:
 
     def get_model(self, state_dict, prefix="", device=None):
         out = BaseModel(self, model_type=self.model_type(state_dict, prefix), device=device)
-        if self.inpaint_model():
-            out.set_inpaint()
         return out
-
-
-import torch
 
 
 class SD15(BASE):
@@ -3929,18 +2815,6 @@ class SD15(BASE):
     latent_format = SD15
 
     def process_clip_state_dict(self, state_dict):
-        k = list(state_dict.keys())
-        for x in k:
-            if x.startswith("cond_stage_model.transformer.") and not x.startswith(
-                    "cond_stage_model.transformer.text_model."):
-                y = x.replace("cond_stage_model.transformer.", "cond_stage_model.transformer.text_model.")
-                state_dict[y] = state_dict.pop(x)
-
-        if 'cond_stage_model.transformer.text_model.embeddings.position_ids' in state_dict:
-            ids = state_dict['cond_stage_model.transformer.text_model.embeddings.position_ids']
-            if ids.dtype == torch.float32:
-                state_dict['cond_stage_model.transformer.text_model.embeddings.position_ids'] = ids.round()
-
         replace_prefix = {}
         replace_prefix["cond_stage_model."] = "cond_stage_model.clip_l."
         state_dict = state_dict_prefix_replace(state_dict, replace_prefix)
@@ -3993,11 +2867,7 @@ def detect_unet_config(state_dict, key_prefix, dtype):
     }
 
     y_input = '{}label_emb.0.0.weight'.format(key_prefix)
-    if y_input in state_dict_keys:
-        unet_config["num_classes"] = "sequential"
-        unet_config["adm_in_channels"] = state_dict[y_input].shape[1]
-    else:
-        unet_config["adm_in_channels"] = None
+    unet_config["adm_in_channels"] = None
 
     unet_config["dtype"] = dtype
     model_channels = state_dict['{}input_blocks.0.0.weight'.format(key_prefix)].shape[0]
@@ -4019,8 +2889,6 @@ def detect_unet_config(state_dict, key_prefix, dtype):
         prefix_output = '{}output_blocks.{}.'.format(key_prefix, input_block_count - count - 1)
 
         block_keys = sorted(list(filter(lambda a: a.startswith(prefix), state_dict_keys)))
-        if len(block_keys) == 0:
-            break
 
         block_keys_output = sorted(list(filter(lambda a: a.startswith(prefix_output), state_dict_keys)))
 
@@ -4062,8 +2930,6 @@ def detect_unet_config(state_dict, key_prefix, dtype):
     if "{}middle_block.1.proj_in.weight".format(key_prefix) in state_dict_keys:
         transformer_depth_middle = count_blocks(state_dict_keys,
                                                 '{}middle_block.1.transformer_blocks.'.format(key_prefix) + '{}')
-    else:
-        transformer_depth_middle = -1
 
     unet_config["in_channels"] = in_channels
     unet_config["model_channels"] = model_channels
@@ -4082,19 +2948,12 @@ def model_config_from_unet_config(unet_config):
         if model_config.matches(unet_config):
             return model_config(unet_config)
 
-    print("no match", unet_config)
-    return None
-
 
 def model_config_from_unet(state_dict, unet_key_prefix, dtype, use_base_if_no_match=False):
     unet_config = detect_unet_config(state_dict, unet_key_prefix, dtype)
     model_config = model_config_from_unet_config(unet_config)
-    if model_config is None and use_base_if_no_match:
-        return BASE(unet_config)
-    else:
-        return model_config
+    return model_config
 
-import torch
 
 
 def load_model_weights(model, sd):
@@ -4114,8 +2973,6 @@ def load_model_weights(model, sd):
 
 class CLIP:
     def __init__(self, target=None, embedding_directory=None, no_init=False):
-        if no_init:
-            return
         params = target.params.copy()
         clip = target.clip
         tokenizer = target.tokenizer
@@ -4123,10 +2980,7 @@ class CLIP:
         load_device = text_encoder_device()
         offload_device = text_encoder_offload_device()
         params['device'] = offload_device
-        if should_use_fp16(load_device, prioritize_performance=False):
-            params['dtype'] = torch.float16
-        else:
-            params['dtype'] = torch.float32
+        params['dtype'] = torch.float32
 
         self.cond_stage_model = clip(**(params))
 
@@ -4134,34 +2988,29 @@ class CLIP:
         self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
         self.layer_idx = None
 
-
     def tokenize(self, text, return_word_ids=False):
         return self.tokenizer.tokenize_with_weights(text, return_word_ids)
 
     def encode_from_tokens(self, tokens, return_pooled=False):
-        if self.layer_idx is not None:
-            self.cond_stage_model.clip_layer(self.layer_idx)
-        else:
-            self.cond_stage_model.reset_clip_layer()
+        self.cond_stage_model.reset_clip_layer()
 
         self.load_model()
         cond, pooled = self.cond_stage_model.encode_token_weights(tokens)
         if return_pooled:
             return cond, pooled
-        return cond
 
     def load_model(self):
         load_model_gpu(self.patcher)
         return self.patcher
 
+
 class VAE:
     def __init__(self, sd=None, device=None, config=None):
         if config is None:
-            #default SD1.x/SD2.x VAE parameters
-            ddconfig = {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128, 'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0}
+            # default SD1.x/SD2.x VAE parameters
+            ddconfig = {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128,
+                        'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0}
             self.first_stage_model = AutoencoderKL(ddconfig=ddconfig, embed_dim=4)
-        else:
-            self.first_stage_model = AutoencoderKL(**(config['params']))
         self.first_stage_model = self.first_stage_model.eval()
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False)
@@ -4178,29 +3027,28 @@ class VAE:
         self.vae_dtype = vae_dtype()
         self.first_stage_model.to(self.vae_dtype)
 
-
     def decode(self, samples_in):
         self.first_stage_model = self.first_stage_model.to(self.device)
-        try:
-            memory_used = (2562 * samples_in.shape[2] * samples_in.shape[3] * 64) * 1.7
-            free_memory1(memory_used, self.device)
-            free_memory = get_free_memory(self.device)
-            batch_number = int(free_memory / memory_used)
-            batch_number = max(1, batch_number)
+        memory_used = (2562 * samples_in.shape[2] * samples_in.shape[3] * 64) * 1.7
+        free_memory1(memory_used, self.device)
+        free_memory = get_free_memory(self.device)
+        batch_number = int(free_memory / memory_used)
+        batch_number = max(1, batch_number)
 
-            pixel_samples = torch.empty((samples_in.shape[0], 3, round(samples_in.shape[2] * 8), round(samples_in.shape[3] * 8)), device="cpu")
-            for x in range(0, samples_in.shape[0], batch_number):
-                samples = samples_in[x:x+batch_number].to(self.vae_dtype).to(self.device)
-                pixel_samples[x:x+batch_number] = torch.clamp((self.first_stage_model.decode(samples).cpu().float() + 1.0) / 2.0, min=0.0, max=1.0)
-        except OOM_EXCEPTION as e:
-            print("Warning: Ran out of memory when regular VAE decoding.")
+        pixel_samples = torch.empty(
+            (samples_in.shape[0], 3, round(samples_in.shape[2] * 8), round(samples_in.shape[3] * 8)), device="cpu")
+        for x in range(0, samples_in.shape[0], batch_number):
+            samples = samples_in[x:x + batch_number].to(self.vae_dtype).to(self.device)
+            pixel_samples[x:x + batch_number] = torch.clamp(
+                (self.first_stage_model.decode(samples).cpu().float() + 1.0) / 2.0, min=0.0, max=1.0)
 
         self.first_stage_model = self.first_stage_model.to(self.offload_device)
-        pixel_samples = pixel_samples.cpu().movedim(1,-1)
+        pixel_samples = pixel_samples.cpu().movedim(1, -1)
         return pixel_samples
 
 
-def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False, embedding_directory=None, output_model=True):
+def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False,
+                                 embedding_directory=None, output_model=True):
     sd = load_torch_file(ckpt_path)
     clip = None
     clipvision = None
@@ -4216,8 +3064,6 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
         pass
 
     model_config = model_config_from_unet(sd, "model.diffusion_model.", unet_dtype)
-    if model_config is None:
-        raise RuntimeError("ERROR: Could not detect model type of: {}".format(ckpt_path))
     if output_model:
         inital_load_device = unet_inital_load_device(parameters, unet_dtype)
         offload_device = unet_offload_device()
@@ -4242,13 +3088,13 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
         print("left over keys:", left_over)
 
     if output_model:
-        model_patcher = ModelPatcher(model, load_device=get_torch_device(), offload_device=unet_offload_device(), current_device=inital_load_device)
+        model_patcher = ModelPatcher(model, load_device=get_torch_device(), offload_device=unet_offload_device(),
+                                     current_device=inital_load_device)
         if inital_load_device != torch.device("cpu"):
             print("loaded straight to GPU")
             load_model_gpu(model_patcher)
 
     return (model_patcher, clip, vae, clipvision)
-
 
 
 ################################################ Folder_paths #########################################################
@@ -4274,8 +3120,6 @@ def get_output_directory():
 
 def get_full_path(folder_name, filename):
     global folder_names_and_paths
-    if folder_name not in folder_names_and_paths:
-        return None
     folders = folder_names_and_paths[folder_name]
     filename = os.path.relpath(os.path.join("/", filename), "/")
     for x in folders[0]:
@@ -4283,17 +3127,12 @@ def get_full_path(folder_name, filename):
         if os.path.isfile(full_path):
             return full_path
 
-    return None
-
 
 def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height=0):
     def map_filename(filename):
         prefix_len = len(os.path.basename(filename_prefix))
         prefix = filename[:prefix_len + 1]
-        try:
-            digits = int(filename[prefix_len + 1:].split('_')[0])
-        except:
-            digits = 0
+        digits = int(filename[prefix_len + 1:].split('_')[0])
         return (digits, prefix)
 
     def compute_vars(input, image_width, image_height):
@@ -4308,15 +3147,9 @@ def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height
 
     full_output_folder = os.path.join(output_dir, subfolder)
 
-    if os.path.commonpath((output_dir, os.path.abspath(full_output_folder))) != output_dir:
-        print("Saving image outside the output folder is not allowed.")
-        return {}
-
     try:
         counter = max(filter(lambda a: a[1][:-1] == filename and a[1][-1] == "_",
                              map(map_filename, os.listdir(full_output_folder))))[0] + 1
-    except ValueError:
-        counter = 1
     except FileNotFoundError:
         os.makedirs(full_output_folder, exist_ok=True)
         counter = 1
@@ -4360,17 +3193,12 @@ def get_previewer(device, latent_format):
 
 def prepare_callback(model, steps, x0_output_dict=None):
     preview_format = "JPEG"
-    if preview_format not in ["JPEG", "PNG"]:
-        preview_format = "JPEG"
 
     previewer = get_previewer(model.load_device, model.model.latent_format)
 
     pbar = ProgressBar(steps)
 
     def callback(step, x0, x, total_steps):
-        if x0_output_dict is not None:
-            x0_output_dict["x0"] = x0
-
         preview_bytes = None
         if previewer:
             preview_bytes = previewer.decode_latent_to_preview_image(preview_format, x0)
@@ -4430,22 +3258,17 @@ class SaveImage:
 def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0,
                     disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
     latent_image = latent["samples"]
-    if disable_noise:
-        noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
-    else:
-        batch_inds = latent["batch_index"] if "batch_index" in latent else None
-        noise = prepare_noise(latent_image, seed, batch_inds)
+    batch_inds = latent["batch_index"] if "batch_index" in latent else None
+    noise = prepare_noise(latent_image, seed, batch_inds)
 
     noise_mask = None
-    if "noise_mask" in latent:
-        noise_mask = latent["noise_mask"]
 
     callback = prepare_callback(model, steps)
     disable_pbar = not PROGRESS_BAR_ENABLED
     samples = sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
-                            denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
-                            force_full_denoise=force_full_denoise, noise_mask=noise_mask, callback=callback,
-                            disable_pbar=disable_pbar, seed=seed)
+                      denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
+                      force_full_denoise=force_full_denoise, noise_mask=noise_mask, callback=callback,
+                      disable_pbar=disable_pbar, seed=seed)
     out = latent.copy()
     out["samples"] = samples
     return (out,)
@@ -4470,27 +3293,7 @@ class VAEDecode:
 
 
 def get_value_at_index(obj: Union[Sequence, Mapping], index: int) -> Any:
-    """Returns the value at the given index of a sequence or mapping.
-
-    If the object is a sequence (like list or string), returns the value at the given index.
-    If the object is a mapping (like a dictionary), returns the value at the index-th key.
-
-    Some return a dictionary, in these cases, we look for the "results" key
-
-    Args:
-        obj (Union[Sequence, Mapping]): The object to retrieve the value from.
-        index (int): The index of the value to retrieve.
-
-    Returns:
-        Any: The value at the given index.
-
-    Raises:
-        IndexError: If the index is out of bounds for the object and the object is not a mapping.
-    """
-    try:
-        return obj[index]
-    except KeyError:
-        return obj["result"][index]
+    return obj[index]
 
 
 with open('prompt.txt', 'r') as file:
@@ -4540,14 +3343,8 @@ def gen(prompt, w, h):
             samples=get_value_at_index(ksampler_239, 0),
             vae=get_value_at_index(checkpointloadersimple_241, 2),
         )
-        saveimage_248 = saveimage.save_images(
+        saveimage.save_images(
             filename_prefix="ComfyUI", images=get_value_at_index(vaedecode_240, 0)
         )
 
-
-#tracer = trace.Trace(countfuncs=1)
-#tracer.runfunc(gen, prompt, w, h)
-#r = tracer.results()
-#print(r)
-
-gen(prompt, w, h)
+gen(prompt,w,h)
