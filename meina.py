@@ -189,11 +189,11 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         ddconfig = kwargs.pop("ddconfig")
         super().__init__(
             encoder_config={
-                "target": "imp.Encoder",
+                "target": "meina.Encoder",
                 "params": ddconfig,
             },
             decoder_config={
-                "target": "imp.Decoder",
+                "target": "meina.Decoder",
                 "params": ddconfig,
             },
             **kwargs,
@@ -231,7 +231,7 @@ class AutoencoderKL(AutoencodingEngineLegacy):
         super().__init__(
             regularizer_config={
                 "target": (
-                    "imp.DiagonalGaussianRegularizer"
+                    "meina.DiagonalGaussianRegularizer"
                 )
             },
             **kwargs,
@@ -745,7 +745,7 @@ def unload_model_clones(model):
         current_loaded_models.pop(i).model_unload()
 
 
-def free_memory(memory_required, device, keep_loaded=[]):
+def free_memory1(memory_required, device, keep_loaded=[]):
     unloaded_model = False
     for i in range(len(current_loaded_models) - 1, -1, -1):
         shift_model = current_loaded_models[i]
@@ -789,7 +789,7 @@ def load_models_gpu(models, memory_required=0):
         devs = set(map(lambda a: a.device, models_already_loaded))
         for d in devs:
             if d != torch.device("cpu"):
-                free_memory(extra_mem, d, models_already_loaded)
+                free_memory1(extra_mem, d, models_already_loaded)
         return
 
     print(f"Loading {len(models_to_load)} new model{'s' if len(models_to_load) > 1 else ''}")
@@ -803,7 +803,7 @@ def load_models_gpu(models, memory_required=0):
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
-            free_memory(total_memory_required[device] * 1.3 + extra_mem, device, models_already_loaded)
+            free_memory1(total_memory_required[device] * 1.3 + extra_mem, device, models_already_loaded)
 
     for loaded_model in models_to_load:
         model = loaded_model.model
@@ -4183,7 +4183,7 @@ class VAE:
         self.first_stage_model = self.first_stage_model.to(self.device)
         try:
             memory_used = (2562 * samples_in.shape[2] * samples_in.shape[3] * 64) * 1.7
-            free_memory(memory_used, self.device)
+            free_memory1(memory_used, self.device)
             free_memory = get_free_memory(self.device)
             batch_number = int(free_memory / memory_used)
             batch_number = max(1, batch_number)
