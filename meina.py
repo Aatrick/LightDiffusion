@@ -3,7 +3,6 @@ import os
 import random
 import sys
 from typing import Dict, Union
-from typing import Sequence, Mapping, Any
 
 import numpy as np
 from PIL import Image
@@ -59,10 +58,6 @@ def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
     return out
 
 
-def repeat_to_batch_size(tensor, batch_size):
-    return tensor
-
-
 PROGRESS_BAR_ENABLED = True
 PROGRESS_BAR_HOOK = None
 
@@ -105,13 +100,6 @@ class SD15(LatentFormat):
         self.taesd_decoder_name = "taesd_decoder"
 
 
-
-
-
-def exists(x):
-    pass
-
-
 def instantiate_from_config(config):
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
@@ -128,12 +116,6 @@ class DiagonalGaussianRegularizer(torch.nn.Module):
 
 
 class AbstractAutoencoder(torch.nn.Module):
-    """
-    This is the base class for all autoencoders, including image autoencoders, image autoencoders with discriminators,
-    unCLIP models, etc. Hence, it is fairly general, and specific features
-    (e.g. discriminator training, encoding, decoding) must be implemented in subclasses.
-    """
-
     def __init__(
             self,
             ema_decay: Union[None, float] = None,
@@ -148,12 +130,6 @@ class AbstractAutoencoder(torch.nn.Module):
 
 
 class AutoencodingEngine(AbstractAutoencoder):
-    """
-    Base class for all image autoencoders that we train, like VQGAN or AutoencoderKL
-    (we also restore them explicitly as special cases for legacy reasons).
-    Regularizations such as KL or VQ are moved to the regularizer class.
-    """
-
     def __init__(
             self,
             *args,
@@ -207,9 +183,6 @@ class AutoencoderKL(AutoencodingEngineLegacy):
         )
 
 
-
-
-
 class Linear(torch.nn.Linear):
     pass
 
@@ -247,19 +220,13 @@ def use_comfy_ops(device=None, dtype=None):  # Kind of an ugly hack but I can't 
         torch.nn.Linear = old_torch_nn_linear
 
 
-
-
-def append_zero(x):
-    return torch.cat([x, x.new_zeros([1])])
-
-
 def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cpu'):
     """Constructs the noise schedule of Karras et al. (2022)."""
     ramp = torch.linspace(0, 1, n, device=device)
     min_inv_rho = sigma_min ** (1 / rho)
     max_inv_rho = sigma_max ** (1 / rho)
     sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
-    return append_zero(sigmas).to(device)
+    return torch.cat([sigmas, sigmas.new_zeros([1])]).to(device)
 
 
 def default_noise_sampler(x):
@@ -278,16 +245,13 @@ class PIDStepSizeController:
         self.eps = eps
         self.errs = []
 
-    def limiter(self, x):
-        return 1 + math.atan(x - 1)
-
     def propose_step(self, error):
         inv_error = 1 / (float(error) + self.eps)
         if not self.errs:
             self.errs = [inv_error, inv_error, inv_error]
         self.errs[0] = inv_error
         factor = self.errs[0] ** self.b1 * self.errs[1] ** self.b2 * self.errs[2] ** self.b3
-        factor = self.limiter(factor)
+        factor = 1 + math.atan(factor - 1)
         accept = factor >= self.accept_safety
         if accept:
             self.errs[2] = self.errs[1]
@@ -306,17 +270,11 @@ class DPMSolver(nn.Module):
         self.eps_callback = eps_callback
         self.info_callback = info_callback
 
-    def t(self, sigma):
-        return -sigma.log()
-
-    def sigma(self, t):
-        return t.neg().exp()
-
     def eps(self, eps_cache, key, x, t, *args, **kwargs):
         if key in eps_cache:
             return eps_cache[key], eps_cache
-        sigma = self.sigma(t) * x.new_ones([x.shape[0]])
-        eps = (x - self.model(x, sigma, *args, **self.extra_args, **kwargs)) / self.sigma(t)
+        sigma = t.neg().exp() * x.new_ones([x.shape[0]])
+        eps = (x - self.model(x, sigma, *args, **self.extra_args, **kwargs)) / t.neg().exp()
         if self.eps_callback is not None:
             self.eps_callback()
         return eps, {key: eps, **eps_cache}
@@ -326,9 +284,9 @@ class DPMSolver(nn.Module):
         h = t_next - t
         eps, eps_cache = self.eps(eps_cache, 'eps', x, t)
         s1 = t + r1 * h
-        u1 = x - self.sigma(s1) * (r1 * h).expm1() * eps
+        u1 = x - s1.neg().exp() * (r1 * h).expm1() * eps
         eps_r1, eps_cache = self.eps(eps_cache, 'eps_r1', u1, s1)
-        x_2 = x - self.sigma(t_next) * h.expm1() * eps - self.sigma(t_next) / (2 * r1) * h.expm1() * (eps_r1 - eps)
+        x_2 = x - t_next.neg().exp() * h.expm1() * eps - t_next.neg().exp() / (2 * r1) * h.expm1() * (eps_r1 - eps)
         return x_2, eps_cache
 
     def dpm_solver_3_step(self, x, t, t_next, r1=1 / 3, r2=2 / 3, eps_cache=None):
@@ -337,12 +295,12 @@ class DPMSolver(nn.Module):
         eps, eps_cache = self.eps(eps_cache, 'eps', x, t)
         s1 = t + r1 * h
         s2 = t + r2 * h
-        u1 = x - self.sigma(s1) * (r1 * h).expm1() * eps
+        u1 = x - s1.neg().exp() * (r1 * h).expm1() * eps
         eps_r1, eps_cache = self.eps(eps_cache, 'eps_r1', u1, s1)
-        u2 = x - self.sigma(s2) * (r2 * h).expm1() * eps - self.sigma(s2) * (r2 / r1) * (
+        u2 = x - s2.neg().exp() * (r2 * h).expm1() * eps - s2.neg().exp() * (r2 / r1) * (
                 (r2 * h).expm1() / (r2 * h) - 1) * (eps_r1 - eps)
         eps_r2, eps_cache = self.eps(eps_cache, 'eps_r2', u2, s2)
-        x_3 = x - self.sigma(t_next) * h.expm1() * eps - self.sigma(t_next) / r2 * (h.expm1() / h - 1) * (eps_r2 - eps)
+        x_3 = x - t_next.neg().exp() * h.expm1() * eps - t_next.neg().exp() / r2 * (h.expm1() / h - 1) * (eps_r2 - eps)
         return x_3, eps_cache
 
     def dpm_solver_adaptive(self, x, t_start, t_end, order=3, rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1.,
@@ -365,7 +323,7 @@ class DPMSolver(nn.Module):
             t_, su = t, 0.
 
             eps, eps_cache = self.eps(eps_cache, 'eps', x, s)
-            denoised = x - self.sigma(s) * eps
+            denoised = x - s.neg().exp() * eps
             x_low, eps_cache = self.dpm_solver_2_step(x, s, t_, r1=1 / 3, eps_cache=eps_cache)
             x_high, eps_cache = self.dpm_solver_3_step(x, s, t_, eps_cache=eps_cache)
             delta = torch.maximum(atol, rtol * torch.maximum(x_low.abs(), x_prev.abs()))
@@ -373,7 +331,7 @@ class DPMSolver(nn.Module):
             accept = pid.propose_step(error)
             if accept:
                 x_prev = x_low
-                x = x_high + su * s_noise * noise_sampler(self.sigma(s), self.sigma(t))
+                x = x_high + su * s_noise * noise_sampler(s.neg().exp(), t.neg().exp())
                 s = t
                 info['n_accept'] += 1
             info['nfe'] += order
@@ -396,9 +354,9 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
         dpm_solver = DPMSolver(model, extra_args, eps_callback=pbar.update)
         if callback is not None:
             dpm_solver.info_callback = lambda info: callback(
-                {'sigma': dpm_solver.sigma(info['t']), 'sigma_hat': dpm_solver.sigma(info['t_up']), **info})
-        x, info = dpm_solver.dpm_solver_adaptive(x, dpm_solver.t(torch.tensor(sigma_max)),
-                                                 dpm_solver.t(torch.tensor(sigma_min)), order, rtol, atol, h_init,
+                {'sigma': info['t'].neg().exp(), 'sigma_hat': info['t_up'].neg().exp(), **info})
+        x, info = dpm_solver.dpm_solver_adaptive(x, -torch.tensor(sigma_max).log(),
+                                                 -torch.tensor(sigma_min).log(), order, rtol, atol, h_init,
                                                  pcoeff, icoeff, dcoeff, accept_safety, eta, s_noise, noise_sampler)
     return x
 
@@ -415,14 +373,10 @@ class CONDRegular:
         return self.__class__(cond)
 
     def process_cond(self, batch_size, device, **kwargs):
-        return self._copy_with(repeat_to_batch_size(self.cond, batch_size).to(device))
+        return self._copy_with(self.cond.to(device))
 
 
 class CONDCrossAttn(CONDRegular):
-    def can_concat(self, other):
-        s1 = self.cond.shape
-        s2 = other.cond.shape
-        return True
 
     def concat(self, others):
         conds = [self.cond]
@@ -442,13 +396,9 @@ class CONDCrossAttn(CONDRegular):
 
 def make_beta_schedule(schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
     betas = (
-                torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
+            torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_timestep, dtype=torch.float64) ** 2
     )
     return betas.numpy()
-
-
-def checkpoint(func, inputs, params, flag):
-    return func(*inputs)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
@@ -470,8 +420,6 @@ def zero_module(module):
     return module
 
 
-
-
 # Determine VRAM State
 vram_state = 3
 set_vram_to = 3
@@ -479,21 +427,10 @@ cpu_state = 0
 
 total_vram = 0
 
-
-
-def get_torch_device():
-    global directml_enabled
-    global cpu_state
-    return torch.device(torch.cuda.current_device())
-
-
 total_ram = psutil.virtual_memory().total / (1024 * 1024)
 print("Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, total_ram))
 
-try:
-    OOM_EXCEPTION = torch.cuda.OutOfMemoryError
-except:
-    OOM_EXCEPTION = Exception
+OOM_EXCEPTION = torch.cuda.OutOfMemoryError
 
 XFORMERS_ENABLED_VAE = True
 
@@ -502,7 +439,6 @@ import xformers.ops
 XFORMERS_IS_AVAILABLE = True
 XFORMERS_VERSION = xformers.version.__version__
 print("xformers version:", XFORMERS_VERSION)
-
 
 
 def is_nvidia():
@@ -536,20 +472,9 @@ class LoadedModel:
         if lowvram_model_memory == 0:
             patch_model_to = self.device
 
-        self.model.model_patches_to(self.device)
-        self.model.model_patches_to(self.model.model_dtype())
-
         self.real_model = self.model.patch_model(
-                device_to=patch_model_to)  # TODO: do something with loras and offloading to CPU
-
-        if lowvram_model_memory > 0:
-            print("loading in lowvram mode", lowvram_model_memory / (1024 * 1024))
-            self.model_accelerated = True
+            device_to=patch_model_to)  # TODO: do something with loras and offloading to CPU
         return self.real_model
-
-    def model_unload(self):
-        self.model.unpatch_model(self.model.offload_device)
-        self.model.model_patches_to(self.model.offload_device)
 
     def __eq__(self, other):
         return self.model is other.model
@@ -566,7 +491,6 @@ def free_memory1(memory_required, device, keep_loaded=[]):
         if shift_model.device == device:
             if shift_model not in keep_loaded:
                 m = current_loaded_models.pop(i)
-                m.model_unload()
                 del m
                 unloaded_model = True
 
@@ -575,8 +499,6 @@ def free_memory1(memory_required, device, keep_loaded=[]):
     else:
         if vram_state != 4:
             mem_free_total, mem_free_torch = get_free_memory(device, torch_free_too=True)
-            if mem_free_torch > mem_free_total * 0.25:
-                soft_empty_cache()
 
 
 def load_models_gpu(models, memory_required=0):
@@ -626,19 +548,11 @@ def load_models_gpu(models, memory_required=0):
         if (vram_set_state == 2 or vram_set_state == 3):
             model_size = loaded_model.model_memory_required(torch_dev)
             current_free_mem = get_free_memory(torch_dev)
-            lowvram_model_memory = int(max(256 * (1024 * 1024), (current_free_mem - 1024 * (1024 * 1024)) / 1.3))
-            if model_size > (current_free_mem - inference_memory):  # only switch to lowvram if really necessary
-                vram_set_state = 2
-            else:
-                lowvram_model_memory = 0
+            lowvram_model_memory = 0
 
-        cur_loaded_model = loaded_model.model_load(lowvram_model_memory)
+        loaded_model.model_load(lowvram_model_memory)
         current_loaded_models.insert(0, loaded_model)
     return
-
-
-def load_model_gpu(model):
-    return load_models_gpu([model])
 
 
 def dtype_size(dtype):
@@ -648,12 +562,8 @@ def dtype_size(dtype):
     return dtype_size
 
 
-def unet_offload_device():
-    return torch.device("cpu")
-
-
 def unet_inital_load_device(parameters, dtype):
-    torch_dev = get_torch_device()
+    torch_dev = torch.device(torch.cuda.current_device())
 
     cpu_dev = torch.device("cpu")
 
@@ -670,46 +580,14 @@ def unet_dtype1(device=None, model_params=0):
         return torch.float16
 
 
-def text_encoder_offload_device():
-    return torch.device("cpu")
-
-
-def text_encoder_device():
-    return torch.device("cpu")
-
-
-def vae_device():
-    return get_torch_device()
-
-
-def vae_offload_device():
-    return torch.device("cpu")
-
-
-def vae_dtype():
-    global VAE_DTYPE
-    return VAE_DTYPE
-
-
 def get_autocast_device(dev):
     if hasattr(dev, 'type'):
         return dev.type
 
 
-def xformers_enabled():
-    global directml_enabled
-    global cpu_state
-    return XFORMERS_IS_AVAILABLE
-
-
-def xformers_enabled_vae():
-    enabled = xformers_enabled()
-    return XFORMERS_ENABLED_VAE
-
-
 def get_free_memory(dev=None, torch_free_too=False):
     if dev is None:
-        dev = get_torch_device()
+        dev = torch.device(torch.cuda.current_device())
 
     if hasattr(dev, 'type') and (dev.type == 'cpu' or dev.type == 'mps'):
         mem_free_total = psutil.virtual_memory().available
@@ -729,7 +607,7 @@ def get_free_memory(dev=None, torch_free_too=False):
 
 
 def batch_area_memory(area):
-    if xformers_enabled():
+    if XFORMERS_IS_AVAILABLE:
         # TODO: these formulas are copied from maximum_batch_area below
         return (area / 20) * (1024 * 1024)
 
@@ -742,29 +620,8 @@ def maximum_batch_area():
     return int(max(area, 0))
 
 
-def cpu_mode():
-    global cpu_state
-    return cpu_state == 1
-
-
-def mps_mode():
-    global cpu_state
-    return cpu_state == 2
-
-
-def is_device_cpu(device):
-    if hasattr(device, 'type'):
-        if (device.type == 'cpu'):
-            return True
-
-
 def should_use_fp16(device=None, model_params=0, prioritize_performance=True):
     global directml_enabled
-
-    if device is not None:
-        if is_device_cpu(device):
-            return False
-
     if torch.cuda.is_bf16_supported():
         return True
 
@@ -806,12 +663,6 @@ class ModelPatcher:
         self.model_keys = set(model_sd.keys())
         return size
 
-    def is_clone(self, other):
-        return False
-
-    def model_patches_to(self, device):
-        to = self.model_options["transformer_options"]
-
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
@@ -828,24 +679,10 @@ class ModelPatcher:
             self.current_device = device_to
         return self.model
 
-    def unpatch_model(self, device_to=None):
-        keys = list(self.backup.keys())
-        self.backup = {}
-
-        if device_to is not None:
-            self.model.to(device_to)
-            self.current_device = device_to
-
-        self.object_patches_backup = {}
-
-
-def nonlinearity(x):
-    # swish
-    return x * torch.sigmoid(x)
-
 
 class Upsample(nn.Module):
     pass
+
 
 class Downsample(nn.Module):
     pass
@@ -876,10 +713,10 @@ class ResnetBlock(nn.Module):
                             padding=1)
         if self.in_channels != self.out_channels:
             self.nin_shortcut = Conv2d(in_channels,
-                                           out_channels,
-                                           kernel_size=1,
-                                           stride=1,
-                                           padding=0)
+                                       out_channels,
+                                       kernel_size=1,
+                                       stride=1,
+                                       padding=0)
 
     def forward(self, x, temb):
         h = x
@@ -937,7 +774,7 @@ class AttnBlock(nn.Module):
                                stride=1,
                                padding=0)
 
-        if xformers_enabled_vae():
+        if XFORMERS_ENABLED_VAE:
             print("Using xformers attention in VAE")
             self.optimized_attention = xformers_attention
 
@@ -953,10 +790,6 @@ class AttnBlock(nn.Module):
         h_ = self.proj_out(h_)
 
         return x + h_
-
-
-def make_attn(in_channels, attn_type="vanilla", attn_kwargs=None):
-    return AttnBlock(in_channels)
 
 
 class Encoder(nn.Module):
@@ -1009,7 +842,7 @@ class Encoder(nn.Module):
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
                                        dropout=dropout)
-        self.mid.attn_1 = make_attn(block_in, attn_type=attn_type)
+        self.mid.attn_1 = AttnBlock(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in,
                                        out_channels=block_in,
                                        temb_channels=self.temb_ch,
@@ -1122,7 +955,7 @@ class Decoder(nn.Module):
         # end
 
         h = self.norm_out(h)
-        h = nonlinearity(h)
+        h = h * torch.sigmoid(h)
         h = self.conv_out(h, **kwargs)
         return h
 
@@ -1150,7 +983,7 @@ class ModelSamplingDiscrete(torch.nn.Module):
     def _register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                            linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
         betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end,
-                                       cosine_s=cosine_s)
+                                   cosine_s=cosine_s)
         alphas = 1. - betas
         alphas_cumprod = torch.tensor(np.cumprod(alphas, axis=0), dtype=torch.float32)
 
@@ -1245,7 +1078,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
 
         if textmodel_json_config is None:
             textmodel_json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                                     "sd1_clip_config.json")
+                                                 "sd1_clip_config.json")
         config = config_class.from_json_file(textmodel_json_config)
         self.num_layers = config.num_hidden_layers
         with use_comfy_ops(device, dtype):
@@ -1418,12 +1251,6 @@ class SDTokenizer:
         self.embedding_key = embedding_key
 
     def tokenize_with_weights(self, text: str, return_word_ids=False):
-        '''
-        Takes a prompt and converts it to a list of (token, weight, word id) elements.
-        Tokens can both be integer tokens and pre computed CLIP tensors.
-        Word id values are unique per word and embedding, where the id 0 is reserved for non word tokens.
-        Returned list has the dimensions NxM where M is the input size of CLIP
-        '''
         if self.pad_with_end:
             pad_token = self.end_token
 
@@ -1503,6 +1330,7 @@ class SD1ClipModel(torch.nn.Module):
         out, pooled = getattr(self, self.clip).encode_token_weights(token_weight_pairs)
         return out, pooled
 
+
 # The main sampling function shared by all the samplers
 # Returns denoised
 def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None):
@@ -1525,20 +1353,7 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
 
         return (input_x, mult, conditionning, area, control, patches)
 
-    def cond_equal_size(c1, c2):
-        if c1 is c2:
-            return True
-        return True
-
-    def can_concat_cond(c1, c2):
-        return cond_equal_size(c1[2], c2[2])
-
     def cond_cat(c_list):
-        c_crossattn = []
-        c_concat = []
-        c_adm = []
-        crossattn_max_len = 0
-
         temp = {}
         for x in c_list:
             for k in x:
@@ -1579,8 +1394,7 @@ def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, mod
             first_shape = first[0][0].shape
             to_batch_temp = []
             for x in range(len(to_run)):
-                if can_concat_cond(to_run[x][0], first[0]):
-                    to_batch_temp += [x]
+                to_batch_temp += [x]
 
             to_batch_temp.reverse()
             to_batch = to_batch_temp[:1]
@@ -1675,52 +1489,6 @@ class KSamplerX0Inpaint(torch.nn.Module):
         return out
 
 
-def resolve_areas_and_cond_masks(conditions, h, w, device):
-    # We need to decide on an area outside the sampling loop in order to properly generate opposite areas of equal sizes.
-    # While we're doing this, we can also resolve the mask device and scaling for performance reasons
-    for i in range(len(conditions)):
-        c = conditions[i]
-
-
-def create_cond_with_same_area_if_none(conds, c):
-    if 'area' not in c:
-        return
-
-
-def calculate_start_end_timesteps(model, conds):
-    s = model.model_sampling
-    for t in range(len(conds)):
-        x = conds[t]
-
-        timestep_start = None
-        timestep_end = None
-
-
-def pre_run_control(model, conds):
-    s = model.model_sampling
-    for t in range(len(conds)):
-        x = conds[t]
-
-        timestep_start = None
-        timestep_end = None
-        percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
-
-
-def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
-    cond_cnets = []
-    cond_other = []
-    uncond_cnets = []
-    uncond_other = []
-    for t in range(len(conds)):
-        x = conds[t]
-        if 'area' not in x:
-            cond_other.append((x, t))
-    for t in range(len(uncond)):
-        x = uncond[t]
-        if 'area' not in x:
-            uncond_other.append((x, t))
-
-
 def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwargs):
     for t in range(len(conds)):
         x = conds[t]
@@ -1783,36 +1551,12 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
     return KSAMPLER
 
 
-def wrap_model(model):
-    model_denoise = CFGNoisePredictor(model)
-    return model_denoise
-
-
 def sample(model, noise, positive, negative, cfg, device, sampler, sigmas, model_options={}, latent_image=None,
            denoise_mask=None, callback=None, disable_pbar=False, seed=None):
     positive = positive[:]
     negative = negative[:]
 
-    resolve_areas_and_cond_masks(positive, noise.shape[2], noise.shape[3], device)
-    resolve_areas_and_cond_masks(negative, noise.shape[2], noise.shape[3], device)
-
-    model_wrap = wrap_model(model)
-
-    calculate_start_end_timesteps(model, negative)
-    calculate_start_end_timesteps(model, positive)
-
-    # make sure each cond area has an opposite one with the same area
-    for c in positive:
-        create_cond_with_same_area_if_none(negative, c)
-    for c in negative:
-        create_cond_with_same_area_if_none(positive, c)
-
-    pre_run_control(model, negative + positive)
-
-    apply_empty_x_to_equal_area(list(filter(lambda c: c.get('control_apply_to_uncond', False) == True, positive)),
-                                negative, 'control', lambda cond_cnets, x: cond_cnets[x])
-    apply_empty_x_to_equal_area(positive, negative, 'gligen', lambda cond_cnets, x: cond_cnets[x])
-
+    model_wrap = CFGNoisePredictor(model)
     if latent_image is not None:
         latent_image = model.process_latent_in(latent_image)
 
@@ -1836,11 +1580,6 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps):
     sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
                                sigma_max=float(model.model_sampling.sigma_max))
     return sigmas
-
-
-def sampler_class(name):
-    sampler = ksampler(name)
-    return sampler
 
 
 class KSampler:
@@ -1870,7 +1609,7 @@ class KSampler:
         if sigmas is None:
             sigmas = self.sigmas
 
-        sampler = sampler_class(self.sampler)
+        sampler = ksampler(self.sampler)
 
         return sample(self.model, noise, positive, negative, cfg, self.device, sampler(), sigmas, self.model_options,
                       latent_image=latent_image, denoise_mask=denoise_mask, callback=callback,
@@ -1882,11 +1621,6 @@ def prepare_noise(latent_image, seed, noise_inds=None):
     if noise_inds is None:
         return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout,
                            generator=generator, device="cpu")
-
-
-def get_models_from_cond(cond, model_type):
-    models = []
-    return models
 
 
 def convert_cond(cond):
@@ -1902,13 +1636,10 @@ def convert_cond(cond):
 
 
 def get_additional_models(positive, negative, dtype):
-    """loads additional models in positive and negative conditioning"""
-    control_nets = set(get_models_from_cond(positive, "control") + get_models_from_cond(negative, "control"))
-
     inference_memory = 0
     control_models = []
 
-    gligen = get_models_from_cond(positive, "gligen") + get_models_from_cond(negative, "gligen")
+    gligen = []
     gligen = [x[1] for x in gligen]
     models = control_models + gligen
     return models, inference_memory
@@ -1947,15 +1678,12 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
     samples = samples.cpu()
     return samples
 
+
 _ATTN_PRECISION = "fp32"
 
 
-def exists(val):
-    return val is not None
-
-
 def default(val, d):
-    if exists(val):
+    if val is not None:
         return val
     return d
 
@@ -2071,7 +1799,7 @@ class BasicTransformerBlock(nn.Module):
         self.d_head = d_head
 
     def forward(self, x, context=None, transformer_options={}):
-        return checkpoint(self._forward, (x, context, transformer_options), self.parameters(), self.checkpoint)
+        return self._forward(*(x, context, transformer_options))
 
     def _forward(self, x, context=None, transformer_options={}):
         extra_options = {}
@@ -2089,8 +1817,6 @@ class BasicTransformerBlock(nn.Module):
             extra_options["block"] = block
         if "cond_or_uncond" in transformer_options:
             extra_options["cond_or_uncond"] = transformer_options["cond_or_uncond"]
-        else:
-            transformer_patches = {}
 
         extra_options["n_heads"] = self.n_heads
         extra_options["dim_head"] = self.d_head
@@ -2130,21 +1856,12 @@ class BasicTransformerBlock(nn.Module):
 
 
 class SpatialTransformer(nn.Module):
-    """
-    Transformer block for image-like data.
-    First, project the input (aka embedding)
-    and reshape to b, t, d.
-    Then apply standard transformer action.
-    Finally, reshape to image
-    NEW: use_linear for more efficiency instead of the 1x1 convs
-    """
-
     def __init__(self, in_channels, n_heads, d_head,
                  depth=1, dropout=0., context_dim=None,
-                 disable_self_attn=False, use_linear=False,
+                 disable_self_attn=False, use_linear=True,
                  use_checkpoint=True, dtype=None, device=None):
         super().__init__()
-        if exists(context_dim) and not isinstance(context_dim, list):
+        if context_dim is not None and not isinstance(context_dim, list):
             context_dim = [context_dim] * depth
         self.in_channels = in_channels
         inner_dim = n_heads * d_head
@@ -2170,7 +1887,6 @@ class SpatialTransformer(nn.Module):
         self.use_linear = use_linear
 
     def forward(self, x, context=None, transformer_options={}):
-        # note: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
             context = [context] * len(self.transformer_blocks)
         b, c, h, w = x.shape
@@ -2188,29 +1904,16 @@ class SpatialTransformer(nn.Module):
         return x + x_in
 
 
-
 class TimestepBlock(nn.Module):
-    """
-    Any module where forward() takes timestep embeddings as a second argument.
-    """
-
     @abstractmethod
     def forward(self, x, emb):
-        """
-        Apply the module to `x` given `emb` timestep embeddings.
-        """
+        pass
 
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
-    """
-    A sequential module that passes timestep embeddings to the children that
-    support it as an extra input.
-    """
-
     pass
 
 
-# This is needed because accelerate makes a copy of transformer_options which breaks "current_index"
 def forward_timestep_embed(ts, x, emb, context=None, transformer_options={}, output_shape=None):
     for layer in ts:
         if isinstance(layer, TimestepBlock):
@@ -2226,14 +1929,6 @@ def forward_timestep_embed(ts, x, emb, context=None, transformer_options={}, out
 
 
 class Upsample(nn.Module):
-    """
-    An upsampling layer with an optional convolution.
-    :param channels: channels in the inputs and outputs.
-    :param use_conv: a bool determining if a convolution is applied.
-    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
-                 upsampling occurs in the inner-two dimensions.
-    """
-
     def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None):
         super().__init__()
         self.channels = channels
@@ -2257,14 +1952,6 @@ class Upsample(nn.Module):
 
 
 class Downsample(nn.Module):
-    """
-    A downsampling layer with an optional convolution.
-    :param channels: channels in the inputs and outputs.
-    :param use_conv: a bool determining if a convolution is applied.
-    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
-                 downsampling occurs in the inner-two dimensions.
-    """
-
     def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None):
         super().__init__()
         self.channels = channels
@@ -2283,21 +1970,6 @@ class Downsample(nn.Module):
 
 
 class ResBlock(TimestepBlock):
-    """
-    A residual block that can optionally change the number of channels.
-    :param channels: the number of input channels.
-    :param emb_channels: the number of timestep embedding channels.
-    :param dropout: the rate of dropout.
-    :param out_channels: if specified, the number of out channels.
-    :param use_conv: if True and out_channels is specified, use a spatial
-        convolution instead of a smaller 1x1 convolution to change the
-        channels in the skip connection.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param use_checkpoint: if True, use gradient checkpointing on this module.
-    :param up: if True, use this block for upsampling.
-    :param down: if True, use this block for downsampling.
-    """
-
     def __init__(
             self,
             channels,
@@ -2354,15 +2026,7 @@ class ResBlock(TimestepBlock):
             self.skip_connection = conv_nd(dims, channels, self.out_channels, 1, dtype=dtype, device=device)
 
     def forward(self, x, emb):
-        """
-        Apply the block to a Tensor, conditioned on a timestep embedding.
-        :param x: an [N x C x ...] Tensor of features.
-        :param emb: an [N x emb_channels] Tensor of timestep embeddings.
-        :return: an [N x C x ...] Tensor of outputs.
-        """
-        return checkpoint(
-            self._forward, (x, emb), self.parameters(), self.use_checkpoint
-        )
+        return self._forward(*(x, emb))
 
     def _forward(self, x, emb):
         h = self.in_layers(x)
@@ -2374,36 +2038,7 @@ class ResBlock(TimestepBlock):
         return self.skip_connection(x) + h
 
 
-def apply_control(h, control, name):
-    return h
-
-
 class UNetModel(nn.Module):
-    """
-    The full UNet model with attention and timestep embedding.
-    :param in_channels: channels in the input Tensor.
-    :param model_channels: base channel count for the model.
-    :param out_channels: channels in the output Tensor.
-    :param num_res_blocks: number of residual blocks per downsample.
-    :param dropout: the dropout probability.
-    :param channel_mult: channel multiplier for each level of the UNet.
-    :param conv_resample: if True, use learned convolutions for upsampling and
-        downsampling.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param num_classes: if specified (as an int), then this model will be
-        class-conditional with `num_classes` classes.
-    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
-    :param num_heads: the number of attention heads in each attention layer.
-    :param num_heads_channels: if specified, ignore num_heads and instead use
-                               a fixed channel width per attention head.
-    :param num_heads_upsample: works with num_heads to set a different number
-                               of heads for upsampling. Deprecated.
-    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
-    :param resblock_updown: use residual blocks for up/downsampling.
-    :param use_new_attention_order: use a different attention pattern for potentially
-                                    increased efficiency.
-    """
-
     def __init__(
             self,
             image_size,
@@ -2431,7 +2066,7 @@ class UNetModel(nn.Module):
             disable_self_attentions=None,
             num_attention_blocks=None,
             disable_middle_self_attn=False,
-            use_linear_in_transformer=False,
+            use_linear_in_transformer=True,
             adm_in_channels=None,
             transformer_depth_middle=None,
             transformer_depth_output=None,
@@ -2512,10 +2147,8 @@ class UNetModel(nn.Module):
                 if num_transformers > 0:
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
-                    else:
-                        disabled_sa = False
 
-                    if not exists(num_attention_blocks) or nr < num_attention_blocks[level]:
+                    if num_attention_blocks is None or nr < num_attention_blocks[level]:
                         layers.append(SpatialTransformer(
                             ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim
                             , use_linear=use_linear_in_transformer,
@@ -2603,13 +2236,12 @@ class UNetModel(nn.Module):
                 if num_transformers > 0:
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
-                    else:
-                        disabled_sa = False
 
-                    if not exists(num_attention_blocks) or i < num_attention_blocks[level]:
+                    if num_attention_blocks is None or i < num_attention_blocks[level]:
                         layers.append(
                             SpatialTransformer(
-                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim, use_linear=use_linear_in_transformer,
+                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
+                                use_linear=use_linear_in_transformer,
                                 use_checkpoint=use_checkpoint, dtype=self.dtype, device=device
                             )
                         )
@@ -2665,17 +2297,14 @@ class UNetModel(nn.Module):
         for id, module in enumerate(self.input_blocks):
             transformer_options["block"] = ("input", id)
             h = forward_timestep_embed(module, h, emb, context, transformer_options)
-            h = apply_control(h, control, 'input')
             hs.append(h)
 
         transformer_options["block"] = ("middle", 0)
         h = forward_timestep_embed(self.middle_block, h, emb, context, transformer_options)
-        h = apply_control(h, control, 'middle')
 
         for id, module in enumerate(self.output_blocks):
             transformer_options["block"] = ("output", id)
             hsp = hs.pop()
-            hsp = apply_control(hsp, control, 'output')
 
             h = th.cat([h, hsp], dim=1)
             del hsp
@@ -2686,7 +2315,6 @@ class UNetModel(nn.Module):
             h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape)
         h = h.type(x.dtype)
         return self.out(h)
-
 
 
 def model_sampling(model_config, model_type):
@@ -2737,7 +2365,6 @@ class BaseModel(torch.nn.Module):
     def get_dtype(self):
         return self.diffusion_model.dtype
 
-
     def extra_conds(self, **kwargs):
         out = {}
         return out
@@ -2778,16 +2405,6 @@ class BASE:
     beta_schedule = "linear"
     latent_format = LatentFormat
 
-    @classmethod
-    def matches(s, unet_config):
-        return True
-
-    def model_type(self, state_dict, prefix=""):
-        return EPS
-
-    def inpaint_model(self):
-        return self.unet_config["in_channels"] > 4
-
     def __init__(self, unet_config):
         self.unet_config = unet_config
         self.latent_format = self.latent_format()
@@ -2795,7 +2412,7 @@ class BASE:
             self.unet_config[x] = self.unet_extra_config[x]
 
     def get_model(self, state_dict, prefix="", device=None):
-        out = BaseModel(self, model_type=self.model_type(state_dict, prefix), device=device)
+        out = BaseModel(self, model_type=EPS, device=device)
         return out
 
 
@@ -2819,9 +2436,6 @@ class SD15(BASE):
         replace_prefix["cond_stage_model."] = "cond_stage_model.clip_l."
         state_dict = state_dict_prefix_replace(state_dict, replace_prefix)
         return state_dict
-
-    def clip_target(self):
-        return ClipTarget(SD1Tokenizer, SD1ClipModel)
 
 
 models = [SD15]
@@ -2945,15 +2559,13 @@ def detect_unet_config(state_dict, key_prefix, dtype):
 
 def model_config_from_unet_config(unet_config):
     for model_config in models:
-        if model_config.matches(unet_config):
-            return model_config(unet_config)
+        return model_config(unet_config)
 
 
 def model_config_from_unet(state_dict, unet_key_prefix, dtype, use_base_if_no_match=False):
     unet_config = detect_unet_config(state_dict, unet_key_prefix, dtype)
     model_config = model_config_from_unet_config(unet_config)
     return model_config
-
 
 
 def load_model_weights(model, sd):
@@ -2977,8 +2589,8 @@ class CLIP:
         clip = target.clip
         tokenizer = target.tokenizer
 
-        load_device = text_encoder_device()
-        offload_device = text_encoder_offload_device()
+        load_device = torch.device("cpu")
+        offload_device = torch.device("cpu")
         params['device'] = offload_device
         params['dtype'] = torch.float32
 
@@ -3000,7 +2612,7 @@ class CLIP:
             return cond, pooled
 
     def load_model(self):
-        load_model_gpu(self.patcher)
+        load_models_gpu([self.patcher])
         return self.patcher
 
 
@@ -3021,10 +2633,10 @@ class VAE:
             print("Leftover VAE keys", u)
 
         if device is None:
-            device = vae_device()
+            device = torch.device(torch.cuda.current_device())
         self.device = device
-        self.offload_device = vae_offload_device()
-        self.vae_dtype = vae_dtype()
+        self.offload_device = torch.device("cpu")
+        self.vae_dtype = VAE_DTYPE
         self.first_stage_model.to(self.vae_dtype)
 
     def decode(self, samples_in):
@@ -3066,7 +2678,6 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     model_config = model_config_from_unet(sd, "model.diffusion_model.", unet_dtype)
     if output_model:
         inital_load_device = unet_inital_load_device(parameters, unet_dtype)
-        offload_device = unet_offload_device()
         model = model_config.get_model(sd, "model.diffusion_model.", device=inital_load_device)
         model.load_model_weights(sd, "model.diffusion_model.")
 
@@ -3076,7 +2687,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
 
     if output_clip:
         w = WeightsLoader()
-        clip_target = model_config.clip_target()
+        clip_target = ClipTarget(SD1Tokenizer, SD1ClipModel)
         if clip_target is not None:
             clip = CLIP(clip_target, embedding_directory=embedding_directory)
             w.cond_stage_model = clip.cond_stage_model
@@ -3088,11 +2699,12 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
         print("left over keys:", left_over)
 
     if output_model:
-        model_patcher = ModelPatcher(model, load_device=get_torch_device(), offload_device=unet_offload_device(),
+        model_patcher = ModelPatcher(model, load_device=torch.device(torch.cuda.current_device()),
+                                     offload_device=torch.device("cpu"),
                                      current_device=inital_load_device)
         if inital_load_device != torch.device("cpu"):
             print("loaded straight to GPU")
-            load_model_gpu(model_patcher)
+            load_models_gpu([model_patcher])
 
     return (model_patcher, clip, vae, clipvision)
 
@@ -3111,11 +2723,6 @@ folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes
 output_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output")
 
 filename_list_cache = {}
-
-
-def get_output_directory():
-    global output_directory
-    return output_directory
 
 
 def get_full_path(folder_name, filename):
@@ -3193,9 +2800,7 @@ def get_previewer(device, latent_format):
 
 def prepare_callback(model, steps, x0_output_dict=None):
     preview_format = "JPEG"
-
     previewer = get_previewer(model.load_device, model.model.latent_format)
-
     pbar = ProgressBar(steps)
 
     def callback(step, x0, x, total_steps):
@@ -3228,7 +2833,7 @@ class CLIPTextEncode:
 
 class SaveImage:
     def __init__(self):
-        self.output_dir = get_output_directory()
+        self.output_dir = output_directory
         self.type = "output"
         self.prefix_append = ""
 
@@ -3292,10 +2897,6 @@ class VAEDecode:
         return (vae.decode(samples["samples"]),)
 
 
-def get_value_at_index(obj: Union[Sequence, Mapping], index: int) -> Any:
-    return obj[index]
-
-
 with open('prompt.txt', 'r') as file:
     lines = file.readlines()
 
@@ -3313,11 +2914,11 @@ def gen(prompt, w, h):
         cliptextencode = CLIPTextEncode()
         cliptextencode_242 = cliptextencode.encode(
             text=prompt,
-            clip=get_value_at_index(checkpointloadersimple_241, 1),
+            clip=checkpointloadersimple_241[1],
         )
         cliptextencode_243 = cliptextencode.encode(
             text="(worst_quality:1.6 low_quality:1.6) monochrome (zombie sketch interlocked_fingers comic) (hands) text signature logo",
-            clip=get_value_at_index(checkpointloadersimple_241, 1),
+            clip=checkpointloadersimple_241[1],
         )
         emptylatentimage = EmptyLatentImage()
         emptylatentimage_244 = emptylatentimage.generate(
@@ -3334,17 +2935,18 @@ def gen(prompt, w, h):
             sampler_name="dpm_adaptive",
             scheduler="karras",
             denoise=1,
-            model=get_value_at_index(checkpointloadersimple_241, 0),
-            positive=get_value_at_index(cliptextencode_242, 0),
-            negative=get_value_at_index(cliptextencode_243, 0),
-            latent_image=get_value_at_index(emptylatentimage_244, 0),
+            model=checkpointloadersimple_241[0],
+            positive=cliptextencode_242[0],
+            negative=cliptextencode_243[0],
+            latent_image=emptylatentimage_244[0],
         )
         vaedecode_240 = vaedecode.decode(
-            samples=get_value_at_index(ksampler_239, 0),
-            vae=get_value_at_index(checkpointloadersimple_241, 2),
+            samples=ksampler_239[0],
+            vae=checkpointloadersimple_241[2],
         )
         saveimage.save_images(
-            filename_prefix="ComfyUI", images=get_value_at_index(vaedecode_240, 0)
+            filename_prefix="ComfyUI", images=vaedecode_240[0]
         )
 
-gen(prompt,w,h)
+
+gen(prompt, w, h)
