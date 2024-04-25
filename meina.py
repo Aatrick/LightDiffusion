@@ -100,87 +100,23 @@ class SD15(LatentFormat):
         self.taesd_decoder_name = "taesd_decoder"
 
 
-def instantiate_from_config(config):
-    return get_obj_from_str(config["target"])(**config.get("params", dict()))
-
-
-def get_obj_from_str(string, reload=False):
-    module, cls = string.rsplit(".", 1)
-    return getattr(importlib.import_module(module, package=None), cls)
-
-
-class DiagonalGaussianRegularizer(torch.nn.Module):
-    def __init__(self, sample: bool = True):
+class DiagonalGaussianRegularizer(nn.Module):
+    def __init__(self, sample=True):
         super().__init__()
         self.sample = sample
 
-
-class AbstractAutoencoder(torch.nn.Module):
-    def __init__(
-            self,
-            ema_decay: Union[None, float] = None,
-            monitor: Union[None, str] = None,
-            input_key: str = "jpg",
-            **kwargs,
-    ):
+class AutoencodingEngine(nn.Module):
+    def __init__(self, encoder, decoder, regularizer):
         super().__init__()
-
-        self.input_key = input_key
-        self.use_ema = ema_decay is not None
-
-
-class AutoencodingEngine(AbstractAutoencoder):
-    def __init__(
-            self,
-            *args,
-            encoder_config: Dict,
-            decoder_config: Dict,
-            regularizer_config: Dict,
-            **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-
-        self.encoder: torch.nn.Module = instantiate_from_config(encoder_config)
-        self.decoder: torch.nn.Module = instantiate_from_config(decoder_config)
-        self.regularization: AbstractRegularizer = instantiate_from_config(
-            regularizer_config
-        )
-
-
-class AutoencodingEngineLegacy(AutoencodingEngine):
-    def __init__(self, embed_dim: int, **kwargs):
-        self.max_batch_size = kwargs.pop("max_batch_size", None)
-        ddconfig = kwargs.pop("ddconfig")
-        super().__init__(
-            encoder_config={
-                "target": "meina.Encoder",
-                "params": ddconfig,
-            },
-            decoder_config={
-                "target": "meina.Decoder",
-                "params": ddconfig,
-            },
-            **kwargs,
-        )
-        self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
-        self.embed_dim = embed_dim
+        self.encoder = encoder
+        self.decoder = decoder
+        self.regularization = regularizer
+        self.post_quant_conv = torch.nn.Conv2d(4, 4, 1)
 
     def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
         dec = self.post_quant_conv(z)
         dec = self.decoder(dec, **decoder_kwargs)
         return dec
-
-
-class AutoencoderKL(AutoencodingEngineLegacy):
-    def __init__(self, **kwargs):
-        super().__init__(
-            regularizer_config={
-                "target": (
-                    "meina.DiagonalGaussianRegularizer"
-                )
-            },
-            **kwargs,
-        )
 
 
 class Linear(torch.nn.Linear):
@@ -201,7 +137,7 @@ def conv_nd(dims, *args, **kwargs):
 
 
 @contextmanager
-def use_comfy_ops(device=None, dtype=None):  # Kind of an ugly hack but I can't think of a better way
+def use_comfy_ops(device=None, dtype=None):
     old_torch_nn_linear = torch.nn.Linear
     force_device = device
     force_dtype = dtype
@@ -523,9 +459,14 @@ def load_models_gpu(models, memory_required=0):
 
     total_memory_required = {}
     for loaded_model in models_to_load:
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
-                                                                               0) + loaded_model.model_memory_required(
-            loaded_model.device)
+        if total_memory_required.get(loaded_model.device, 0) is None:
+            total_memory_required[loaded_model.device] = 0
+        elif loaded_model.model_memory_required(loaded_model.device) is None:
+            total_memory_required[loaded_model.device] = 0
+        else:
+            total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
+                                                                                   0) + loaded_model.model_memory_required(
+                loaded_model.device)
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
@@ -2595,10 +2536,18 @@ class CLIP:
 class VAE:
     def __init__(self, sd=None, device=None, config=None):
         if config is None:
-            # default SD1.x/SD2.x VAE parameters
-            ddconfig = {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128,
-                        'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0}
-            self.first_stage_model = AutoencoderKL(ddconfig=ddconfig, embed_dim=4)
+            config = {
+                'encoder': {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128,
+                        'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0},
+                'decoder': {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128,
+                        'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0},
+                'regularizer': {'sample': True}
+            }
+            self.first_stage_model = AutoencodingEngine(
+                Encoder(**config['encoder']),
+                Decoder(**config['decoder']),
+                DiagonalGaussianRegularizer(**config['regularizer'])
+            )
         self.first_stage_model = self.first_stage_model.eval()
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False)
