@@ -361,10 +361,6 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
     return x
 
 
-def lcm(a, b):  # TODO: eventually replace by math.lcm (added in python3.9)
-    return abs(a * b) // math.gcd(a, b)
-
-
 class CONDRegular:
     def __init__(self, cond):
         self.cond = cond
@@ -383,7 +379,7 @@ class CONDCrossAttn(CONDRegular):
         crossattn_max_len = self.cond.shape[1]
         for x in others:
             c = x.cond
-            crossattn_max_len = lcm(crossattn_max_len, c.shape[1])
+            crossattn_max_len = abs(crossattn_max_len*c.shape[1])//math.gcd(crossattn_max_len,c.shape[1])
             conds.append(c)
 
         out = []
@@ -424,11 +420,6 @@ def zero_module(module):
 vram_state = 3
 set_vram_to = 3
 cpu_state = 0
-
-total_vram = 0
-
-total_ram = psutil.virtual_memory().total / (1024 * 1024)
-print("Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, total_ram))
 
 OOM_EXCEPTION = torch.cuda.OutOfMemoryError
 
@@ -473,7 +464,7 @@ class LoadedModel:
             patch_model_to = self.device
 
         self.real_model = self.model.patch_model(
-            device_to=patch_model_to)  # TODO: do something with loras and offloading to CPU
+            device_to=patch_model_to)
         return self.real_model
 
     def __eq__(self, other):
@@ -608,7 +599,6 @@ def get_free_memory(dev=None, torch_free_too=False):
 
 def batch_area_memory(area):
     if XFORMERS_IS_AVAILABLE:
-        # TODO: these formulas are copied from maximum_batch_area below
         return (area / 20) * (1024 * 1024)
 
 
@@ -1518,9 +1508,6 @@ class Sampler:
         return math.isclose(max_sigma, sigma, rel_tol=1e-05) or sigma > max_sigma
 
 
-KSAMPLER_NAMES = ["dpm_adaptive", "dpmpp_2m"]
-
-
 def ksampler(sampler_name, extra_options={}, inpaint_options={}):
     class KSAMPLER(Sampler):
         def sample(self, model_wrap, sigmas, extra_args, callback, noise, latent_image=None, denoise_mask=None,
@@ -1571,11 +1558,6 @@ def sample(model, noise, positive, negative, cfg, device, sampler, sigmas, model
     samples = sampler.sample(model_wrap, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
     return model.process_latent_out(samples.to(torch.float32))
 
-
-SCHEDULER_NAMES = ["normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform"]
-SAMPLER_NAMES = KSAMPLER_NAMES + ["ddim", "uni_pc", "uni_pc_bh2"]
-
-
 def calculate_sigmas_scheduler(model, scheduler_name, steps):
     sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
                                sigma_max=float(model.model_sampling.sigma_max))
@@ -1583,8 +1565,8 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps):
 
 
 class KSampler:
-    SCHEDULERS = SCHEDULER_NAMES
-    SAMPLERS = SAMPLER_NAMES
+    SCHEDULERS = ["karras"]
+    SAMPLERS = ["dpm_adaptive"]
 
     def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
         self.model = model
@@ -1747,12 +1729,6 @@ def attention_xformers(q, k, v, heads, mask=None):
     )
     return out
 
-
-optimized_attention_masked = attention_xformers
-print("Using xformers cross attention")
-optimized_attention = attention_xformers
-
-
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., dtype=None, device=None):
         super().__init__()
@@ -1775,7 +1751,7 @@ class CrossAttention(nn.Module):
         v = self.to_v(context)
 
         if mask is None:
-            out = optimized_attention(q, k, v, self.heads)
+            out = attention_xformers(q, k, v, self.heads)
         return self.to_out(out)
 
 
@@ -2709,10 +2685,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     return (model_patcher, clip, vae, clipvision)
 
 
-################################################ Folder_paths #########################################################
-
-
-supported_pt_extensions = set(['.ckpt', '.pt', '.bin', '.pth', '.safetensors'])
+supported_pt_extensions = set(['.safetensors'])
 
 folder_names_and_paths = {}
 
@@ -2763,9 +2736,6 @@ def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height
     return full_output_folder, filename, counter, subfolder, filename_prefix
 
 
-################################################ latent_preview #######################################################
-
-
 MAX_PREVIEW_RESOLUTION = 512
 
 
@@ -2810,9 +2780,6 @@ def prepare_callback(model, steps, x0_output_dict=None):
         pbar.update_absolute(step + 1, total_steps, preview_bytes)
 
     return callback
-
-
-####################################################### Nodes ###################################################################
 
 
 class EmptyLatentImage:
@@ -2904,49 +2871,44 @@ prompt = lines[0].split(':')[1].strip()
 w = int(lines[1].split(':')[1].strip())
 h = int(lines[2].split(':')[1].strip())
 
+with torch.inference_mode():
+    checkpointloadersimple = CheckpointLoaderSimple()
+    checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
+        ckpt_name="meinamix_meinaV11.safetensors"
+    )
+    cliptextencode = CLIPTextEncode()
+    cliptextencode_242 = cliptextencode.encode(
+        text=prompt,
+        clip=checkpointloadersimple_241[1],
+    )
+    cliptextencode_243 = cliptextencode.encode(
+        text="(worst_quality:1.6 low_quality:1.6) monochrome (zombie sketch interlocked_fingers comic) (hands) text signature logo",
+        clip=checkpointloadersimple_241[1],
+    )
+    emptylatentimage = EmptyLatentImage()
+    emptylatentimage_244 = emptylatentimage.generate(
+        width=w, height=h, batch_size=1
+    )
+    ksampler_instance = KSampler1()
+    vaedecode = VAEDecode()
+    saveimage = SaveImage()
 
-def gen(prompt, w, h):
-    with torch.inference_mode():
-        checkpointloadersimple = CheckpointLoaderSimple()
-        checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
-            ckpt_name="meinamix_meinaV11.safetensors"
-        )
-        cliptextencode = CLIPTextEncode()
-        cliptextencode_242 = cliptextencode.encode(
-            text=prompt,
-            clip=checkpointloadersimple_241[1],
-        )
-        cliptextencode_243 = cliptextencode.encode(
-            text="(worst_quality:1.6 low_quality:1.6) monochrome (zombie sketch interlocked_fingers comic) (hands) text signature logo",
-            clip=checkpointloadersimple_241[1],
-        )
-        emptylatentimage = EmptyLatentImage()
-        emptylatentimage_244 = emptylatentimage.generate(
-            width=w, height=h, batch_size=1
-        )
-        ksampler = KSampler1()
-        vaedecode = VAEDecode()
-        saveimage = SaveImage()
-
-        ksampler_239 = ksampler.sample(
-            seed=random.randint(1, 2 ** 64),
-            steps=300,
-            cfg=7,
-            sampler_name="dpm_adaptive",
-            scheduler="karras",
-            denoise=1,
-            model=checkpointloadersimple_241[0],
-            positive=cliptextencode_242[0],
-            negative=cliptextencode_243[0],
-            latent_image=emptylatentimage_244[0],
-        )
-        vaedecode_240 = vaedecode.decode(
-            samples=ksampler_239[0],
-            vae=checkpointloadersimple_241[2],
-        )
-        saveimage.save_images(
-            filename_prefix="ComfyUI", images=vaedecode_240[0]
-        )
-
-
-gen(prompt, w, h)
+    ksampler_239 = ksampler_instance.sample(
+        seed=random.randint(1, 2 ** 64),
+        steps=300,
+        cfg=7,
+        sampler_name="dpm_adaptive",
+        scheduler="karras",
+        denoise=1,
+        model=checkpointloadersimple_241[0],
+        positive=cliptextencode_242[0],
+        negative=cliptextencode_243[0],
+        latent_image=emptylatentimage_244[0],
+    )
+    vaedecode_240 = vaedecode.decode(
+        samples=ksampler_239[0],
+        vae=checkpointloadersimple_241[2],
+    )
+    saveimage.save_images(
+        filename_prefix="ComfyUI", images=vaedecode_240[0]
+    )
