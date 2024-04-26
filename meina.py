@@ -2753,7 +2753,7 @@ class SaveImage:
         self.type = "output"
         self.prefix_append = ""
 
-    def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None):
+    def save_images(self, images, filename_prefix="Aatricks", prompt=None, extra_pnginfo=None):
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = get_save_image_path(filename_prefix,
                                                                                                 self.output_dir,
@@ -2850,7 +2850,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title('Meina')
+        self.title('Aatricks1111')
         self.geometry('800x525')
 
         selected_file = tk.StringVar()
@@ -2975,7 +2975,7 @@ class App(tk.Tk):
                 vae=checkpointloadersimple_241[2],
             )
             saveimage.save_images(
-                filename_prefix="ComfyUI", images=vaedecode_240[0]
+                filename_prefix="Aatricks1111", images=vaedecode_240[0]
             )
 
             for image in vaedecode_240[0]:
