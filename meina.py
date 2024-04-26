@@ -1,31 +1,20 @@
+import contextlib
 import math
 import os
 import random
-import sys
-from typing import Dict, Union
-
-import numpy as np
-from PIL import Image
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
-
-import safetensors.torch
-import importlib
+from abc import abstractmethod
 from contextlib import contextmanager
 
-from tqdm.auto import tqdm
+import numpy as np
 import psutil
-import contextlib
-import os
-
+import safetensors.torch
 import torch
-from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
-from einops import rearrange
-from abc import abstractmethod
-
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
+from tqdm.auto import tqdm
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 
 
 def load_torch_file(ckpt, safe_load=False, device=None):
@@ -1008,8 +997,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.num_layers = 12
 
         if textmodel_json_config is None:
-            textmodel_json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                                 "sd1_clip_config.json")
+            textmodel_json_config = ".\\sd1_clip_config.json"
         config = config_class.from_json_file(textmodel_json_config)
         self.num_layers = config.num_hidden_layers
         with use_comfy_ops(device, dtype):
@@ -1161,7 +1149,7 @@ class SDTokenizer:
                  embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True,
                  pad_to_max_length=True):
         if tokenizer_path is None:
-            tokenizer_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "sd1_tokenizer")
+            tokenizer_path = ".\\sd1_tokenizer\\"
         self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path)
         self.max_length = max_length
 
@@ -2633,29 +2621,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
 
     return (model_patcher, clip, vae, clipvision)
 
-
-supported_pt_extensions = set(['.safetensors'])
-
-folder_names_and_paths = {}
-
-base_path = os.path.dirname(os.path.realpath(__file__))
-folder_names_and_paths["checkpoints"] = ([os.path.join(base_path)], supported_pt_extensions)
-folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], [])
-
 output_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output")
-
-filename_list_cache = {}
-
-
-def get_full_path(folder_name, filename):
-    global folder_names_and_paths
-    folders = folder_names_and_paths[folder_name]
-    filename = os.path.relpath(os.path.join("/", filename), "/")
-    for x in folders[0]:
-        full_path = os.path.join(x, filename)
-        if os.path.isfile(full_path):
-            return full_path
-
 
 def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height=0):
     def map_filename(filename):
@@ -2803,7 +2769,7 @@ class KSampler1:
 
 class CheckpointLoaderSimple:
     def load_checkpoint(self, ckpt_name, output_vae=True, output_clip=True):
-        ckpt_path = get_full_path("checkpoints", ckpt_name)
+        ckpt_path = f"{ckpt_name}"
         out = load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True)
         return out[:3]
 
