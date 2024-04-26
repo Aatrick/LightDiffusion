@@ -2812,52 +2812,214 @@ class VAEDecode:
     def decode(self, vae, samples):
         return (vae.decode(samples["samples"]),)
 
+def write_parameters_to_file(prompt_entry, neg,width, height, cfg):
+    with open('prompt.txt', 'w') as f:
+        f.write(f'prompt:{prompt_entry}')
+        f.write(f'neg:{neg}')
+        f.write(f'w:{int(width)}\n')
+        f.write(f'h:{int(height)}\n')
+        f.write(f'cfg:{int(cfg)}\n')
 
-with open('prompt.txt', 'r') as file:
-    lines = file.readlines()
+def load_parameters_from_file():
+    with open('prompt.txt', 'r') as f:
+        lines = f.readlines()
+        parameters = {}
+        for line in lines:
+            # Skip empty lines
+            if line.strip() == "":
+                continue
+            key, value = line.split(': ')
+            parameters[key] = value.strip()  # strip() is used to remove leading/trailing white spaces
+        prompt = parameters['prompt']
+        neg = parameters['neg']
+        width = int(parameters['w'])
+        height = int(parameters['h'])
+        cfg = int(parameters['cfg'])
+    return prompt, neg, width, height, cfg
 
-prompt = lines[0].split(':')[1].strip()
-w = int(lines[1].split(':')[1].strip())
-h = int(lines[2].split(':')[1].strip())
+from tkinter import *
+import customtkinter as ctk
+import tkinter as tk
+from PIL import Image, ImageTk
+import glob
+import threading
 
-with torch.inference_mode():
-    checkpointloadersimple = CheckpointLoaderSimple()
-    checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
-        ckpt_name="meinamix_meinaV11.safetensors"
-    )
-    cliptextencode = CLIPTextEncode()
-    cliptextencode_242 = cliptextencode.encode(
-        text=prompt,
-        clip=checkpointloadersimple_241[1],
-    )
-    cliptextencode_243 = cliptextencode.encode(
-        text="(worst_quality:1.6 low_quality:1.6) monochrome (zombie sketch interlocked_fingers comic) (hands) text signature logo",
-        clip=checkpointloadersimple_241[1],
-    )
-    emptylatentimage = EmptyLatentImage()
-    emptylatentimage_244 = emptylatentimage.generate(
-        width=w, height=h, batch_size=1
-    )
-    ksampler_instance = KSampler1()
-    vaedecode = VAEDecode()
-    saveimage = SaveImage()
+files = glob.glob('*.safetensors')
 
-    ksampler_239 = ksampler_instance.sample(
-        seed=random.randint(1, 2 ** 64),
-        steps=300,
-        cfg=7,
-        sampler_name="dpm_adaptive",
-        scheduler="karras",
-        denoise=1,
-        model=checkpointloadersimple_241[0],
-        positive=cliptextencode_242[0],
-        negative=cliptextencode_243[0],
-        latent_image=emptylatentimage_244[0],
-    )
-    vaedecode_240 = vaedecode.decode(
-        samples=ksampler_239[0],
-        vae=checkpointloadersimple_241[2],
-    )
-    saveimage.save_images(
-        filename_prefix="ComfyUI", images=vaedecode_240[0]
-    )
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title('Meina')
+        self.geometry('800x525')
+
+        selected_file = tk.StringVar()
+        if files:
+            selected_file.set(files[0])
+
+        # Create a frame for the sidebar
+        self.sidebar = tk.Frame(self, width=200, bg='black')
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Text input for the prompt
+        self.prompt_entry = ctk.CTkTextbox(self.sidebar, width=400, height=200)
+        self.prompt_entry.pack(pady=10, padx=10)
+
+        self.neg = ctk.CTkTextbox(self.sidebar, width=400, height=50)
+        self.neg.pack(pady=10, padx=10)
+
+        self.dropdown = ctk.CTkOptionMenu(self.sidebar, values=files)
+        self.dropdown.pack()
+
+        # Sliders for the resolution
+        self.width_label = ctk.CTkLabel(self.sidebar, text="")
+        self.width_label.pack()
+        self.width_slider = ctk.CTkSlider(self.sidebar, from_=1, to=2048, number_of_steps=2047)
+        self.width_slider.pack()
+
+        self.height_label = ctk.CTkLabel(self.sidebar, text="")
+        self.height_label.pack()
+        self.height_slider = ctk.CTkSlider(self.sidebar, from_=1, to=2048, number_of_steps=2047)
+        self.height_slider.pack()
+
+        self.cfg_label = ctk.CTkLabel(self.sidebar, text="")
+        self.cfg_label.pack()
+        self.cfg_slider = ctk.CTkSlider(self.sidebar, from_=1, to=15, number_of_steps=14)
+        self.cfg_slider.pack()
+
+        # Button to launch the generation
+        self.generate_button = ctk.CTkButton(self.sidebar, text="Generate", command=self.generate_image)
+        self.generate_button.pack(pady=20)
+
+        # Create a frame for the image display, without border
+        self.display = tk.Frame(self, bg='black', border=0)
+        self.display.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
+
+        # Label to display the generated image
+        self.image_label = tk.Label(self.display, bg='black')
+        self.image_label.pack()
+
+        prompt, neg, width, height, cfg = load_parameters_from_file()
+        self.prompt_entry.insert(tk.END, prompt)
+        self.neg.insert(tk.END, neg)
+        self.width_slider.set(width)
+        self.height_slider.set(height)
+        self.cfg_slider.set(cfg)
+
+        self.width_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.height_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.cfg_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.update_labels()
+        self.prompt_entry.bind("<KeyRelease>", lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(),
+                                                                                      self.height_slider.get(), self.cfg_slider.get()))
+        self.width_slider.bind("<ButtonRelease-1>",
+                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END),self.width_slider.get(), self.height_slider.get(),
+                                                                      self.cfg_slider.get()))
+        self.height_slider.bind("<ButtonRelease-1>", lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(),
+                                                                                            self.height_slider.get(),
+                                                                                            self.cfg_slider.get()))
+        self.cfg_slider.bind("<ButtonRelease-1>",
+                             lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(), self.height_slider.get(),
+                                                                    self.cfg_slider.get()))
+        self.display_most_recent_image()
+
+    def generate_image(self):
+        # Create a new thread that will run the _generate_image method
+        threading.Thread(target=self._generate_image, daemon=True).start()
+
+    def _generate_image(self):
+        # Get the values from the input fields
+        prompt = self.prompt_entry.get("1.0", tk.END)
+        neg = self.neg.get("1.0", tk.END)
+        w = int(self.width_slider.get())
+        h = int(self.height_slider.get())
+        cfg = int(self.cfg_slider.get())
+        ckpt = self.dropdown.get()
+
+        with torch.inference_mode():
+            checkpointloadersimple = CheckpointLoaderSimple()
+            checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
+                ckpt_name=ckpt
+            )
+            cliptextencode = CLIPTextEncode()
+            cliptextencode_242 = cliptextencode.encode(
+                text=prompt,
+                clip=checkpointloadersimple_241[1],
+            )
+            cliptextencode_243 = cliptextencode.encode(
+                text=neg,
+                clip=checkpointloadersimple_241[1],
+            )
+            emptylatentimage = EmptyLatentImage()
+            emptylatentimage_244 = emptylatentimage.generate(
+                width=w, height=h, batch_size=1
+            )
+            ksampler_instance = KSampler1()
+            vaedecode = VAEDecode()
+            saveimage = SaveImage()
+
+            ksampler_239 = ksampler_instance.sample(
+                seed=random.randint(1, 2 ** 64),
+                steps=300,
+                cfg=cfg,
+                sampler_name="dpm_adaptive",
+                scheduler="karras",
+                denoise=1,
+                model=checkpointloadersimple_241[0],
+                positive=cliptextencode_242[0],
+                negative=cliptextencode_243[0],
+                latent_image=emptylatentimage_244[0],
+            )
+            vaedecode_240 = vaedecode.decode(
+                samples=ksampler_239[0],
+                vae=checkpointloadersimple_241[2],
+            )
+            saveimage.save_images(
+                filename_prefix="ComfyUI", images=vaedecode_240[0]
+            )
+
+            for image in vaedecode_240[0]:
+                i = 255. * image.cpu().numpy()
+                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        # Convert the image to PhotoImage and display it
+        img = img.resize((int(w/2), int(h/2)))
+        img = ImageTk.PhotoImage(img)
+        self.image_label.after(0, self._update_image_label, img)
+
+
+    def _update_image_label(self, img):
+        self.image_label.config(image=img)
+        self.image_label.image = img  # Keep a reference to prevent garbage collection
+
+    def update_labels(self):
+        self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
+        self.height_label.configure(text=f"Height: {int(self.height_slider.get())}")
+        self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
+
+    def display_most_recent_image(self):
+        # Get a list of all image files in the output directory
+        image_files = glob.glob('.\\output\\*')
+
+        # If there are no image files, return
+        if not image_files:
+            return
+
+        # Sort the files by modification time in descending order
+        image_files.sort(key=os.path.getmtime, reverse=True)
+
+        # Open the most recent image file
+        img = Image.open(image_files[0])
+
+        # Resize the image if necessary
+        img = img.resize((int(self.width_slider.get() / 2), int(self.height_slider.get() / 2)))
+
+        # Convert the image to PhotoImage
+        img = ImageTk.PhotoImage(img)
+
+        # Display the image
+        self.image_label.config(image=img)
+        self.image_label.image = img
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
