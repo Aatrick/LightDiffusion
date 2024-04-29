@@ -1,4 +1,4 @@
-# Aatricks1111
+# LightDiffusion
 
 The purpose of this repository and project is to remake the famous stable-diffusion in only one python script, with the least number of lines and in the least complex way.
 
