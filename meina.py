@@ -2888,10 +2888,28 @@ class App(tk.Tk):
                              lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(), self.height_slider.get(),
                                                                     self.cfg_slider.get()))
         self.display_most_recent_image()
+        self.ckpt=self.dropdown.get()
+        with torch.inference_mode():
+            self.checkpointloadersimple = CheckpointLoaderSimple()
+            self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
+                ckpt_name=self.ckpt
+            )
 
     def generate_image(self):
         # Create a new thread that will run the _generate_image method
         threading.Thread(target=self._generate_image, daemon=True).start()
+
+    def _load_checkpoint(self):
+        # if the selected model is the same as ckpt, do nothing, else load the new model
+        if self.dropdown.get() != self.ckpt:
+            self.ckpt = self.dropdown.get()
+            with torch.inference_mode():
+                self.checkpointloadersimple = CheckpointLoaderSimple()
+                self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
+                    ckpt_name=self.ckpt
+                )
+        return self.checkpointloadersimple_241
+
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -2903,10 +2921,7 @@ class App(tk.Tk):
         ckpt = self.dropdown.get()
 
         with torch.inference_mode():
-            checkpointloadersimple = CheckpointLoaderSimple()
-            checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
-                ckpt_name=ckpt
-            )
+            checkpointloadersimple_241 = self._load_checkpoint()
             cliptextencode = CLIPTextEncode()
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
