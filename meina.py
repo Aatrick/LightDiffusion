@@ -94,6 +94,7 @@ class DiagonalGaussianRegularizer(nn.Module):
         super().__init__()
         self.sample = sample
 
+
 class AutoencodingEngine(nn.Module):
     def __init__(self, encoder, decoder, regularizer):
         super().__init__()
@@ -304,7 +305,7 @@ class CONDCrossAttn(CONDRegular):
         crossattn_max_len = self.cond.shape[1]
         for x in others:
             c = x.cond
-            crossattn_max_len = abs(crossattn_max_len*c.shape[1])//math.gcd(crossattn_max_len,c.shape[1])
+            crossattn_max_len = abs(crossattn_max_len * c.shape[1]) // math.gcd(crossattn_max_len, c.shape[1])
             conds.append(c)
 
         out = []
@@ -1487,6 +1488,7 @@ def sample(model, noise, positive, negative, cfg, device, sampler, sigmas, model
     samples = sampler.sample(model_wrap, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
     return model.process_latent_out(samples.to(torch.float32))
 
+
 def calculate_sigmas_scheduler(model, scheduler_name, steps):
     sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
                                sigma_max=float(model.model_sampling.sigma_max))
@@ -1657,6 +1659,7 @@ def attention_xformers(q, k, v, heads, mask=None):
         .reshape(b, -1, heads * dim_head)
     )
     return out
+
 
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., dtype=None, device=None):
@@ -2525,10 +2528,12 @@ class VAE:
     def __init__(self, sd=None, device=None, config=None):
         if config is None:
             config = {
-                'encoder': {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128,
-                        'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0},
-                'decoder': {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3, 'ch': 128,
-                        'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0},
+                'encoder': {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3,
+                            'ch': 128,
+                            'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0},
+                'decoder': {'double_z': True, 'z_channels': 4, 'resolution': 256, 'in_channels': 3, 'out_ch': 3,
+                            'ch': 128,
+                            'ch_mult': [1, 2, 4, 4], 'num_res_blocks': 2, 'attn_resolutions': [], 'dropout': 0.0},
                 'regularizer': {'sample': True}
             }
             self.first_stage_model = AutoencodingEngine(
@@ -2621,7 +2626,9 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
 
     return (model_patcher, clip, vae, clipvision)
 
+
 output_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output")
+
 
 def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height=0):
     def map_filename(filename):
@@ -2778,13 +2785,15 @@ class VAEDecode:
     def decode(self, vae, samples):
         return (vae.decode(samples["samples"]),)
 
-def write_parameters_to_file(prompt_entry, neg,width, height, cfg):
+
+def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open('prompt.txt', 'w') as f:
         f.write(f'prompt:{prompt_entry}')
         f.write(f'neg:{neg}')
         f.write(f'w:{int(width)}\n')
         f.write(f'h:{int(height)}\n')
         f.write(f'cfg:{int(cfg)}\n')
+
 
 def load_parameters_from_file():
     with open('prompt.txt', 'r') as f:
@@ -2803,6 +2812,7 @@ def load_parameters_from_file():
         cfg = int(parameters['cfg'])
     return prompt, neg, width, height, cfg
 
+
 from tkinter import *
 import customtkinter as ctk
 import tkinter as tk
@@ -2811,6 +2821,7 @@ import glob
 import threading
 
 files = glob.glob('*.safetensors')
+
 
 class App(tk.Tk):
     def __init__(self):
@@ -2865,6 +2876,13 @@ class App(tk.Tk):
         self.image_label = tk.Label(self.display, bg='black')
         self.image_label.pack()
 
+        self.ckpt = self.dropdown.get()
+        with torch.inference_mode():
+            self.checkpointloadersimple = CheckpointLoaderSimple()
+            self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
+                ckpt_name=self.ckpt
+            )
+
         prompt, neg, width, height, cfg = load_parameters_from_file()
         self.prompt_entry.insert(tk.END, prompt)
         self.neg.insert(tk.END, neg)
@@ -2876,24 +2894,28 @@ class App(tk.Tk):
         self.height_slider.bind("<B1-Motion>", lambda event: self.update_labels())
         self.cfg_slider.bind("<B1-Motion>", lambda event: self.update_labels())
         self.update_labels()
-        self.prompt_entry.bind("<KeyRelease>", lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(),
-                                                                                      self.height_slider.get(), self.cfg_slider.get()))
+        self.prompt_entry.bind("<KeyRelease>",
+                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                      self.neg.get("1.0", tk.END),
+                                                                      self.width_slider.get(),
+                                                                      self.height_slider.get(), self.cfg_slider.get()))
         self.width_slider.bind("<ButtonRelease-1>",
-                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END),self.width_slider.get(), self.height_slider.get(),
+                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                      self.neg.get("1.0", tk.END),
+                                                                      self.width_slider.get(), self.height_slider.get(),
                                                                       self.cfg_slider.get()))
-        self.height_slider.bind("<ButtonRelease-1>", lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(),
-                                                                                            self.height_slider.get(),
-                                                                                            self.cfg_slider.get()))
+        self.height_slider.bind("<ButtonRelease-1>",
+                                lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                       self.neg.get("1.0", tk.END),
+                                                                       self.width_slider.get(),
+                                                                       self.height_slider.get(),
+                                                                       self.cfg_slider.get()))
         self.cfg_slider.bind("<ButtonRelease-1>",
-                             lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END), self.neg.get("1.0", tk.END), self.width_slider.get(), self.height_slider.get(),
+                             lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                    self.neg.get("1.0", tk.END),
+                                                                    self.width_slider.get(), self.height_slider.get(),
                                                                     self.cfg_slider.get()))
         self.display_most_recent_image()
-        self.ckpt=self.dropdown.get()
-        with torch.inference_mode():
-            self.checkpointloadersimple = CheckpointLoaderSimple()
-            self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
-                ckpt_name=self.ckpt
-            )
 
     def generate_image(self):
         # Create a new thread that will run the _generate_image method
@@ -2909,7 +2931,6 @@ class App(tk.Tk):
                     ckpt_name=self.ckpt
                 )
         return self.checkpointloadersimple_241
-
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -2963,10 +2984,9 @@ class App(tk.Tk):
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
         # Convert the image to PhotoImage and display it
-        img = img.resize((int(w/2), int(h/2)))
+        img = img.resize((int(w / 2), int(h / 2)))
         img = ImageTk.PhotoImage(img)
         self.image_label.after(0, self._update_image_label, img)
-
 
     def _update_image_label(self, img):
         self.image_label.config(image=img)
@@ -3000,6 +3020,7 @@ class App(tk.Tk):
         # Display the image
         self.image_label.config(image=img)
         self.image_label.image = img
+
 
 if __name__ == "__main__":
     app = App()
