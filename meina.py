@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from tqdm.auto import tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
+import requests
 
 
 def load_torch_file(ckpt, safe_load=False, device=None):
@@ -22,6 +23,20 @@ def load_torch_file(ckpt, safe_load=False, device=None):
         device = torch.device("cpu")
     if ckpt.lower().endswith(".safetensors"):
         sd = safetensors.torch.load_file(ckpt, device=device.type)
+    else: #download the sd2.0 file from https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors
+        print("Downloading the model")
+        response=requests.get("https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors", stream=True)
+        response.raise_for_status()
+        total_size_in_bytes = int(response.headers.get('content-length', 0))
+        progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
+
+        with open("model.safetensors", "wb") as handle:
+            for data in response.iter_content(chunk_size=8192):
+                progress_bar.update(len(data))
+                handle.write(data)
+        progress_bar.close()
+        if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
+            print("ERROR, something went wrong")
     return sd
 
 
@@ -2796,7 +2811,7 @@ def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
 
 
 def load_parameters_from_file():
-    with open('prompt.txt', 'r') as f:
+    with open('.\\prompt.txt', 'r') as f:
         lines = f.readlines()
         parameters = {}
         for line in lines:
@@ -2827,7 +2842,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        self.title('Aatricks1111')
+        self.title('LightDiffusion')
         self.geometry('800x525')
 
         selected_file = tk.StringVar()
@@ -2876,12 +2891,10 @@ class App(tk.Tk):
         self.image_label = tk.Label(self.display, bg='black')
         self.image_label.pack()
 
-        self.ckpt = self.dropdown.get()
-        with torch.inference_mode():
-            self.checkpointloadersimple = CheckpointLoaderSimple()
-            self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
-                ckpt_name=self.ckpt
-            )
+        self.ckpt = None
+
+        #load the checkpoint on an another thread
+        threading.Thread(target=self._load_checkpoint, daemon=True).start()
 
         prompt, neg, width, height, cfg = load_parameters_from_file()
         self.prompt_entry.insert(tk.END, prompt)
@@ -2977,7 +2990,7 @@ class App(tk.Tk):
                 vae=checkpointloadersimple_241[2],
             )
             saveimage.save_images(
-                filename_prefix="Aatricks1111", images=vaedecode_240[0]
+                filename_prefix="LD", images=vaedecode_240[0]
             )
 
             for image in vaedecode_240[0]:
