@@ -37,6 +37,7 @@ def load_torch_file(ckpt, safe_load=False, device=None):
         progress_bar.close()
         if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
             print("ERROR, something went wrong")
+        sd = safetensors.torch.load_file("model.safetensors", device=device.type)
     return sd
 
 
@@ -1013,7 +1014,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.num_layers = 12
 
         if textmodel_json_config is None:
-            textmodel_json_config = ".\\sd1_clip_config.json"
+            textmodel_json_config = ".\\_internal\\sd1_clip_config.json"
         config = config_class.from_json_file(textmodel_json_config)
         self.num_layers = config.num_hidden_layers
         with use_comfy_ops(device, dtype):
@@ -1165,7 +1166,7 @@ class SDTokenizer:
                  embedding_size=768, embedding_key='clip_l', tokenizer_class=CLIPTokenizer, has_start_token=True,
                  pad_to_max_length=True):
         if tokenizer_path is None:
-            tokenizer_path = ".\\sd1_tokenizer\\"
+            tokenizer_path = ".\\_internal\\sd1_tokenizer\\"
         self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path)
         self.max_length = max_length
 
@@ -1592,7 +1593,6 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
             callback=None, disable_pbar=False, seed=None):
     real_model, positive_copy, negative_copy, noise_mask, models = prepare_sampling(model, noise.shape, positive,
                                                                                     negative, noise_mask)
-
     noise = noise.to(model.load_device)
     latent_image = latent_image.to(model.load_device)
 
@@ -2802,7 +2802,7 @@ class VAEDecode:
 
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
-    with open('prompt.txt', 'w') as f:
+    with open('.\\_internal\\prompt.txt', 'w') as f:
         f.write(f'prompt:{prompt_entry}')
         f.write(f'neg:{neg}')
         f.write(f'w:{int(width)}\n')
@@ -2811,7 +2811,7 @@ def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
 
 
 def load_parameters_from_file():
-    with open('.\\prompt.txt', 'r') as f:
+    with open('.\\_internal\\prompt.txt', 'r') as f:
         lines = f.readlines()
         parameters = {}
         for line in lines:
@@ -2943,7 +2943,8 @@ class App(tk.Tk):
                 self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
                     ckpt_name=self.ckpt
                 )
-        return self.checkpointloadersimple_241
+                self.cliptextencode = CLIPTextEncode()
+        return self.checkpointloadersimple_241, self.cliptextencode
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -2955,8 +2956,8 @@ class App(tk.Tk):
         ckpt = self.dropdown.get()
 
         with torch.inference_mode():
-            checkpointloadersimple_241 = self._load_checkpoint()
-            cliptextencode = CLIPTextEncode()
+            checkpointloadersimple_241, cliptextencode = self._load_checkpoint()
+
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
                 clip=checkpointloadersimple_241[1],
@@ -3012,7 +3013,7 @@ class App(tk.Tk):
 
     def display_most_recent_image(self):
         # Get a list of all image files in the output directory
-        image_files = glob.glob('.\\output\\*')
+        image_files = glob.glob('.\\_internal\\output\\*')
 
         # If there are no image files, return
         if not image_files:
