@@ -201,7 +201,6 @@ class PIDStepSizeController:
         self.h *= factor
         return accept
 
-
 class DPMSolver(nn.Module):
     """DPM-Solver. See https://arxiv.org/abs/2206.00927."""
 
@@ -257,8 +256,10 @@ class DPMSolver(nn.Module):
         accept = True
         pid = PIDStepSizeController(h_init, pcoeff, icoeff, dcoeff, 1.5 if eta else order, accept_safety)
         info = {'steps': 0, 'nfe': 0, 'n_accept': 0, 'n_reject': 0}
-
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
+            def _progress(steps): # TODO: fix latency on iterations progress
+                app.title(f"LightDiffusion - generating : {steps}it")
+            threading.Thread(target=_progress, args=(info['steps'],)).start()
             eps_cache = {}
             t = torch.minimum(t_end, s + pid.h) if forward else torch.maximum(t_end, s + pid.h)
 
@@ -283,10 +284,8 @@ class DPMSolver(nn.Module):
                 self.info_callback(
                     {'x': x, 'i': info['steps'] - 1, 't': s, 't_up': s, 'denoised': denoised, 'error': error,
                      'h': pid.h, **info})
-
+        app.title("LightDiffusion")
         return x, info
-
-
 @torch.no_grad()
 def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callback=None, disable=None, order=3,
                         rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1., dcoeff=0., accept_safety=0.81,
@@ -1593,6 +1592,7 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
             callback=None, disable_pbar=False, seed=None):
     real_model, positive_copy, negative_copy, noise_mask, models = prepare_sampling(model, noise.shape, positive,
                                                                                     negative, noise_mask)
+    real_model = torch.compile(real_model, mode="max-autotune")
     noise = noise.to(model.load_device)
     latent_image = latent_image.to(model.load_device)
 
@@ -2642,7 +2642,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     return (model_patcher, clip, vae, clipvision)
 
 
-output_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output")
+output_directory = '.\\_internal_\\output\\'
 
 
 def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height=0):
@@ -2704,12 +2704,10 @@ def get_previewer(device, latent_format):
             previewer = Latent2RGBPreviewer(latent_format.latent_rgb_factors)
     return previewer
 
-
 def prepare_callback(model, steps, x0_output_dict=None):
     preview_format = "JPEG"
     previewer = get_previewer(model.load_device, model.model.latent_format)
     pbar = ProgressBar(steps)
-
     def callback(step, x0, x, total_steps):
         preview_bytes = None
         if previewer:
@@ -2954,10 +2952,8 @@ class App(tk.Tk):
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         ckpt = self.dropdown.get()
-
         with torch.inference_mode():
             checkpointloadersimple_241, cliptextencode = self._load_checkpoint()
-
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
                 clip=checkpointloadersimple_241[1],
