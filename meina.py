@@ -2642,7 +2642,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     return (model_patcher, clip, vae, clipvision)
 
 
-output_directory = '.\\_internal_\\output\\'
+output_directory = '.\\_internal\\output\\'
 
 
 def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height=0):
