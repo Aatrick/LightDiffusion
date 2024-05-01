@@ -17,7 +17,6 @@ from tqdm.auto import tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 import requests
 
-
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
@@ -1592,7 +1591,6 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
             callback=None, disable_pbar=False, seed=None):
     real_model, positive_copy, negative_copy, noise_mask, models = prepare_sampling(model, noise.shape, positive,
                                                                                     negative, noise_mask)
-    real_model = torch.compile(real_model, mode="max-autotune")
     noise = noise.to(model.load_device)
     latent_image = latent_image.to(model.load_device)
 
@@ -2672,46 +2670,10 @@ def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height
         counter = 1
     return full_output_folder, filename, counter, subfolder, filename_prefix
 
-
-MAX_PREVIEW_RESOLUTION = 512
-
-
-class LatentPreviewer:
-    def decode_latent_to_preview_image(self, preview_format, x0):
-        preview_image = self.decode_latent_to_preview(x0)
-        return ("JPEG", preview_image, MAX_PREVIEW_RESOLUTION)
-
-
-class Latent2RGBPreviewer(LatentPreviewer):
-    def __init__(self, latent_rgb_factors):
-        self.latent_rgb_factors = torch.tensor(latent_rgb_factors, device="cpu")
-
-    def decode_latent_to_preview(self, x0):
-        latent_image = x0[0].permute(1, 2, 0).cpu() @ self.latent_rgb_factors
-
-        latents_ubyte = (((latent_image + 1) / 2)
-                         .clamp(0, 1)  # change scale from -1..1 to 0..1
-                         .mul(0xFF)  # to 0..255
-                         .byte()).cpu()
-
-        return Image.fromarray(latents_ubyte.numpy())
-
-
-def get_previewer(device, latent_format):
-    previewer = None
-    if previewer is None:
-        if latent_format.latent_rgb_factors is not None:
-            previewer = Latent2RGBPreviewer(latent_format.latent_rgb_factors)
-    return previewer
-
 def prepare_callback(model, steps, x0_output_dict=None):
-    preview_format = "JPEG"
-    previewer = get_previewer(model.load_device, model.model.latent_format)
     pbar = ProgressBar(steps)
     def callback(step, x0, x, total_steps):
         preview_bytes = None
-        if previewer:
-            preview_bytes = previewer.decode_latent_to_preview_image(preview_format, x0)
         pbar.update_absolute(step + 1, total_steps, preview_bytes)
 
     return callback
@@ -2801,11 +2763,11 @@ class VAEDecode:
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open('.\\_internal\\prompt.txt', 'w') as f:
-        f.write(f'prompt:{prompt_entry}')
-        f.write(f'neg:{neg}')
-        f.write(f'w:{int(width)}\n')
-        f.write(f'h:{int(height)}\n')
-        f.write(f'cfg:{int(cfg)}\n')
+        f.write(f'prompt: {prompt_entry}')
+        f.write(f'neg: {neg}')
+        f.write(f'w: {int(width)}\n')
+        f.write(f'h: {int(height)}\n')
+        f.write(f'cfg: {int(cfg)}\n')
 
 
 def load_parameters_from_file():
