@@ -6,7 +6,8 @@ The purpose of this repository and project is to remake the famous stable-diffus
 - Original Txt2Img
 - One click install and run (once you've added your .safetensors model)
 - Attention syntax
-- NVIDIA GPU only (with xformers)
+- GPU only
+- Xformers and Pytorch optimization
 - Saved state in between starts
 - GUI
 - DPM Adaptive
