@@ -2884,7 +2884,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         self.ckpt = None
 
         #load the checkpoint on an another thread
-        threading.Thread(target=self._load_checkpoint, daemon=True).start()
+        threading.Thread(target=self._prep, daemon=True).start()
 
         prompt, neg, width, height, cfg = load_parameters_from_file()
         self.prompt_entry.insert(tk.END, prompt)
@@ -2924,7 +2924,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         # Create a new thread that will run the _generate_image method
         threading.Thread(target=self._generate_image, daemon=True).start()
 
-    def _load_checkpoint(self):
+    def _prep(self):
         # if the selected model is the same as ckpt, do nothing, else load the new model
         if self.dropdown.get() != self.ckpt:
             self.ckpt = self.dropdown.get()
@@ -2934,7 +2934,11 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                     ckpt_name=self.ckpt
                 )
                 self.cliptextencode = CLIPTextEncode()
-        return self.checkpointloadersimple_241, self.cliptextencode
+                self.emptylatentimage = EmptyLatentImage()
+                self.ksampler_instance = KSampler1()
+                self.vaedecode = VAEDecode()
+                self.saveimage = SaveImage()
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -2944,7 +2948,8 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode = self._load_checkpoint()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage= self._prep()
+
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
                 clip=checkpointloadersimple_241[1],
@@ -2953,14 +2958,9 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 text=neg,
                 clip=checkpointloadersimple_241[1],
             )
-            emptylatentimage = EmptyLatentImage()
             emptylatentimage_244 = emptylatentimage.generate(
                 width=w, height=h, batch_size=1
             )
-            ksampler_instance = KSampler1()
-            vaedecode = VAEDecode()
-            saveimage = SaveImage()
-
             ksampler_239 = ksampler_instance.sample(
                 seed=random.randint(1, 2 ** 64),
                 steps=300,
