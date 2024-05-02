@@ -364,13 +364,7 @@ cpu_state = 0
 OOM_EXCEPTION = torch.cuda.OutOfMemoryError
 
 XFORMERS_ENABLED_VAE = True
-
-import xformers.ops
-
 XFORMERS_IS_AVAILABLE = True
-XFORMERS_VERSION = xformers.version.__version__
-print("xformers version:", XFORMERS_VERSION)
-
 
 def is_nvidia():
     global cpu_state
@@ -681,6 +675,41 @@ def xformers_attention(q, k, v):
     out = out.transpose(1, 2).reshape(B, C, H, W)
     return out
 
+def attention_pytorch(q, k, v, heads, mask=None):
+    b, _, dim_head = q.shape
+    dim_head //= heads
+    q, k, v = map(
+        lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
+        (q, k, v),
+    )
+
+    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
+    out = (
+        out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    )
+    return out
+
+try:
+    import xformers
+    import xformers.ops
+    XFORMERS_IS_AVAILABLE = True
+    print("Using xformers cross attention")
+    optimized_attention = xformers_attention
+    try:
+        XFORMERS_VERSION = xformers.version.__version__
+        print("xformers version:", XFORMERS_VERSION)
+        if XFORMERS_VERSION.startswith("0.0.18"):
+            print()
+            print("WARNING: This version of xformers has a major bug where you will get black images when generating high resolution images.")
+            print("Please downgrade or upgrade xformers to a different version.")
+            print()
+            XFORMERS_ENABLED_VAE = False
+    except:
+        pass
+except:
+    XFORMERS_IS_AVAILABLE = False
+    print("Using pytorch cross attention")
+    optimized_attention = attention_pytorch
 
 class AttnBlock(nn.Module):
     def __init__(self, in_channels):
@@ -2798,7 +2827,7 @@ import threading
 files = glob.glob('*.safetensors')
 
 
-class App(tk.Tk):
+class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
     def __init__(self):
         super().__init__()
 
@@ -2913,7 +2942,6 @@ class App(tk.Tk):
         w = int(self.width_slider.get())
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
-        ckpt = self.dropdown.get()
         with torch.inference_mode():
             checkpointloadersimple_241, cliptextencode = self._load_checkpoint()
             cliptextencode_242 = cliptextencode.encode(
