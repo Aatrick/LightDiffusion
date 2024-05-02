@@ -8,6 +8,7 @@ The purpose of this repository and project is to remake the famous stable-diffus
 - Attention syntax
 - GPU only
 - Xformers and Pytorch optimization
+- FP16 and FP32 precision support
 - Saved state in between starts
 - GUI
 - DPM Adaptive
