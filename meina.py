@@ -374,10 +374,10 @@ def is_nvidia():
 
 ENABLE_PYTORCH_ATTENTION = False
 
-VAE_DTYPE = torch.float32
+VAE_DTYPE = torch.float16
 
 FORCE_FP32 = False
-FORCE_FP16 = False
+FORCE_FP16 = True
 
 current_loaded_models = []
 
@@ -1634,7 +1634,7 @@ def sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negativ
     return samples
 
 
-_ATTN_PRECISION = "fp32"
+_ATTN_PRECISION = "fp16"
 
 
 def default(val, d):
@@ -2631,6 +2631,7 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
 
     parameters = calculate_parameters(sd, "model.diffusion_model.")
     unet_dtype = unet_dtype1(model_params=parameters)
+    print(f"Using {unet_dtype} precision")
 
     class WeightsLoader(torch.nn.Module):
         pass
