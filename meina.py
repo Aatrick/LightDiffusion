@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import math
 import os
 import random
@@ -7,6 +8,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import psutil
+import requests
 import safetensors.torch
 import torch
 import torch as th
@@ -15,14 +17,27 @@ import torch.nn.functional as F
 from einops import rearrange
 from tqdm.auto import trange, tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
-import requests
+
+import pickle
+
+load = pickle.load
+
+class Empty:
+    pass
+
+class Unpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        #TODO: safe unpickle
+        if module.startswith("pytorch_lightning"):
+            return Empty
+        return super().find_class(module, name)
 
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
     if ckpt.lower().endswith(".safetensors"):
         sd = safetensors.torch.load_file(ckpt, device=device.type)
-    else: #download the sd2.0 file from https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors
+    elif ckpt==None:
         print("Downloading the model")
         response=requests.get("https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors", stream=True)
         response.raise_for_status()
@@ -37,6 +52,22 @@ def load_torch_file(ckpt, safe_load=False, device=None):
         if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
             print("ERROR, something went wrong")
         sd = safetensors.torch.load_file("model.safetensors", device=device.type)
+    else:
+        if safe_load:
+            if not 'weights_only' in torch.load.__code__.co_varnames:
+                logging.warning(
+                    "Warning torch.load doesn't support weights_only on this pytorch version, loading unsafely.")
+                safe_load = False
+        if safe_load:
+            pl_sd = torch.load(ckpt, map_location=device, weights_only=True)
+        else:
+            pl_sd = torch.load(ckpt, map_location=device, pickle_module=Unpickler)
+        if "global_step" in pl_sd:
+            logging.debug(f"Global Step: {pl_sd['global_step']}")
+        if "state_dict" in pl_sd:
+            sd = pl_sd["state_dict"]
+        else:
+            sd = pl_sd
     return sd
 
 
@@ -619,6 +650,8 @@ class ModelPatcher:
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
+        else:
+            return torch.float32
 
     def model_state_dict(self, filter_prefix=None):
         sd = self.model.state_dict()
@@ -1630,7 +1663,6 @@ def get_additional_models(positive, negative, dtype):
 
 
 def prepare_sampling(model, noise_shape, positive, negative, noise_mask):
-    device = model.load_device
     positive = convert_cond(positive)
     negative = convert_cond(negative)
     real_model = None
@@ -2955,6 +2987,140 @@ class CheckpointLoaderSimple:
         out = load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True)
         return out[:3]
 
+class SRVGGNetCompact(nn.Module):
+    """A compact VGG-style network structure for super-resolution.
+    It is a compact network structure, which performs upsampling in the last layer and no convolution is
+    conducted on the HR feature space.
+    Args:
+        num_in_ch (int): Channel number of inputs. Default: 3.
+        num_out_ch (int): Channel number of outputs. Default: 3.
+        num_feat (int): Channel number of intermediate features. Default: 64.
+        num_conv (int): Number of convolution layers in the body network. Default: 16.
+        upscale (int): Upsampling factor. Default: 4.
+        act_type (str): Activation type, options: 'relu', 'prelu', 'leakyrelu'. Default: prelu.
+    """
+
+    def __init__(
+        self,
+        state_dict,
+        act_type: str = "prelu",
+    ):
+        super(SRVGGNetCompact, self).__init__()
+        self.model_arch = "SRVGG (RealESRGAN)"
+        self.sub_type = "SR"
+
+        self.act_type = act_type
+
+        self.state = state_dict
+
+        if "params" in self.state:
+            self.state = self.state["params"]
+
+        self.key_arr = list(self.state.keys())
+
+        self.in_nc = self.get_in_nc()
+        self.num_feat = self.get_num_feats()
+        self.num_conv = self.get_num_conv()
+        self.out_nc = self.in_nc  # :(
+        self.pixelshuffle_shape = None  # Defined in get_scale()
+        self.scale = self.get_scale()
+
+        self.supports_fp16 = True
+        self.supports_bfp16 = True
+        self.min_size_restriction = None
+
+        self.body = nn.ModuleList()
+        # the first conv
+        self.body.append(nn.Conv2d(self.in_nc, self.num_feat, 3, 1, 1))
+        # the first activation
+        if act_type == "relu":
+            activation = nn.ReLU(inplace=True)
+        elif act_type == "prelu":
+            activation = nn.PReLU(num_parameters=self.num_feat)
+        elif act_type == "leakyrelu":
+            activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        self.body.append(activation)  # type: ignore
+
+        # the body structure
+        for _ in range(self.num_conv):
+            self.body.append(nn.Conv2d(self.num_feat, self.num_feat, 3, 1, 1))
+            # activation
+            if act_type == "relu":
+                activation = nn.ReLU(inplace=True)
+            elif act_type == "prelu":
+                activation = nn.PReLU(num_parameters=self.num_feat)
+            elif act_type == "leakyrelu":
+                activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+            self.body.append(activation)  # type: ignore
+
+        # the last conv
+        self.body.append(nn.Conv2d(self.num_feat, self.pixelshuffle_shape, 3, 1, 1))  # type: ignore
+        # upsample
+        self.upsampler = nn.PixelShuffle(self.scale)
+
+        self.load_state_dict(self.state, strict=False)
+
+    def get_num_conv(self) -> int:
+        return (int(self.key_arr[-1].split(".")[1]) - 2) // 2
+
+    def get_num_feats(self) -> int:
+        return self.state[self.key_arr[0]].shape[0]
+
+    def get_in_nc(self) -> int:
+        return self.state[self.key_arr[0]].shape[1]
+
+    def get_scale(self) -> int:
+        self.pixelshuffle_shape = self.state[self.key_arr[-1]].shape[0]
+        # Assume out_nc is the same as in_nc
+        # I cant think of a better way to do that
+        self.out_nc = self.in_nc
+        scale = math.sqrt(self.pixelshuffle_shape / self.out_nc)
+        if scale - int(scale) > 0:
+            print(
+                "out_nc is probably different than in_nc, scale calculation might be wrong"
+            )
+        scale = int(scale)
+        return scale
+
+    def forward(self, x):
+        out = x
+        for i in range(0, len(self.body)):
+            out = self.body[i](out)
+
+        out = self.upsampler(out)
+        # add the nearest upsampled image, so that the network learns the residual
+        base = F.interpolate(x, scale_factor=self.scale, mode="nearest")
+        out += base
+        return out
+
+
+class UnsupportedModel(Exception):
+    pass
+
+def load_state_dict(state_dict):
+    state_dict_keys = list(state_dict.keys())
+
+    if "params_ema" in state_dict_keys:
+        state_dict = state_dict["params_ema"]
+    elif "params-ema" in state_dict_keys:
+        state_dict = state_dict["params-ema"]
+    elif "params" in state_dict_keys:
+        state_dict = state_dict["params"]
+
+    state_dict_keys = list(state_dict.keys())
+    model = SRVGGNetCompact(state_dict)
+    return model
+
+
+class UpscaleModelLoader:
+    def load_model(self, model_name):
+        model_path = f".\\_internal\\{model_name}"
+        sd = load_torch_file(model_path, safe_load=True)
+        if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
+            sd = state_dict_prefix_replace(sd, {"module.":""})
+        out = load_state_dict(sd).eval()
+        return (out, )
+
 
 class VAEDecode:
     def decode(self, vae, samples):
@@ -3003,7 +3169,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         super().__init__()
 
         self.title('LightDiffusion')
-        self.geometry('800x525')
+        self.geometry('800x560')
 
         selected_file = tk.StringVar()
         if files:
@@ -3039,6 +3205,11 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         self.cfg_slider = ctk.CTkSlider(self.sidebar, from_=1, to=15, number_of_steps=14)
         self.cfg_slider.pack()
 
+        #checkbox for hiresfix
+        self.check_var = tk.BooleanVar()
+        self.hiresfix = ctk.CTkCheckBox(self.sidebar, text="hiresfix", variable=self.check_var, onvalue=True, offvalue=False)
+        self.hiresfix.pack()
+
         # Button to launch the generation
         self.generate_button = ctk.CTkButton(self.sidebar, text="Generate", command=self.generate_image)
         self.generate_button.pack(pady=20)
@@ -3068,6 +3239,11 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         self.cfg_slider.bind("<B1-Motion>", lambda event: self.update_labels())
         self.update_labels()
         self.prompt_entry.bind("<KeyRelease>",
+                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                      self.neg.get("1.0", tk.END),
+                                                                      self.width_slider.get(),
+                                                                      self.height_slider.get(), self.cfg_slider.get()))
+        self.neg.bind("<KeyRelease>",
                                lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
                                                                       self.neg.get("1.0", tk.END),
                                                                       self.width_slider.get(),
@@ -3109,7 +3285,8 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 self.vaedecode = VAEDecode()
                 self.saveimage = SaveImage()
                 self.latent_upscale = LatentUpscale()
-        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale
+                self.upscalemodelloader = UpscaleModelLoader()
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -3119,7 +3296,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader= self._prep()
 
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
@@ -3144,37 +3321,43 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 negative=cliptextencode_243[0],
                 latent_image=emptylatentimage_244[0],
             )
-            latentupscale_254 = latentupscale.upscale(
-                upscale_method="nearest-exact",
-                width=w * 2,
-                height=h * 2,
-                crop="disabled",
-                samples=ksampler_239[0],
-            )
-            ksampler_253 = ksampler_instance.sample(
-                seed=random.randint(1, 2 ** 64),
-                steps=10,
-                cfg=8,
-                sampler_name="dpmpp_2m",
-                scheduler="karras",
-                denoise=0.3,
-                model=checkpointloadersimple_241[0],
-                positive=cliptextencode_242[0],
-                negative=cliptextencode_243[0],
-                latent_image=latentupscale_254[0],
-            )
+            if self.check_var==True:
+                latentupscale_254 = latentupscale.upscale(
+                    upscale_method="nearest-exact",
+                    width=w * 2,
+                    height=h * 2,
+                    crop="disabled",
+                    samples=ksampler_239[0],
+                )
+                ksampler_253 = ksampler_instance.sample(
+                    seed=random.randint(1, 2 ** 64),
+                    steps=10,
+                    cfg=8,
+                    sampler_name="dpmpp_2m",
+                    scheduler="karras",
+                    denoise=0.05,
+                    model=checkpointloadersimple_241[0],
+                    positive=cliptextencode_242[0],
+                    negative=cliptextencode_243[0],
+                    latent_image=latentupscale_254[0],
+                )
 
-            vaedecode_240 = vaedecode.decode(
-                samples=ksampler_253[0],
-                vae=checkpointloadersimple_241[2],
-            )
+                vaedecode_240 = vaedecode.decode(
+                    samples=ksampler_253[0],
+                    vae=checkpointloadersimple_241[2],
+                )
+            else:
+                vaedecode_240 = vaedecode.decode(
+                    samples=ksampler_239[0],
+                    vae=checkpointloadersimple_241[2],
+                )
             saveimage.save_images(
                 filename_prefix="LD", images=vaedecode_240[0]
             )
-
             for image in vaedecode_240[0]:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+
         # Convert the image to PhotoImage and display it
         img = img.resize((int(w / 2), int(h / 2)))
         img = ImageTk.PhotoImage(img)
