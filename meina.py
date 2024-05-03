@@ -13,7 +13,7 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from tqdm.auto import tqdm
+from tqdm.auto import trange, tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 import requests
 
@@ -300,6 +300,30 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
                                                  pcoeff, icoeff, dcoeff, accept_safety, eta, s_noise, noise_sampler)
     return x
 
+@torch.no_grad()
+def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=None):
+    """DPM-Solver++(2M)."""
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+    sigma_fn = lambda t: t.neg().exp()
+    t_fn = lambda sigma: sigma.log().neg()
+    old_denoised = None
+
+    for i in trange(len(sigmas) - 1, disable=disable):
+        denoised = model(x, sigmas[i] * s_in, **extra_args)
+        if callback is not None:
+            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+        t, t_next = t_fn(sigmas[i]), t_fn(sigmas[i + 1])
+        h = t_next - t
+        if old_denoised is None or sigmas[i + 1] == 0:
+            x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised
+        else:
+            h_last = t - t_fn(sigmas[i - 1])
+            r = h_last / h
+            denoised_d = (1 + 1 / (2 * r)) * denoised - (1 / (2 * r)) * old_denoised
+            x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
+        old_denoised = denoised
+    return x
 
 class CONDRegular:
     def __init__(self, cond):
@@ -1504,8 +1528,11 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
 
             if latent_image is not None:
                 noise += latent_image
-            samples = sample_dpm_adaptive(model_k, noise, sigma_min, sigmas[0], extra_args=extra_args,
+            if sampler_name == "dpm_adaptive":
+                samples = sample_dpm_adaptive(model_k, noise, sigma_min, sigmas[0], extra_args=extra_args,
                                           callback=k_callback, disable=disable_pbar)
+            elif sampler_name == "dpmpp_2m":
+                samples = sample_dpmpp_2m(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar, **extra_options)
             return samples
 
     return KSAMPLER
@@ -1540,7 +1567,7 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps):
 
 class KSampler:
     SCHEDULERS = ["karras"]
-    SAMPLERS = ["dpm_adaptive"]
+    SAMPLERS = ["dpm_adaptive","dpmpp_2m"]
 
     def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
         self.model = model
@@ -1550,6 +1577,7 @@ class KSampler:
         self.set_steps(steps, denoise)
         self.denoise = denoise
         self.model_options = model_options
+        self.sigmas=self.calculate_sigmas(steps)
 
     def calculate_sigmas(self, steps):
         sigmas = calculate_sigmas_scheduler(self.model, self.scheduler, steps)
@@ -2717,6 +2745,7 @@ class EmptyLatentImage:
         latent = torch.zeros([batch_size, 4, height // 8, width // 8])
         return ({"samples": latent},)
 
+MAX_RESOLUTION=8192
 
 class CLIPTextEncode:
     def encode(self, clip, text):
@@ -2724,6 +2753,147 @@ class CLIPTextEncode:
         cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
         return ([[cond, {"pooled_output": pooled}]],)
 
+
+def bislerp(samples, width, height):
+    def slerp(b1, b2, r):
+        '''slerps batches b1, b2 according to ratio r, batches should be flat e.g. NxC'''
+
+        c = b1.shape[-1]
+
+        # norms
+        b1_norms = torch.norm(b1, dim=-1, keepdim=True)
+        b2_norms = torch.norm(b2, dim=-1, keepdim=True)
+
+        # normalize
+        b1_normalized = b1 / b1_norms
+        b2_normalized = b2 / b2_norms
+
+        # zero when norms are zero
+        b1_normalized[b1_norms.expand(-1, c) == 0.0] = 0.0
+        b2_normalized[b2_norms.expand(-1, c) == 0.0] = 0.0
+
+        # slerp
+        dot = (b1_normalized * b2_normalized).sum(1)
+        omega = torch.acos(dot)
+        so = torch.sin(omega)
+
+        # technically not mathematically correct, but more pleasing?
+        res = (torch.sin((1.0 - r.squeeze(1)) * omega) / so).unsqueeze(1) * b1_normalized + (
+                    torch.sin(r.squeeze(1) * omega) / so).unsqueeze(1) * b2_normalized
+        res *= (b1_norms * (1.0 - r) + b2_norms * r).expand(-1, c)
+
+        # edge cases for same or polar opposites
+        res[dot > 1 - 1e-5] = b1[dot > 1 - 1e-5]
+        res[dot < 1e-5 - 1] = (b1 * (1.0 - r) + b2 * r)[dot < 1e-5 - 1]
+        return res
+
+    def generate_bilinear_data(length_old, length_new):
+        coords_1 = torch.arange(length_old).reshape((1, 1, 1, -1)).to(torch.float32)
+        coords_1 = torch.nn.functional.interpolate(coords_1, size=(1, length_new), mode="bilinear")
+        ratios = coords_1 - coords_1.floor()
+        coords_1 = coords_1.to(torch.int64)
+
+        coords_2 = torch.arange(length_old).reshape((1, 1, 1, -1)).to(torch.float32) + 1
+        coords_2[:, :, :, -1] -= 1
+        coords_2 = torch.nn.functional.interpolate(coords_2, size=(1, length_new), mode="bilinear")
+        coords_2 = coords_2.to(torch.int64)
+        return ratios, coords_1, coords_2
+
+    n, c, h, w = samples.shape
+    h_new, w_new = (height, width)
+
+    # linear w
+    ratios, coords_1, coords_2 = generate_bilinear_data(w, w_new)
+    coords_1 = coords_1.expand((n, c, h, -1))
+    coords_2 = coords_2.expand((n, c, h, -1))
+    ratios = ratios.expand((n, 1, h, -1))
+
+    pass_1 = samples.gather(-1, coords_1).movedim(1, -1).reshape((-1, c))
+    pass_2 = samples.gather(-1, coords_2).movedim(1, -1).reshape((-1, c))
+    ratios = ratios.movedim(1, -1).reshape((-1, 1))
+
+    result = slerp(pass_1, pass_2, ratios)
+    result = result.reshape(n, h, w_new, c).movedim(-1, 1)
+
+    # linear h
+    ratios, coords_1, coords_2 = generate_bilinear_data(h, h_new)
+    coords_1 = coords_1.reshape((1, 1, -1, 1)).expand((n, c, -1, w_new))
+    coords_2 = coords_2.reshape((1, 1, -1, 1)).expand((n, c, -1, w_new))
+    ratios = ratios.reshape((1, 1, -1, 1)).expand((n, 1, -1, w_new))
+
+    pass_1 = result.gather(-2, coords_1).movedim(1, -1).reshape((-1, c))
+    pass_2 = result.gather(-2, coords_2).movedim(1, -1).reshape((-1, c))
+    ratios = ratios.movedim(1, -1).reshape((-1, 1))
+
+    result = slerp(pass_1, pass_2, ratios)
+    result = result.reshape(n, h_new, w_new, c).movedim(-1, 1)
+    return result
+
+
+def lanczos(samples, width, height):
+    images = [Image.fromarray(np.clip(255. * image.movedim(0, -1).cpu().numpy(), 0, 255).astype(np.uint8)) for image in
+              samples]
+    images = [image.resize((width, height), resample=Image.Resampling.LANCZOS) for image in images]
+    images = [torch.from_numpy(np.array(image).astype(np.float32) / 255.0).movedim(-1, 0) for image in images]
+    result = torch.stack(images)
+    return result
+
+def common_upscale(samples, width, height, upscale_method, crop):
+    if crop == "center":
+        old_width = samples.shape[3]
+        old_height = samples.shape[2]
+        old_aspect = old_width / old_height
+        new_aspect = width / height
+        x = 0
+        y = 0
+        if old_aspect > new_aspect:
+            x = round((old_width - old_width * (new_aspect / old_aspect)) / 2)
+        elif old_aspect < new_aspect:
+            y = round((old_height - old_height * (old_aspect / new_aspect)) / 2)
+        s = samples[:, :, y:old_height - y, x:old_width - x]
+    else:
+        s = samples
+
+    if upscale_method == "bislerp":
+        return bislerp(s, width, height)
+    elif upscale_method == "lanczos":
+        return lanczos(s, width, height)
+    else:
+        return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
+
+class LatentUpscale:
+    upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
+    crop_methods = ["disabled", "center"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "samples": ("LATENT",), "upscale_method": (s.upscale_methods,),
+                              "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                              "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                              "crop": (s.crop_methods,)}}
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "upscale"
+
+    CATEGORY = "latent"
+
+    def upscale(self, samples, upscale_method, width, height, crop):
+        if width == 0 and height == 0:
+            s = samples
+        else:
+            s = samples.copy()
+
+            if width == 0:
+                height = max(64, height)
+                width = max(64, round(samples["samples"].shape[3] * height / samples["samples"].shape[2]))
+            elif height == 0:
+                width = max(64, width)
+                height = max(64, round(samples["samples"].shape[2] * width / samples["samples"].shape[3]))
+            else:
+                width = max(64, width)
+                height = max(64, height)
+
+            s["samples"] = common_upscale(samples["samples"], width // 8, height // 8, upscale_method, crop)
+        return (s,)
 
 class SaveImage:
     def __init__(self):
@@ -2938,7 +3108,8 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 self.ksampler_instance = KSampler1()
                 self.vaedecode = VAEDecode()
                 self.saveimage = SaveImage()
-        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage
+                self.latent_upscale = LatentUpscale()
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -2948,7 +3119,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale= self._prep()
 
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
@@ -2973,8 +3144,28 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 negative=cliptextencode_243[0],
                 latent_image=emptylatentimage_244[0],
             )
-            vaedecode_240 = vaedecode.decode(
+            latentupscale_254 = latentupscale.upscale(
+                upscale_method="nearest-exact",
+                width=w * 2,
+                height=h * 2,
+                crop="disabled",
                 samples=ksampler_239[0],
+            )
+            ksampler_253 = ksampler_instance.sample(
+                seed=random.randint(1, 2 ** 64),
+                steps=10,
+                cfg=8,
+                sampler_name="dpmpp_2m",
+                scheduler="karras",
+                denoise=0.3,
+                model=checkpointloadersimple_241[0],
+                positive=cliptextencode_242[0],
+                negative=cliptextencode_243[0],
+                latent_image=latentupscale_254[0],
+            )
+
+            vaedecode_240 = vaedecode.decode(
+                samples=ksampler_253[0],
                 vae=checkpointloadersimple_241[2],
             )
             saveimage.save_images(
