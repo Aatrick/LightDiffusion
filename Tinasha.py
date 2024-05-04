@@ -2,9 +2,12 @@ import contextlib
 import logging
 import math
 import os
+import pickle
 import random
 from abc import abstractmethod
 from contextlib import contextmanager
+from tkinter import filedialog
+from typing import Union, Tuple
 
 import numpy as np
 import psutil
@@ -18,28 +21,30 @@ from einops import rearrange
 from tqdm.auto import trange, tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 
-import pickle
-
 load = pickle.load
+
 
 class Empty:
     pass
 
+
 class Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        #TODO: safe unpickle
         if module.startswith("pytorch_lightning"):
             return Empty
         return super().find_class(module, name)
+
 
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
     if ckpt.lower().endswith(".safetensors"):
         sd = safetensors.torch.load_file(ckpt, device=device.type)
-    elif ckpt==None:
+    elif ckpt == None:
         print("Downloading the model")
-        response=requests.get("https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors", stream=True)
+        response = requests.get(
+            "https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors",
+            stream=True)
         response.raise_for_status()
         total_size_in_bytes = int(response.headers.get('content-length', 0))
         progress_bar = tqdm(total=total_size_in_bytes, unit='iB', unit_scale=True)
@@ -134,25 +139,87 @@ class SD15(LatentFormat):
         ]
         self.taesd_decoder_name = "taesd_decoder"
 
+class DiagonalGaussianDistribution(object):
+    def __init__(self, parameters, deterministic=False):
+        self.parameters = parameters
+        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.deterministic = deterministic
+        self.std = torch.exp(0.5 * self.logvar)
+        self.var = torch.exp(self.logvar)
+        if self.deterministic:
+            self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
+
+    def sample(self):
+        x = self.mean + self.std * torch.randn(self.mean.shape).to(device=self.parameters.device)
+        return x
+
+    def kl(self, other=None):
+        if self.deterministic:
+            return torch.Tensor([0.])
+        else:
+            if other is None:
+                return 0.5 * torch.sum(torch.pow(self.mean, 2)
+                                       + self.var - 1.0 - self.logvar,
+                                       dim=[1, 2, 3])
+            else:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean - other.mean, 2) / other.var
+                    + self.var / other.var - 1.0 - self.logvar + other.logvar,
+                    dim=[1, 2, 3])
+
+    def nll(self, sample, dims=[1,2,3]):
+        if self.deterministic:
+            return torch.Tensor([0.])
+        logtwopi = np.log(2.0 * np.pi)
+        return 0.5 * torch.sum(
+            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
+            dim=dims)
+
+    def mode(self):
+        return self.mean
 
 class DiagonalGaussianRegularizer(nn.Module):
     def __init__(self, sample=True):
         super().__init__()
         self.sample = sample
 
+    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+        log = dict()
+        posterior = DiagonalGaussianDistribution(z)
+        if self.sample:
+            z = posterior.sample()
+        else:
+            z = posterior.mode()
+        kl_loss = posterior.kl()
+        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+        log["kl_loss"] = kl_loss
+        return z, log
+
 
 class AutoencodingEngine(nn.Module):
-    def __init__(self, encoder, decoder, regularizer):
+    def __init__(self, encoder, decoder, regularizer, embed_dim=256):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.regularization = regularizer
+        self.embed_dim = embed_dim
         self.post_quant_conv = torch.nn.Conv2d(4, 4, 1)
 
     def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
         dec = self.post_quant_conv(z)
         dec = self.decoder(dec, **decoder_kwargs)
         return dec
+
+    def encode(self, x: torch.Tensor, return_reg_log: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
+
+        z = self.encoder(x)
+        z = torch.nn.Conv2d((1 + 8) * 4,(1 + 8) * self.embed_dim,1,)
+
+        z, reg_log = self.regularization(z.weight.data)
+        if return_reg_log:
+            return z, reg_log
+        return z
 
 
 class Linear(torch.nn.Linear):
@@ -231,6 +298,7 @@ class PIDStepSizeController:
         self.h *= factor
         return accept
 
+
 class DPMSolver(nn.Module):
     """DPM-Solver. See https://arxiv.org/abs/2206.00927."""
 
@@ -287,8 +355,9 @@ class DPMSolver(nn.Module):
         pid = PIDStepSizeController(h_init, pcoeff, icoeff, dcoeff, 1.5 if eta else order, accept_safety)
         info = {'steps': 0, 'nfe': 0, 'n_accept': 0, 'n_reject': 0}
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
-            def _progress(steps): # TODO: fix latency on iterations progress
+            def _progress(steps):  # TODO: fix latency on iterations progress
                 app.title(f"LightDiffusion - generating : {steps}it")
+
             threading.Thread(target=_progress, args=(info['steps'],)).start()
             eps_cache = {}
             t = torch.minimum(t_end, s + pid.h) if forward else torch.maximum(t_end, s + pid.h)
@@ -316,6 +385,8 @@ class DPMSolver(nn.Module):
                      'h': pid.h, **info})
         app.title("LightDiffusion")
         return x, info
+
+
 @torch.no_grad()
 def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callback=None, disable=None, order=3,
                         rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0., icoeff=1., dcoeff=0., accept_safety=0.81,
@@ -330,6 +401,7 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
                                                  -torch.tensor(sigma_min).log(), order, rtol, atol, h_init,
                                                  pcoeff, icoeff, dcoeff, accept_safety, eta, s_noise, noise_sampler)
     return x
+
 
 @torch.no_grad()
 def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=None):
@@ -355,6 +427,7 @@ def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=No
             x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
         old_denoised = denoised
     return x
+
 
 class CONDRegular:
     def __init__(self, cond):
@@ -420,6 +493,7 @@ OOM_EXCEPTION = torch.cuda.OutOfMemoryError
 
 XFORMERS_ENABLED_VAE = True
 XFORMERS_IS_AVAILABLE = True
+
 
 def is_nvidia():
     global cpu_state
@@ -732,6 +806,7 @@ def xformers_attention(q, k, v):
     out = out.transpose(1, 2).reshape(B, C, H, W)
     return out
 
+
 def attention_pytorch(q, k, v, heads, mask=None):
     b, _, dim_head = q.shape
     dim_head //= heads
@@ -746,9 +821,11 @@ def attention_pytorch(q, k, v, heads, mask=None):
     )
     return out
 
+
 try:
     import xformers
     import xformers.ops
+
     XFORMERS_IS_AVAILABLE = True
     print("Using xformers cross attention")
     optimized_attention = xformers_attention
@@ -757,7 +834,8 @@ try:
         print("xformers version:", XFORMERS_VERSION)
         if XFORMERS_VERSION.startswith("0.0.18"):
             print()
-            print("WARNING: This version of xformers has a major bug where you will get black images when generating high resolution images.")
+            print(
+                "WARNING: This version of xformers has a major bug where you will get black images when generating high resolution images.")
             print("Please downgrade or upgrade xformers to a different version.")
             print()
             XFORMERS_ENABLED_VAE = False
@@ -767,6 +845,7 @@ except:
     XFORMERS_IS_AVAILABLE = False
     print("Using pytorch cross attention")
     optimized_attention = attention_pytorch
+
 
 class AttnBlock(nn.Module):
     def __init__(self, in_channels):
@@ -877,6 +956,29 @@ class Encoder(nn.Module):
                                stride=1,
                                padding=1)
 
+    def forward(self, x):
+        # timestep embedding
+        temb = None
+        # downsampling
+        h = self.conv_in(x)
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](h, temb)
+                if len(self.down[i_level].attn) > 0:
+                    h = self.down[i_level].attn[i_block](h)
+            if i_level != self.num_resolutions-1:
+                h = self.down[i_level].downsample(h)
+
+        # middle
+        h = self.mid.block_1(h, temb)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h, temb)
+
+        # end
+        h = self.norm_out(h)
+        h = h*torch.sigmoid(h)
+        h = self.conv_out(h)
+        return h
 
 class Decoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1, 2, 4, 8), num_res_blocks,
@@ -1563,9 +1665,10 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
                 noise += latent_image
             if sampler_name == "dpm_adaptive":
                 samples = sample_dpm_adaptive(model_k, noise, sigma_min, sigmas[0], extra_args=extra_args,
-                                          callback=k_callback, disable=disable_pbar)
+                                              callback=k_callback, disable=disable_pbar)
             elif sampler_name == "dpmpp_2m":
-                samples = sample_dpmpp_2m(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar, **extra_options)
+                samples = sample_dpmpp_2m(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback,
+                                          disable=disable_pbar, **extra_options)
             return samples
 
     return KSAMPLER
@@ -1600,7 +1703,7 @@ def calculate_sigmas_scheduler(model, scheduler_name, steps):
 
 class KSampler:
     SCHEDULERS = ["karras"]
-    SAMPLERS = ["dpm_adaptive","dpmpp_2m"]
+    SAMPLERS = ["dpm_adaptive", "dpmpp_2m"]
 
     def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
         self.model = model
@@ -1610,7 +1713,7 @@ class KSampler:
         self.set_steps(steps, denoise)
         self.denoise = denoise
         self.model_options = model_options
-        self.sigmas=self.calculate_sigmas(steps)
+        self.sigmas = self.calculate_sigmas(steps)
 
     def calculate_sigmas(self, steps):
         sigmas = calculate_sigmas_scheduler(self.model, self.scheduler, steps)
@@ -2678,6 +2781,26 @@ class VAE:
         pixel_samples = pixel_samples.cpu().movedim(1, -1)
         return pixel_samples
 
+    def encode(self, pixel_samples):
+        self.first_stage_model = self.first_stage_model.to(self.device)
+        pixel_samples = pixel_samples.movedim(-1,1)
+
+        memory_used = (2078 * pixel_samples.shape[2] * pixel_samples.shape[3]) * 1.7 #NOTE: this constant along with the one in the decode above are estimated from the mem usage for the VAE and could change.
+        free_memory1(memory_used, self.device)
+        free_memory = get_free_memory(self.device)
+        try:
+            batch_number = int(free_memory / memory_used)
+        except:
+            batch_number = 1
+        batch_number = max(1, batch_number)
+        samples = torch.empty((pixel_samples.shape[0], 4, round(pixel_samples.shape[2] // 8), round(pixel_samples.shape[3] // 8)), device="cpu")
+        for x in range(0, pixel_samples.shape[0], batch_number):
+            pixels_in = (2. * pixel_samples[x:x+batch_number] - 1.).to(self.vae_dtype).to(self.device)
+            samples[x:x+batch_number] = self.first_stage_model.encode(pixels_in).cpu().float()
+
+        self.first_stage_model = self.first_stage_model.to(self.offload_device)
+        return samples
+
 
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False,
                                  embedding_directory=None, output_model=True):
@@ -2760,8 +2883,10 @@ def get_save_image_path(filename_prefix, output_dir, image_width=0, image_height
         counter = 1
     return full_output_folder, filename, counter, subfolder, filename_prefix
 
+
 def prepare_callback(model, steps, x0_output_dict=None):
     pbar = ProgressBar(steps)
+
     def callback(step, x0, x, total_steps):
         preview_bytes = None
         pbar.update_absolute(step + 1, total_steps, preview_bytes)
@@ -2777,7 +2902,9 @@ class EmptyLatentImage:
         latent = torch.zeros([batch_size, 4, height // 8, width // 8])
         return ({"samples": latent},)
 
-MAX_RESOLUTION=8192
+
+MAX_RESOLUTION = 8192
+
 
 class CLIPTextEncode:
     def encode(self, clip, text):
@@ -2811,7 +2938,7 @@ def bislerp(samples, width, height):
 
         # technically not mathematically correct, but more pleasing?
         res = (torch.sin((1.0 - r.squeeze(1)) * omega) / so).unsqueeze(1) * b1_normalized + (
-                    torch.sin(r.squeeze(1) * omega) / so).unsqueeze(1) * b2_normalized
+                torch.sin(r.squeeze(1) * omega) / so).unsqueeze(1) * b2_normalized
         res *= (b1_norms * (1.0 - r) + b2_norms * r).expand(-1, c)
 
         # edge cases for same or polar opposites
@@ -2870,6 +2997,7 @@ def lanczos(samples, width, height):
     result = torch.stack(images)
     return result
 
+
 def common_upscale(samples, width, height, upscale_method, crop):
     if crop == "center":
         old_width = samples.shape[3]
@@ -2893,16 +3021,18 @@ def common_upscale(samples, width, height, upscale_method, crop):
     else:
         return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
 
+
 class LatentUpscale:
     upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
     crop_methods = ["disabled", "center"]
 
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "samples": ("LATENT",), "upscale_method": (s.upscale_methods,),
-                              "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
-                              "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
-                              "crop": (s.crop_methods,)}}
+        return {"required": {"samples": ("LATENT",), "upscale_method": (s.upscale_methods,),
+                             "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                             "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                             "crop": (s.crop_methods,)}}
+
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "upscale"
 
@@ -2926,6 +3056,7 @@ class LatentUpscale:
 
             s["samples"] = common_upscale(samples["samples"], width // 8, height // 8, upscale_method, crop)
         return (s,)
+
 
 class SaveImage:
     def __init__(self):
@@ -2987,6 +3118,7 @@ class CheckpointLoaderSimple:
         out = load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True)
         return out[:3]
 
+
 class SRVGGNetCompact(nn.Module):
     """A compact VGG-style network structure for super-resolution.
     It is a compact network structure, which performs upsampling in the last layer and no convolution is
@@ -3001,9 +3133,9 @@ class SRVGGNetCompact(nn.Module):
     """
 
     def __init__(
-        self,
-        state_dict,
-        act_type: str = "prelu",
+            self,
+            state_dict,
+            act_type: str = "prelu",
     ):
         super(SRVGGNetCompact, self).__init__()
         self.model_arch = "SRVGG (RealESRGAN)"
@@ -3097,6 +3229,7 @@ class SRVGGNetCompact(nn.Module):
 class UnsupportedModel(Exception):
     pass
 
+
 def load_state_dict(state_dict):
     state_dict_keys = list(state_dict.keys())
 
@@ -3112,20 +3245,104 @@ def load_state_dict(state_dict):
     return model
 
 
+def get_tiled_scale_steps(width, height, tile_x, tile_y, overlap):
+    return math.ceil((height / (tile_y - overlap))) * math.ceil((width / (tile_x - overlap)))
+
+
+@torch.inference_mode()
+def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap=8, upscale_amount=4, out_channels=3, pbar=None):
+    output = torch.empty((samples.shape[0], out_channels, round(samples.shape[2] * upscale_amount),
+                          round(samples.shape[3] * upscale_amount)), device="cpu")
+    for b in range(samples.shape[0]):
+        s = samples[b:b + 1]
+        out = torch.zeros(
+            (s.shape[0], out_channels, round(s.shape[2] * upscale_amount), round(s.shape[3] * upscale_amount)),
+            device="cpu")
+        out_div = torch.zeros(
+            (s.shape[0], out_channels, round(s.shape[2] * upscale_amount), round(s.shape[3] * upscale_amount)),
+            device="cpu")
+        for y in range(0, s.shape[2], tile_y - overlap):
+            for x in range(0, s.shape[3], tile_x - overlap):
+                s_in = s[:, :, y:y + tile_y, x:x + tile_x]
+
+                ps = function(s_in).cpu()
+                mask = torch.ones_like(ps)
+                feather = round(overlap * upscale_amount)
+                for t in range(feather):
+                    mask[:, :, t:1 + t, :] *= ((1.0 / feather) * (t + 1))
+                    mask[:, :, mask.shape[2] - 1 - t: mask.shape[2] - t, :] *= ((1.0 / feather) * (t + 1))
+                    mask[:, :, :, t:1 + t] *= ((1.0 / feather) * (t + 1))
+                    mask[:, :, :, mask.shape[3] - 1 - t: mask.shape[3] - t] *= ((1.0 / feather) * (t + 1))
+                out[:, :, round(y * upscale_amount):round((y + tile_y) * upscale_amount),
+                round(x * upscale_amount):round((x + tile_x) * upscale_amount)] += ps * mask
+                out_div[:, :, round(y * upscale_amount):round((y + tile_y) * upscale_amount),
+                round(x * upscale_amount):round((x + tile_x) * upscale_amount)] += mask
+                if pbar is not None:
+                    pbar.update(1)
+
+        output[b:b + 1] = out / out_div
+    return output
+
+
 class UpscaleModelLoader:
     def load_model(self, model_name):
         model_path = f".\\_internal\\{model_name}"
         sd = load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
-            sd = state_dict_prefix_replace(sd, {"module.":""})
+            sd = state_dict_prefix_replace(sd, {"module.": ""})
         out = load_state_dict(sd).eval()
-        return (out, )
+        return (out,)
+
+
+class ImageUpscaleWithModel:
+    def upscale(self, upscale_model, image):
+        device = torch.device("cpu")
+        upscale_model.to(device)
+        in_img = image.movedim(-1, -3).to(device)
+        free_memory = get_free_memory(device)
+
+        tile = 512
+        overlap = 32
+
+        oom = True
+        while oom:
+            try:
+                print('upscaling')
+                steps = in_img.shape[0] * get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile,
+                                                                tile_y=tile, overlap=overlap)
+                pbar = ProgressBar(steps)
+                s = tiled_scale(in_img, lambda a: upscale_model(a), tile_x=tile, tile_y=tile, overlap=overlap,
+                                upscale_amount=upscale_model.scale, pbar=pbar)
+                oom = False
+            except OOM_EXCEPTION as e:
+                tile //= 2
+                if tile < 128:
+                    raise e
+
+        upscale_model.cpu()
+        s = torch.clamp(s.movedim(-3, -1), min=0, max=1.0)
+        return (s,)
 
 
 class VAEDecode:
     def decode(self, vae, samples):
         return (vae.decode(samples["samples"]),)
 
+class VAEEncode:
+    @staticmethod
+    def vae_encode_crop_pixels(pixels):
+        x = (pixels.shape[1] // 8) * 8
+        y = (pixels.shape[2] // 8) * 8
+        if pixels.shape[1] != x or pixels.shape[2] != y:
+            x_offset = (pixels.shape[1] % 8) // 2
+            y_offset = (pixels.shape[2] % 8) // 2
+            pixels = pixels[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
+        return pixels
+
+    def encode(self, vae, pixels):
+        pixels = self.vae_encode_crop_pixels(pixels)
+        t = vae.encode(pixels[:,:,:,:3])
+        return ({"samples":t}, )
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open('.\\_internal\\prompt.txt', 'w') as f:
@@ -3164,7 +3381,7 @@ import threading
 files = glob.glob('*.safetensors')
 
 
-class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
+class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
     def __init__(self):
         super().__init__()
 
@@ -3205,10 +3422,11 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         self.cfg_slider = ctk.CTkSlider(self.sidebar, from_=1, to=15, number_of_steps=14)
         self.cfg_slider.pack()
 
-        #checkbox for hiresfix
-        self.check_var = tk.BooleanVar()
-        self.hiresfix = ctk.CTkCheckBox(self.sidebar, text="hiresfix", variable=self.check_var, onvalue=True, offvalue=False)
-        self.hiresfix.pack()
+        # checkbox for hiresfix
+        self.hires_fix_var = tk.BooleanVar()
+
+        self.hires_fix_checkbox = ctk.CTkCheckBox(self.sidebar, text="Hires Fix", variable=self.hires_fix_var, command=self.print_hires_fix)
+        self.hires_fix_checkbox.pack()
 
         # Button to launch the generation
         self.generate_button = ctk.CTkButton(self.sidebar, text="Generate", command=self.generate_image)
@@ -3224,8 +3442,12 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
 
         self.ckpt = None
 
-        #load the checkpoint on an another thread
+        # load the checkpoint on an another thread
         threading.Thread(target=self._prep, daemon=True).start()
+
+        #add an img2img button, the button opens the file selector, run img2img on the selected image
+        self.img2img_button = ctk.CTkButton(self.sidebar, text="img2img", command=self.img2img)
+        self.img2img_button.pack()
 
         prompt, neg, width, height, cfg = load_parameters_from_file()
         self.prompt_entry.insert(tk.END, prompt)
@@ -3244,10 +3466,10 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                                                                       self.width_slider.get(),
                                                                       self.height_slider.get(), self.cfg_slider.get()))
         self.neg.bind("<KeyRelease>",
-                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
-                                                                      self.neg.get("1.0", tk.END),
-                                                                      self.width_slider.get(),
-                                                                      self.height_slider.get(), self.cfg_slider.get()))
+                      lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                             self.neg.get("1.0", tk.END),
+                                                             self.width_slider.get(),
+                                                             self.height_slider.get(), self.cfg_slider.get()))
         self.width_slider.bind("<ButtonRelease-1>",
                                lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
                                                                       self.neg.get("1.0", tk.END),
@@ -3265,6 +3487,76 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                                                                     self.width_slider.get(), self.height_slider.get(),
                                                                     self.cfg_slider.get()))
         self.display_most_recent_image()
+
+    def _img2img(self, file_path):
+        prompt = self.prompt_entry.get("1.0", tk.END)
+        neg = self.neg.get("1.0", tk.END)
+        w = int(self.width_slider.get())
+        h = int(self.height_slider.get())
+        cfg = int(self.cfg_slider.get())
+        img = Image.open(file_path)
+        img= np.array(img).astype(np.float32) / 255.0
+        img=torch.from_numpy(img).permute(2,0,1).unsqueeze(0)
+
+        with torch.inference_mode():
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader, vaeencode= self._prep()
+            cliptextencode_242 = cliptextencode.encode(
+                text=prompt,
+                clip=checkpointloadersimple_241[1],
+            )
+            cliptextencode_243 = cliptextencode.encode(
+                text=neg,
+                clip=checkpointloadersimple_241[1],
+            )
+            vaeencode_240 = vaeencode.encode(
+                vae=checkpointloadersimple_241[2],
+                pixels=img,
+            )
+            latentupscale_254 = latentupscale.upscale(
+                upscale_method="nearest-exact",
+                width=w * 2,
+                height=h * 2,
+                crop="disabled",
+                samples=vaeencode_240[0],
+            )
+            ksampler_253 = ksampler_instance.sample(
+                seed=random.randint(1, 2 ** 64),
+                steps=15,
+                cfg=8,
+                sampler_name="dpmpp_2m",
+                scheduler="karras",
+                denoise=0.05,
+                model=checkpointloadersimple_241[0],
+                positive=cliptextencode_242[0],
+                negative=cliptextencode_243[0],
+                latent_image=latentupscale_254[0],
+            )
+            vaedecode_240 = vaedecode.decode(
+                samples=ksampler_253[0],
+                vae=checkpointloadersimple_241[2],
+            )
+            saveimage.save_images(
+                filename_prefix="LD", images=vaedecode_240[0]
+            )
+            for image in vaedecode_240[0]:
+                i = 255. * image.cpu().numpy()
+                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        img = img.resize((int(w / 2), int(h / 2)))
+        img = ImageTk.PhotoImage(img)
+        self.image_label.after(0, self._update_image_label, img)
+
+    def img2img(self):
+        # Open a file dialog to select an image
+        file_path = filedialog.askopenfilename()
+        if file_path:
+            # Create a new thread that will run the _img2img method
+            threading.Thread(target=self._img2img, args=(file_path,), daemon=True).start()
+
+    def print_hires_fix(self):
+        if self.hires_fix_var.get()==True:
+            print("Hires fix is ON")
+        else:
+            print("Hires fix is OFF")
 
     def generate_image(self):
         # Create a new thread that will run the _generate_image method
@@ -3286,7 +3578,8 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 self.saveimage = SaveImage()
                 self.latent_upscale = LatentUpscale()
                 self.upscalemodelloader = UpscaleModelLoader()
-        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader
+                self.vaeencode = VAEEncode()
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader, self.vaeencode
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -3296,7 +3589,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader, vaeencode= self._prep()
 
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
@@ -3321,7 +3614,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 negative=cliptextencode_243[0],
                 latent_image=emptylatentimage_244[0],
             )
-            if self.check_var==True:
+            if self.hires_fix_var.get() == True:
                 latentupscale_254 = latentupscale.upscale(
                     upscale_method="nearest-exact",
                     width=w * 2,
@@ -3331,7 +3624,7 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                 )
                 ksampler_253 = ksampler_instance.sample(
                     seed=random.randint(1, 2 ** 64),
-                    steps=10,
+                    steps=15,
                     cfg=8,
                     sampler_name="dpmpp_2m",
                     scheduler="karras",
@@ -3346,17 +3639,23 @@ class App(tk.Tk): # TODO : Add hiresfix, img2img and ultimate upscale
                     samples=ksampler_253[0],
                     vae=checkpointloadersimple_241[2],
                 )
+                saveimage.save_images(
+                    filename_prefix="LD", images=vaedecode_240[0]
+                )
+                for image in vaedecode_240[0]:
+                    i = 255. * image.cpu().numpy()
+                    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             else:
                 vaedecode_240 = vaedecode.decode(
                     samples=ksampler_239[0],
                     vae=checkpointloadersimple_241[2],
                 )
-            saveimage.save_images(
-                filename_prefix="LD", images=vaedecode_240[0]
-            )
-            for image in vaedecode_240[0]:
-                i = 255. * image.cpu().numpy()
-                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+                saveimage.save_images(
+                    filename_prefix="LD", images=vaedecode_240[0]
+                )
+                for image in vaedecode_240[0]:
+                    i = 255. * image.cpu().numpy()
+                    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
         # Convert the image to PhotoImage and display it
         img = img.resize((int(w / 2), int(h / 2)))
