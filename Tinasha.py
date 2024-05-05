@@ -7,7 +7,6 @@ import random
 from abc import abstractmethod
 from contextlib import contextmanager
 from tkinter import filedialog
-from typing import Union, Tuple
 
 import numpy as np
 import psutil
@@ -139,87 +138,17 @@ class SD15(LatentFormat):
         ]
         self.taesd_decoder_name = "taesd_decoder"
 
-class DiagonalGaussianDistribution(object):
-    def __init__(self, parameters, deterministic=False):
-        self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
-
-    def sample(self):
-        x = self.mean + self.std * torch.randn(self.mean.shape).to(device=self.parameters.device)
-        return x
-
-    def kl(self, other=None):
-        if self.deterministic:
-            return torch.Tensor([0.])
-        else:
-            if other is None:
-                return 0.5 * torch.sum(torch.pow(self.mean, 2)
-                                       + self.var - 1.0 - self.logvar,
-                                       dim=[1, 2, 3])
-            else:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var
-                    + self.var / other.var - 1.0 - self.logvar + other.logvar,
-                    dim=[1, 2, 3])
-
-    def nll(self, sample, dims=[1,2,3]):
-        if self.deterministic:
-            return torch.Tensor([0.])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims)
-
-    def mode(self):
-        return self.mean
-
-class DiagonalGaussianRegularizer(nn.Module):
-    def __init__(self, sample=True):
-        super().__init__()
-        self.sample = sample
-
-    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict]:
-        log = dict()
-        posterior = DiagonalGaussianDistribution(z)
-        if self.sample:
-            z = posterior.sample()
-        else:
-            z = posterior.mode()
-        kl_loss = posterior.kl()
-        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-        log["kl_loss"] = kl_loss
-        return z, log
-
-
 class AutoencodingEngine(nn.Module):
-    def __init__(self, encoder, decoder, regularizer, embed_dim=256):
+    def __init__(self, encoder, decoder):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
-        self.regularization = regularizer
-        self.embed_dim = embed_dim
         self.post_quant_conv = torch.nn.Conv2d(4, 4, 1)
 
     def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
         dec = self.post_quant_conv(z)
         dec = self.decoder(dec, **decoder_kwargs)
         return dec
-
-    def encode(self, x: torch.Tensor, return_reg_log: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-
-        z = self.encoder(x)
-        z = torch.nn.Conv2d((1 + 8) * 4,(1 + 8) * self.embed_dim,1,)
-
-        z, reg_log = self.regularization(z.weight.data)
-        if return_reg_log:
-            return z, reg_log
-        return z
 
 
 class Linear(torch.nn.Linear):
@@ -2744,7 +2673,6 @@ class VAE:
             self.first_stage_model = AutoencodingEngine(
                 Encoder(**config['encoder']),
                 Decoder(**config['decoder']),
-                DiagonalGaussianRegularizer(**config['regularizer'])
             )
         self.first_stage_model = self.first_stage_model.eval()
 
@@ -2780,26 +2708,6 @@ class VAE:
         self.first_stage_model = self.first_stage_model.to(self.offload_device)
         pixel_samples = pixel_samples.cpu().movedim(1, -1)
         return pixel_samples
-
-    def encode(self, pixel_samples):
-        self.first_stage_model = self.first_stage_model.to(self.device)
-        pixel_samples = pixel_samples.movedim(-1,1)
-
-        memory_used = (2078 * pixel_samples.shape[2] * pixel_samples.shape[3]) * 1.7 #NOTE: this constant along with the one in the decode above are estimated from the mem usage for the VAE and could change.
-        free_memory1(memory_used, self.device)
-        free_memory = get_free_memory(self.device)
-        try:
-            batch_number = int(free_memory / memory_used)
-        except:
-            batch_number = 1
-        batch_number = max(1, batch_number)
-        samples = torch.empty((pixel_samples.shape[0], 4, round(pixel_samples.shape[2] // 8), round(pixel_samples.shape[3] // 8)), device="cpu")
-        for x in range(0, pixel_samples.shape[0], batch_number):
-            pixels_in = (2. * pixel_samples[x:x+batch_number] - 1.).to(self.vae_dtype).to(self.device)
-            samples[x:x+batch_number] = self.first_stage_model.encode(pixels_in).cpu().float()
-
-        self.first_stage_model = self.first_stage_model.to(self.offload_device)
-        return samples
 
 
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False,
@@ -3119,230 +3027,9 @@ class CheckpointLoaderSimple:
         return out[:3]
 
 
-class SRVGGNetCompact(nn.Module):
-    """A compact VGG-style network structure for super-resolution.
-    It is a compact network structure, which performs upsampling in the last layer and no convolution is
-    conducted on the HR feature space.
-    Args:
-        num_in_ch (int): Channel number of inputs. Default: 3.
-        num_out_ch (int): Channel number of outputs. Default: 3.
-        num_feat (int): Channel number of intermediate features. Default: 64.
-        num_conv (int): Number of convolution layers in the body network. Default: 16.
-        upscale (int): Upsampling factor. Default: 4.
-        act_type (str): Activation type, options: 'relu', 'prelu', 'leakyrelu'. Default: prelu.
-    """
-
-    def __init__(
-            self,
-            state_dict,
-            act_type: str = "prelu",
-    ):
-        super(SRVGGNetCompact, self).__init__()
-        self.model_arch = "SRVGG (RealESRGAN)"
-        self.sub_type = "SR"
-
-        self.act_type = act_type
-
-        self.state = state_dict
-
-        if "params" in self.state:
-            self.state = self.state["params"]
-
-        self.key_arr = list(self.state.keys())
-
-        self.in_nc = self.get_in_nc()
-        self.num_feat = self.get_num_feats()
-        self.num_conv = self.get_num_conv()
-        self.out_nc = self.in_nc  # :(
-        self.pixelshuffle_shape = None  # Defined in get_scale()
-        self.scale = self.get_scale()
-
-        self.supports_fp16 = True
-        self.supports_bfp16 = True
-        self.min_size_restriction = None
-
-        self.body = nn.ModuleList()
-        # the first conv
-        self.body.append(nn.Conv2d(self.in_nc, self.num_feat, 3, 1, 1))
-        # the first activation
-        if act_type == "relu":
-            activation = nn.ReLU(inplace=True)
-        elif act_type == "prelu":
-            activation = nn.PReLU(num_parameters=self.num_feat)
-        elif act_type == "leakyrelu":
-            activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
-        self.body.append(activation)  # type: ignore
-
-        # the body structure
-        for _ in range(self.num_conv):
-            self.body.append(nn.Conv2d(self.num_feat, self.num_feat, 3, 1, 1))
-            # activation
-            if act_type == "relu":
-                activation = nn.ReLU(inplace=True)
-            elif act_type == "prelu":
-                activation = nn.PReLU(num_parameters=self.num_feat)
-            elif act_type == "leakyrelu":
-                activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
-            self.body.append(activation)  # type: ignore
-
-        # the last conv
-        self.body.append(nn.Conv2d(self.num_feat, self.pixelshuffle_shape, 3, 1, 1))  # type: ignore
-        # upsample
-        self.upsampler = nn.PixelShuffle(self.scale)
-
-        self.load_state_dict(self.state, strict=False)
-
-    def get_num_conv(self) -> int:
-        return (int(self.key_arr[-1].split(".")[1]) - 2) // 2
-
-    def get_num_feats(self) -> int:
-        return self.state[self.key_arr[0]].shape[0]
-
-    def get_in_nc(self) -> int:
-        return self.state[self.key_arr[0]].shape[1]
-
-    def get_scale(self) -> int:
-        self.pixelshuffle_shape = self.state[self.key_arr[-1]].shape[0]
-        # Assume out_nc is the same as in_nc
-        # I cant think of a better way to do that
-        self.out_nc = self.in_nc
-        scale = math.sqrt(self.pixelshuffle_shape / self.out_nc)
-        if scale - int(scale) > 0:
-            print(
-                "out_nc is probably different than in_nc, scale calculation might be wrong"
-            )
-        scale = int(scale)
-        return scale
-
-    def forward(self, x):
-        out = x
-        for i in range(0, len(self.body)):
-            out = self.body[i](out)
-
-        out = self.upsampler(out)
-        # add the nearest upsampled image, so that the network learns the residual
-        base = F.interpolate(x, scale_factor=self.scale, mode="nearest")
-        out += base
-        return out
-
-
-class UnsupportedModel(Exception):
-    pass
-
-
-def load_state_dict(state_dict):
-    state_dict_keys = list(state_dict.keys())
-
-    if "params_ema" in state_dict_keys:
-        state_dict = state_dict["params_ema"]
-    elif "params-ema" in state_dict_keys:
-        state_dict = state_dict["params-ema"]
-    elif "params" in state_dict_keys:
-        state_dict = state_dict["params"]
-
-    state_dict_keys = list(state_dict.keys())
-    model = SRVGGNetCompact(state_dict)
-    return model
-
-
-def get_tiled_scale_steps(width, height, tile_x, tile_y, overlap):
-    return math.ceil((height / (tile_y - overlap))) * math.ceil((width / (tile_x - overlap)))
-
-
-@torch.inference_mode()
-def tiled_scale(samples, function, tile_x=64, tile_y=64, overlap=8, upscale_amount=4, out_channels=3, pbar=None):
-    output = torch.empty((samples.shape[0], out_channels, round(samples.shape[2] * upscale_amount),
-                          round(samples.shape[3] * upscale_amount)), device="cpu")
-    for b in range(samples.shape[0]):
-        s = samples[b:b + 1]
-        out = torch.zeros(
-            (s.shape[0], out_channels, round(s.shape[2] * upscale_amount), round(s.shape[3] * upscale_amount)),
-            device="cpu")
-        out_div = torch.zeros(
-            (s.shape[0], out_channels, round(s.shape[2] * upscale_amount), round(s.shape[3] * upscale_amount)),
-            device="cpu")
-        for y in range(0, s.shape[2], tile_y - overlap):
-            for x in range(0, s.shape[3], tile_x - overlap):
-                s_in = s[:, :, y:y + tile_y, x:x + tile_x]
-
-                ps = function(s_in).cpu()
-                mask = torch.ones_like(ps)
-                feather = round(overlap * upscale_amount)
-                for t in range(feather):
-                    mask[:, :, t:1 + t, :] *= ((1.0 / feather) * (t + 1))
-                    mask[:, :, mask.shape[2] - 1 - t: mask.shape[2] - t, :] *= ((1.0 / feather) * (t + 1))
-                    mask[:, :, :, t:1 + t] *= ((1.0 / feather) * (t + 1))
-                    mask[:, :, :, mask.shape[3] - 1 - t: mask.shape[3] - t] *= ((1.0 / feather) * (t + 1))
-                out[:, :, round(y * upscale_amount):round((y + tile_y) * upscale_amount),
-                round(x * upscale_amount):round((x + tile_x) * upscale_amount)] += ps * mask
-                out_div[:, :, round(y * upscale_amount):round((y + tile_y) * upscale_amount),
-                round(x * upscale_amount):round((x + tile_x) * upscale_amount)] += mask
-                if pbar is not None:
-                    pbar.update(1)
-
-        output[b:b + 1] = out / out_div
-    return output
-
-
-class UpscaleModelLoader:
-    def load_model(self, model_name):
-        model_path = f".\\_internal\\{model_name}"
-        sd = load_torch_file(model_path, safe_load=True)
-        if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
-            sd = state_dict_prefix_replace(sd, {"module.": ""})
-        out = load_state_dict(sd).eval()
-        return (out,)
-
-
-class ImageUpscaleWithModel:
-    def upscale(self, upscale_model, image):
-        device = torch.device("cpu")
-        upscale_model.to(device)
-        in_img = image.movedim(-1, -3).to(device)
-        free_memory = get_free_memory(device)
-
-        tile = 512
-        overlap = 32
-
-        oom = True
-        while oom:
-            try:
-                print('upscaling')
-                steps = in_img.shape[0] * get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile,
-                                                                tile_y=tile, overlap=overlap)
-                pbar = ProgressBar(steps)
-                s = tiled_scale(in_img, lambda a: upscale_model(a), tile_x=tile, tile_y=tile, overlap=overlap,
-                                upscale_amount=upscale_model.scale, pbar=pbar)
-                oom = False
-            except OOM_EXCEPTION as e:
-                tile //= 2
-                if tile < 128:
-                    raise e
-
-        upscale_model.cpu()
-        s = torch.clamp(s.movedim(-3, -1), min=0, max=1.0)
-        return (s,)
-
-
 class VAEDecode:
     def decode(self, vae, samples):
         return (vae.decode(samples["samples"]),)
-
-class VAEEncode:
-    @staticmethod
-    def vae_encode_crop_pixels(pixels):
-        x = (pixels.shape[1] // 8) * 8
-        y = (pixels.shape[2] // 8) * 8
-        if pixels.shape[1] != x or pixels.shape[2] != y:
-            x_offset = (pixels.shape[1] % 8) // 2
-            y_offset = (pixels.shape[2] % 8) // 2
-            pixels = pixels[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
-        return pixels
-
-    def encode(self, vae, pixels):
-        pixels = self.vae_encode_crop_pixels(pixels)
-        t = vae.encode(pixels[:,:,:,:3])
-        return ({"samples":t}, )
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open('.\\_internal\\prompt.txt', 'w') as f:
@@ -3377,16 +3064,18 @@ import tkinter as tk
 from PIL import Image, ImageTk
 import glob
 import threading
+from comfy_extras.nodes_upscale_model import UpscaleModelLoader
+from ComfyUI_UltimateSDUpscale.repositories.ultimate_sd_upscale.scripts.ultimate_upscale import USDUpscaler
 
 files = glob.glob('*.safetensors')
 
 
-class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
+class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
         self.title('LightDiffusion')
-        self.geometry('800x560')
+        self.geometry('800x600')
 
         selected_file = tk.StringVar()
         if files:
@@ -3438,7 +3127,7 @@ class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
 
         # Label to display the generated image
         self.image_label = tk.Label(self.display, bg='black')
-        self.image_label.pack()
+        self.image_label.pack(pady=20)
 
         self.ckpt = None
 
@@ -3488,18 +3177,15 @@ class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
                                                                     self.cfg_slider.get()))
         self.display_most_recent_image()
 
-    def _img2img(self, file_path):
+    def _img2img(self, file_path):# TODO : add Img2Img with ultimate upscale
         prompt = self.prompt_entry.get("1.0", tk.END)
         neg = self.neg.get("1.0", tk.END)
         w = int(self.width_slider.get())
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         img = Image.open(file_path)
-        img= np.array(img).astype(np.float32) / 255.0
-        img=torch.from_numpy(img).permute(2,0,1).unsqueeze(0)
-
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader, vaeencode= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader= self._prep()
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
                 clip=checkpointloadersimple_241[1],
@@ -3508,37 +3194,39 @@ class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
                 text=neg,
                 clip=checkpointloadersimple_241[1],
             )
-            vaeencode_240 = vaeencode.encode(
-                vae=checkpointloadersimple_241[2],
-                pixels=img,
-            )
-            latentupscale_254 = latentupscale.upscale(
-                upscale_method="nearest-exact",
-                width=w * 2,
-                height=h * 2,
-                crop="disabled",
-                samples=vaeencode_240[0],
-            )
-            ksampler_253 = ksampler_instance.sample(
+            upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
+            ultimatesdupscale=USDUpscaler()
+            ultimatesdupscale_250 = ultimatesdupscale.upscale(
+                upscale_by=3,
                 seed=random.randint(1, 2 ** 64),
-                steps=15,
-                cfg=8,
-                sampler_name="dpmpp_2m",
+                steps=25,
+                cfg=7,
+                sampler_name="dpmpp_2m_sde",
                 scheduler="karras",
-                denoise=0.05,
+                denoise=0.2,
+                mode_type="Linear",
+                tile_width=512,
+                tile_height=512,
+                mask_blur=16,
+                tile_padding=32,
+                seam_fix_mode="None",
+                seam_fix_denoise=0,
+                seam_fix_width=64,
+                seam_fix_mask_blur=16,
+                seam_fix_padding=32,
+                force_uniform_tiles="enable",
+                image=img,
                 model=checkpointloadersimple_241[0],
                 positive=cliptextencode_242[0],
                 negative=cliptextencode_243[0],
-                latent_image=latentupscale_254[0],
-            )
-            vaedecode_240 = vaedecode.decode(
-                samples=ksampler_253[0],
                 vae=checkpointloadersimple_241[2],
+                upscale_model=upscalemodelloader_244[0],
             )
-            saveimage.save_images(
-                filename_prefix="LD", images=vaedecode_240[0]
+            saveimage_277 = saveimage.save_images(
+                filename_prefix="ComfyUI",
+                images=ultimatesdupscale_250[0],
             )
-            for image in vaedecode_240[0]:
+            for image in ultimatesdupscale_250[0]:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
         img = img.resize((int(w / 2), int(h / 2)))
@@ -3578,8 +3266,7 @@ class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
                 self.saveimage = SaveImage()
                 self.latent_upscale = LatentUpscale()
                 self.upscalemodelloader = UpscaleModelLoader()
-                self.vaeencode = VAEEncode()
-        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader, self.vaeencode
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -3589,7 +3276,7 @@ class App(tk.Tk):  # TODO : Add hiresfix, img2img and ultimate upscale
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader, vaeencode= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader= self._prep()
 
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
