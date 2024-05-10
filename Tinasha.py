@@ -2,12 +2,10 @@ import contextlib
 import logging
 import math
 import os
-import pickle
 import random
 from abc import abstractmethod
 from contextlib import contextmanager
 from tkinter import filedialog
-
 import numpy as np
 import psutil
 import requests
@@ -19,27 +17,19 @@ import torch.nn.functional as F
 from einops import rearrange
 from tqdm.auto import trange, tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
-
-load = pickle.load
-
-
-class Empty:
-    pass
-
-
-class Unpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        if module.startswith("pytorch_lightning"):
-            return Empty
-        return super().find_class(module, name)
-
+from tkinter import *
+import customtkinter as ctk
+import tkinter as tk
+from PIL import Image, ImageTk
+import glob
+import threading
 
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
     if ckpt.lower().endswith(".safetensors"):
         sd = safetensors.torch.load_file(ckpt, device=device.type)
-    elif ckpt == None:
+    else:
         print("Downloading the model")
         response = requests.get(
             "https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors",
@@ -56,22 +46,6 @@ def load_torch_file(ckpt, safe_load=False, device=None):
         if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
             print("ERROR, something went wrong")
         sd = safetensors.torch.load_file("model.safetensors", device=device.type)
-    else:
-        if safe_load:
-            if not 'weights_only' in torch.load.__code__.co_varnames:
-                logging.warning(
-                    "Warning torch.load doesn't support weights_only on this pytorch version, loading unsafely.")
-                safe_load = False
-        if safe_load:
-            pl_sd = torch.load(ckpt, map_location=device, weights_only=True)
-        else:
-            pl_sd = torch.load(ckpt, map_location=device, pickle_module=Unpickler)
-        if "global_step" in pl_sd:
-            logging.debug(f"Global Step: {pl_sd['global_step']}")
-        if "state_dict" in pl_sd:
-            sd = pl_sd["state_dict"]
-        else:
-            sd = pl_sd
     return sd
 
 
@@ -197,22 +171,23 @@ def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cuda'):
     sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
     return torch.cat([sigmas, sigmas.new_zeros([1])]).to(device)
 
+
 def append_dims(x, target_dims):
     """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
     dims_to_append = target_dims - x.ndim
-    if dims_to_append < 0:
-        raise ValueError(f'input has {x.ndim} dims but target_dims is {target_dims}, which is less')
     expanded = x[(...,) + (None,) * dims_to_append]
     # MPS will get inf values if it tries to index into the new axes, but detaching fixes this.
     # https://github.com/pytorch/pytorch/issues/84364
     return expanded
 
+
 def default_noise_sampler(x):
     return lambda sigma, sigma_next: torch.randn_like(x)
 
+
 def to_d(x, sigma, denoised):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    x= x.to(device)
+    x = x.to(device)
     denoised = denoised.to(device)
     sigma = sigma.to(device)
     """Converts a denoiser output to a Karras ODE derivative."""
@@ -222,11 +197,10 @@ def to_d(x, sigma, denoised):
 def get_ancestral_step(sigma_from, sigma_to, eta=1.):
     """Calculates the noise level (sigma_down) to step down to and the amount
     of noise to add (sigma_up) when doing an ancestral sampling step."""
-    if not eta:
-        return sigma_to, 0.
     sigma_up = min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
     sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
     return sigma_down, sigma_up
+
 
 class PIDStepSizeController:
     """A PID controller for ODE adaptive step size control."""
@@ -360,7 +334,8 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
 
 
 @torch.no_grad()
-def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
+def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1.,
+                           noise_sampler=None):
     """Ancestral sampling with Euler method steps."""
     extra_args = {} if extra_args is None else extra_args
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
@@ -377,6 +352,7 @@ def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, dis
         if sigmas[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
     return x
+
 
 @torch.no_grad()
 def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=None):
@@ -402,6 +378,7 @@ def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=No
             x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
         old_denoised = denoised
     return x
+
 
 class CONDRegular:
     def __init__(self, cond):
@@ -560,14 +537,7 @@ def load_models_gpu(models, memory_required=0):
 
     total_memory_required = {}
     for loaded_model in models_to_load:
-        if total_memory_required.get(loaded_model.device, 0) is None:
-            total_memory_required[loaded_model.device] = 0
-        elif loaded_model.model_memory_required(loaded_model.device) is None:
-            total_memory_required[loaded_model.device] = 0
-        else:
-            total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
-                                                                                   0) + loaded_model.model_memory_required(
-                loaded_model.device)
+        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,0) + loaded_model.model_memory_required(loaded_model.device)
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
@@ -698,8 +668,6 @@ class ModelPatcher:
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
-        else:
-            return torch.float32
 
     def model_state_dict(self, filter_prefix=None):
         sd = self.model.state_dict()
@@ -769,7 +737,7 @@ class ResnetBlock(nn.Module):
         return x + h
 
 
-def xformers_attention(q, k, v): # TODO : Add stable-fast or TensorRT optimization
+def xformers_attention(q, k, v):  # TODO : Add stable-fast or TensorRT optimization
     # compute attention
     B, C, H, W = q.shape
     q, k, v = map(
@@ -803,18 +771,6 @@ try:
     XFORMERS_IS_AVAILABLE = True
     print("Using xformers cross attention")
     optimized_attention = xformers_attention
-    try:
-        XFORMERS_VERSION = xformers.version.__version__
-        print("xformers version:", XFORMERS_VERSION)
-        if XFORMERS_VERSION.startswith("0.0.18"):
-            print()
-            print(
-                "WARNING: This version of xformers has a major bug where you will get black images when generating high resolution images.")
-            print("Please downgrade or upgrade xformers to a different version.")
-            print()
-            XFORMERS_ENABLED_VAE = False
-    except:
-        pass
 except:
     XFORMERS_IS_AVAILABLE = False
     print("Using pytorch cross attention")
@@ -929,30 +885,6 @@ class Encoder(nn.Module):
                                kernel_size=3,
                                stride=1,
                                padding=1)
-
-    def forward(self, x):
-        # timestep embedding
-        temb = None
-        # downsampling
-        h = self.conv_in(x)
-        for i_level in range(self.num_resolutions):
-            for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](h, temb)
-                if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
-            if i_level != self.num_resolutions - 1:
-                h = self.down[i_level].downsample(h)
-
-        # middle
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
-
-        # end
-        h = self.norm_out(h)
-        h = h * torch.sigmoid(h)
-        h = self.conv_out(h)
-        return h
 
 
 class Decoder(nn.Module):
@@ -1651,7 +1583,7 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
                                               callback=k_callback, disable=disable_pbar)
             elif sampler_name == "euler_ancestral":
                 samples = sample_euler_ancestral(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback,
-                                          disable=disable_pbar, **extra_options)
+                                                 disable=disable_pbar, **extra_options)
             elif sampler_name == "dpmpp_2m":
                 samples = sample_dpmpp_2m(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback,
                                           disable=disable_pbar, **extra_options)
@@ -1680,6 +1612,7 @@ def sample(model, noise, positive, negative, cfg, device, sampler, sigmas, model
     samples = sampler.sample(model_wrap, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
     return model.process_latent_out(samples.to(torch.float32))
 
+
 def normal_scheduler(model, steps, sgm=False, floor=False):
     s = model.model_sampling
     start = s.timestep(s.sigma_max)
@@ -1696,6 +1629,7 @@ def normal_scheduler(model, steps, sgm=False, floor=False):
         sigs.append(s.sigma(ts))
     sigs += [0.0]
     return torch.FloatTensor(sigs)
+
 
 def calculate_sigmas_scheduler(model, scheduler_name, steps):
     if scheduler_name == "karras":
@@ -2026,9 +1960,7 @@ class SpatialTransformer(nn.Module):
 
 
 class TimestepBlock(nn.Module):
-    @abstractmethod
-    def forward(self, x, emb):
-        pass
+    pass
 
 
 class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
@@ -2900,125 +2832,14 @@ class CLIPTextEncode:
         return ([[cond, {"pooled_output": pooled}]],)
 
 
-def bislerp(samples, width, height):
-    def slerp(b1, b2, r):
-        '''slerps batches b1, b2 according to ratio r, batches should be flat e.g. NxC'''
-
-        c = b1.shape[-1]
-
-        # norms
-        b1_norms = torch.norm(b1, dim=-1, keepdim=True)
-        b2_norms = torch.norm(b2, dim=-1, keepdim=True)
-
-        # normalize
-        b1_normalized = b1 / b1_norms
-        b2_normalized = b2 / b2_norms
-
-        # zero when norms are zero
-        b1_normalized[b1_norms.expand(-1, c) == 0.0] = 0.0
-        b2_normalized[b2_norms.expand(-1, c) == 0.0] = 0.0
-
-        # slerp
-        dot = (b1_normalized * b2_normalized).sum(1)
-        omega = torch.acos(dot)
-        so = torch.sin(omega)
-
-        # technically not mathematically correct, but more pleasing?
-        res = (torch.sin((1.0 - r.squeeze(1)) * omega) / so).unsqueeze(1) * b1_normalized + (
-                torch.sin(r.squeeze(1) * omega) / so).unsqueeze(1) * b2_normalized
-        res *= (b1_norms * (1.0 - r) + b2_norms * r).expand(-1, c)
-
-        # edge cases for same or polar opposites
-        res[dot > 1 - 1e-5] = b1[dot > 1 - 1e-5]
-        res[dot < 1e-5 - 1] = (b1 * (1.0 - r) + b2 * r)[dot < 1e-5 - 1]
-        return res
-
-    def generate_bilinear_data(length_old, length_new):
-        coords_1 = torch.arange(length_old).reshape((1, 1, 1, -1)).to(torch.float32)
-        coords_1 = torch.nn.functional.interpolate(coords_1, size=(1, length_new), mode="bilinear")
-        ratios = coords_1 - coords_1.floor()
-        coords_1 = coords_1.to(torch.int64)
-
-        coords_2 = torch.arange(length_old).reshape((1, 1, 1, -1)).to(torch.float32) + 1
-        coords_2[:, :, :, -1] -= 1
-        coords_2 = torch.nn.functional.interpolate(coords_2, size=(1, length_new), mode="bilinear")
-        coords_2 = coords_2.to(torch.int64)
-        return ratios, coords_1, coords_2
-
-    n, c, h, w = samples.shape
-    h_new, w_new = (height, width)
-
-    # linear w
-    ratios, coords_1, coords_2 = generate_bilinear_data(w, w_new)
-    coords_1 = coords_1.expand((n, c, h, -1))
-    coords_2 = coords_2.expand((n, c, h, -1))
-    ratios = ratios.expand((n, 1, h, -1))
-
-    pass_1 = samples.gather(-1, coords_1).movedim(1, -1).reshape((-1, c))
-    pass_2 = samples.gather(-1, coords_2).movedim(1, -1).reshape((-1, c))
-    ratios = ratios.movedim(1, -1).reshape((-1, 1))
-
-    result = slerp(pass_1, pass_2, ratios)
-    result = result.reshape(n, h, w_new, c).movedim(-1, 1)
-
-    # linear h
-    ratios, coords_1, coords_2 = generate_bilinear_data(h, h_new)
-    coords_1 = coords_1.reshape((1, 1, -1, 1)).expand((n, c, -1, w_new))
-    coords_2 = coords_2.reshape((1, 1, -1, 1)).expand((n, c, -1, w_new))
-    ratios = ratios.reshape((1, 1, -1, 1)).expand((n, 1, -1, w_new))
-
-    pass_1 = result.gather(-2, coords_1).movedim(1, -1).reshape((-1, c))
-    pass_2 = result.gather(-2, coords_2).movedim(1, -1).reshape((-1, c))
-    ratios = ratios.movedim(1, -1).reshape((-1, 1))
-
-    result = slerp(pass_1, pass_2, ratios)
-    result = result.reshape(n, h_new, w_new, c).movedim(-1, 1)
-    return result
-
-
-def lanczos(samples, width, height):
-    images = [Image.fromarray(np.clip(255. * image.movedim(0, -1).cpu().numpy(), 0, 255).astype(np.uint8)) for image in
-              samples]
-    images = [image.resize((width, height), resample=Image.Resampling.LANCZOS) for image in images]
-    images = [torch.from_numpy(np.array(image).astype(np.float32) / 255.0).movedim(-1, 0) for image in images]
-    result = torch.stack(images)
-    return result
-
-
 def common_upscale(samples, width, height, upscale_method, crop):
-    if crop == "center":
-        old_width = samples.shape[3]
-        old_height = samples.shape[2]
-        old_aspect = old_width / old_height
-        new_aspect = width / height
-        x = 0
-        y = 0
-        if old_aspect > new_aspect:
-            x = round((old_width - old_width * (new_aspect / old_aspect)) / 2)
-        elif old_aspect < new_aspect:
-            y = round((old_height - old_height * (old_aspect / new_aspect)) / 2)
-        s = samples[:, :, y:old_height - y, x:old_width - x]
-    else:
-        s = samples
-
-    if upscale_method == "bislerp":
-        return bislerp(s, width, height)
-    elif upscale_method == "lanczos":
-        return lanczos(s, width, height)
-    else:
-        return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
+    s = samples
+    return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
 
 
 class LatentUpscale:
     upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
     crop_methods = ["disabled", "center"]
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {"samples": ("LATENT",), "upscale_method": (s.upscale_methods,),
-                             "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
-                             "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
-                             "crop": (s.crop_methods,)}}
 
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "upscale"
@@ -3026,22 +2847,10 @@ class LatentUpscale:
     CATEGORY = "latent"
 
     def upscale(self, samples, upscale_method, width, height, crop):
-        if width == 0 and height == 0:
-            s = samples
-        else:
-            s = samples.copy()
-
-            if width == 0:
-                height = max(64, height)
-                width = max(64, round(samples["samples"].shape[3] * height / samples["samples"].shape[2]))
-            elif height == 0:
-                width = max(64, width)
-                height = max(64, round(samples["samples"].shape[2] * width / samples["samples"].shape[3]))
-            else:
-                width = max(64, width)
-                height = max(64, height)
-
-            s["samples"] = common_upscale(samples["samples"], width // 8, height // 8, upscale_method, crop)
+        s = samples.copy()
+        width = max(64, width)
+        height = max(64, height)
+        s["samples"] = common_upscale(samples["samples"], width // 8, height // 8, upscale_method, crop)
         return (s,)
 
 
@@ -3137,16 +2946,7 @@ def load_parameters_from_file():
         cfg = int(parameters['cfg'])
     return prompt, neg, width, height, cfg
 
-
-from tkinter import *
-import customtkinter as ctk
-import tkinter as tk
-from PIL import Image, ImageTk
-import glob
-import threading
-
 files = glob.glob('*.safetensors')
-
 
 class App(tk.Tk):  # TODO : Add LoRa support
     def __init__(self):
@@ -3213,7 +3013,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
         # load the checkpoint on an another thread
         threading.Thread(target=self._prep, daemon=True).start()
 
-        #add an img2img button, the button opens the file selector, run img2img on the selected image
+        # add an img2img button, the button opens the file selector, run img2img on the selected image
         self.img2img_button = ctk.CTkButton(self.sidebar, text="img2img", command=self.img2img)
         self.img2img_button.pack()
 
@@ -3264,7 +3064,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
         cfg = int(self.cfg_slider.get())
         img = Image.open(file_path)
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader = self._prep()
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
                 clip=checkpointloadersimple_241[1],
@@ -3345,7 +3145,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
                 self.saveimage = SaveImage()
                 self.latent_upscale = LatentUpscale()
                 self.upscalemodelloader = None
-        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale,  self.upscalemodelloader
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -3355,7 +3155,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale , upscalemodelloader= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader = self._prep()
 
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
