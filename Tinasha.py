@@ -769,7 +769,7 @@ class ResnetBlock(nn.Module):
         return x + h
 
 
-def xformers_attention(q, k, v):
+def xformers_attention(q, k, v): # TODO : Add stable-fast or TensorRT optimization
     # compute attention
     B, C, H, W = q.shape
     q, k, v = map(
@@ -1718,7 +1718,6 @@ class KSampler:
         self.set_steps(steps, denoise)
         self.denoise = denoise
         self.model_options = model_options
-        self.sigmas = self.calculate_sigmas(steps)
 
     def calculate_sigmas(self, steps):
         sigmas = calculate_sigmas_scheduler(self.model, self.scheduler, steps)
@@ -1728,6 +1727,10 @@ class KSampler:
         self.steps = steps
         if denoise is None or denoise > 0.9999:
             self.sigmas = self.calculate_sigmas(steps).to(self.device)
+        else:
+            new_steps = int(steps / denoise)
+            sigmas = self.calculate_sigmas(new_steps).to(self.device)
+            self.sigmas = sigmas[-(steps + 1):]
 
     def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None,
                force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
@@ -3391,7 +3394,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
                     cfg=8,
                     sampler_name="euler_ancestral",
                     scheduler="normal",
-                    denoise=0.45,
+                    denoise=0.4,
                     model=checkpointloadersimple_241[0],
                     positive=cliptextencode_242[0],
                     negative=cliptextencode_243[0],
