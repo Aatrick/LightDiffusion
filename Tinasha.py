@@ -138,6 +138,7 @@ class SD15(LatentFormat):
         ]
         self.taesd_decoder_name = "taesd_decoder"
 
+
 class AutoencodingEngine(nn.Module):
     def __init__(self, encoder, decoder):
         super().__init__()
@@ -188,7 +189,7 @@ def use_comfy_ops(device=None, dtype=None):
         torch.nn.Linear = old_torch_nn_linear
 
 
-def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cpu'):
+def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cuda'):
     """Constructs the noise schedule of Karras et al. (2022)."""
     ramp = torch.linspace(0, 1, n, device=device)
     min_inv_rho = sigma_min ** (1 / rho)
@@ -196,10 +197,36 @@ def get_sigmas_karras(n, sigma_min, sigma_max, rho=7., device='cpu'):
     sigmas = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
     return torch.cat([sigmas, sigmas.new_zeros([1])]).to(device)
 
+def append_dims(x, target_dims):
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    dims_to_append = target_dims - x.ndim
+    if dims_to_append < 0:
+        raise ValueError(f'input has {x.ndim} dims but target_dims is {target_dims}, which is less')
+    expanded = x[(...,) + (None,) * dims_to_append]
+    # MPS will get inf values if it tries to index into the new axes, but detaching fixes this.
+    # https://github.com/pytorch/pytorch/issues/84364
+    return expanded
 
 def default_noise_sampler(x):
     return lambda sigma, sigma_next: torch.randn_like(x)
 
+def to_d(x, sigma, denoised):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    x= x.to(device)
+    denoised = denoised.to(device)
+    sigma = sigma.to(device)
+    """Converts a denoiser output to a Karras ODE derivative."""
+    return (x - denoised) / append_dims(sigma, x.ndim)
+
+
+def get_ancestral_step(sigma_from, sigma_to, eta=1.):
+    """Calculates the noise level (sigma_down) to step down to and the amount
+    of noise to add (sigma_up) when doing an ancestral sampling step."""
+    if not eta:
+        return sigma_to, 0.
+    sigma_up = min(sigma_to, eta * (sigma_to ** 2 * (sigma_from ** 2 - sigma_to ** 2) / sigma_from ** 2) ** 0.5)
+    sigma_down = (sigma_to ** 2 - sigma_up ** 2) ** 0.5
+    return sigma_down, sigma_up
 
 class PIDStepSizeController:
     """A PID controller for ODE adaptive step size control."""
@@ -333,6 +360,25 @@ def sample_dpm_adaptive(model, x, sigma_min, sigma_max, extra_args=None, callbac
 
 
 @torch.no_grad()
+def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
+    """Ancestral sampling with Euler method steps."""
+    extra_args = {} if extra_args is None else extra_args
+    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
+    s_in = x.new_ones([x.shape[0]])
+    for i in trange(len(sigmas) - 1, disable=disable):
+        denoised = model(x, sigmas[i] * s_in, **extra_args)
+        sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
+        if callback is not None:
+            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
+        d = to_d(x, sigmas[i], denoised)
+        # Euler method
+        dt = sigma_down - sigmas[i]
+        x = x + d * dt
+        if sigmas[i + 1] > 0:
+            x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+    return x
+
+@torch.no_grad()
 def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=None):
     """DPM-Solver++(2M)."""
     extra_args = {} if extra_args is None else extra_args
@@ -356,7 +402,6 @@ def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=No
             x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
         old_denoised = denoised
     return x
-
 
 class CONDRegular:
     def __init__(self, cond):
@@ -595,7 +640,7 @@ def get_free_memory(dev=None, torch_free_too=False):
 
 
 def batch_area_memory(area):
-    if XFORMERS_IS_AVAILABLE:
+    if XFORMERS_IS_AVAILABLE or ENABLE_PYTORCH_ATTENTION:
         return (area / 20) * (1024 * 1024)
 
 
@@ -895,7 +940,7 @@ class Encoder(nn.Module):
                 h = self.down[i_level].block[i_block](h, temb)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
-            if i_level != self.num_resolutions-1:
+            if i_level != self.num_resolutions - 1:
                 h = self.down[i_level].downsample(h)
 
         # middle
@@ -905,9 +950,10 @@ class Encoder(nn.Module):
 
         # end
         h = self.norm_out(h)
-        h = h*torch.sigmoid(h)
+        h = h * torch.sigmoid(h)
         h = self.conv_out(h)
         return h
+
 
 class Decoder(nn.Module):
     def __init__(self, *, ch, out_ch, ch_mult=(1, 2, 4, 8), num_res_blocks,
@@ -1063,6 +1109,14 @@ class ModelSamplingDiscrete(torch.nn.Module):
         log_sigma = sigma.log()
         dists = log_sigma.to(self.log_sigmas.device) - self.log_sigmas[:, None]
         return dists.abs().argmin(dim=0).view(sigma.shape)
+
+    def sigma(self, timestep):
+        t = torch.clamp(timestep.float(), min=0, max=(len(self.sigmas) - 1))
+        low_idx = t.floor().long()
+        high_idx = t.ceil().long()
+        w = t.frac()
+        log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
+        return log_sigma.exp()
 
 
 def gen_empty_tokens(special_tokens, length):
@@ -1595,6 +1649,9 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
             if sampler_name == "dpm_adaptive":
                 samples = sample_dpm_adaptive(model_k, noise, sigma_min, sigmas[0], extra_args=extra_args,
                                               callback=k_callback, disable=disable_pbar)
+            elif sampler_name == "euler_ancestral":
+                samples = sample_euler_ancestral(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback,
+                                          disable=disable_pbar, **extra_options)
             elif sampler_name == "dpmpp_2m":
                 samples = sample_dpmpp_2m(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback,
                                           disable=disable_pbar, **extra_options)
@@ -1623,16 +1680,35 @@ def sample(model, noise, positive, negative, cfg, device, sampler, sigmas, model
     samples = sampler.sample(model_wrap, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
     return model.process_latent_out(samples.to(torch.float32))
 
+def normal_scheduler(model, steps, sgm=False, floor=False):
+    s = model.model_sampling
+    start = s.timestep(s.sigma_max)
+    end = s.timestep(s.sigma_min)
+
+    if sgm:
+        timesteps = torch.linspace(start, end, steps + 1)[:-1]
+    else:
+        timesteps = torch.linspace(start, end, steps)
+
+    sigs = []
+    for x in range(len(timesteps)):
+        ts = timesteps[x]
+        sigs.append(s.sigma(ts))
+    sigs += [0.0]
+    return torch.FloatTensor(sigs)
 
 def calculate_sigmas_scheduler(model, scheduler_name, steps):
-    sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
-                               sigma_max=float(model.model_sampling.sigma_max))
+    if scheduler_name == "karras":
+        sigmas = get_sigmas_karras(n=steps, sigma_min=float(model.model_sampling.sigma_min),
+                                   sigma_max=float(model.model_sampling.sigma_max))
+    elif scheduler_name == "normal":
+        sigmas = normal_scheduler(model, steps)
     return sigmas
 
 
 class KSampler:
-    SCHEDULERS = ["karras"]
-    SAMPLERS = ["dpm_adaptive", "dpmpp_2m"]
+    SCHEDULERS = ["karras, normal"]
+    SAMPLERS = ["dpm_adaptive", "euler_ancestral", "dpmpp_2m"]
 
     def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
         self.model = model
@@ -3031,6 +3107,7 @@ class VAEDecode:
     def decode(self, vae, samples):
         return (vae.decode(samples["samples"]),)
 
+
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open('.\\_internal\\prompt.txt', 'w') as f:
         f.write(f'prompt: {prompt_entry}')
@@ -3064,13 +3141,11 @@ import tkinter as tk
 from PIL import Image, ImageTk
 import glob
 import threading
-from comfy_extras.nodes_upscale_model import UpscaleModelLoader
-from ComfyUI_UltimateSDUpscale.repositories.ultimate_sd_upscale.scripts.ultimate_upscale import USDUpscaler
 
 files = glob.glob('*.safetensors')
 
 
-class App(tk.Tk):
+class App(tk.Tk):  # TODO : Add LoRa support
     def __init__(self):
         super().__init__()
 
@@ -3114,7 +3189,8 @@ class App(tk.Tk):
         # checkbox for hiresfix
         self.hires_fix_var = tk.BooleanVar()
 
-        self.hires_fix_checkbox = ctk.CTkCheckBox(self.sidebar, text="Hires Fix", variable=self.hires_fix_var, command=self.print_hires_fix)
+        self.hires_fix_checkbox = ctk.CTkCheckBox(self.sidebar, text="Hires Fix", variable=self.hires_fix_var,
+                                                  command=self.print_hires_fix)
         self.hires_fix_checkbox.pack()
 
         # Button to launch the generation
@@ -3177,7 +3253,7 @@ class App(tk.Tk):
                                                                     self.cfg_slider.get()))
         self.display_most_recent_image()
 
-    def _img2img(self, file_path):# TODO : add Img2Img with ultimate upscale
+    def _img2img(self, file_path):  # TODO : add Img2Img with ultimate upscale
         prompt = self.prompt_entry.get("1.0", tk.END)
         neg = self.neg.get("1.0", tk.END)
         w = int(self.width_slider.get())
@@ -3195,7 +3271,7 @@ class App(tk.Tk):
                 clip=checkpointloadersimple_241[1],
             )
             upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
-            ultimatesdupscale=USDUpscaler()
+            ultimatesdupscale = USDUpscaler()
             ultimatesdupscale_250 = ultimatesdupscale.upscale(
                 upscale_by=3,
                 seed=random.randint(1, 2 ** 64),
@@ -3241,7 +3317,7 @@ class App(tk.Tk):
             threading.Thread(target=self._img2img, args=(file_path,), daemon=True).start()
 
     def print_hires_fix(self):
-        if self.hires_fix_var.get()==True:
+        if self.hires_fix_var.get() == True:
             print("Hires fix is ON")
         else:
             print("Hires fix is OFF")
@@ -3265,8 +3341,8 @@ class App(tk.Tk):
                 self.vaedecode = VAEDecode()
                 self.saveimage = SaveImage()
                 self.latent_upscale = LatentUpscale()
-                self.upscalemodelloader = UpscaleModelLoader()
-        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader
+                self.upscalemodelloader = None
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale,  self.upscalemodelloader
 
     def _generate_image(self):
         # Get the values from the input fields
@@ -3276,7 +3352,7 @@ class App(tk.Tk):
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         with torch.inference_mode():
-            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader= self._prep()
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale , upscalemodelloader= self._prep()
 
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
@@ -3311,11 +3387,11 @@ class App(tk.Tk):
                 )
                 ksampler_253 = ksampler_instance.sample(
                     seed=random.randint(1, 2 ** 64),
-                    steps=15,
+                    steps=10,
                     cfg=8,
-                    sampler_name="dpmpp_2m",
-                    scheduler="karras",
-                    denoise=0.05,
+                    sampler_name="euler_ancestral",
+                    scheduler="normal",
+                    denoise=0.45,
                     model=checkpointloadersimple_241[0],
                     positive=cliptextencode_242[0],
                     negative=cliptextencode_243[0],

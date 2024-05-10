@@ -1,8 +1,8 @@
 numpy~=1.26.3
 psutil~=5.9.8
 safetensors~=0.4.3
-torch~=2.2.2+cu121
-xformers~=0.0.25.post1
+torch~=2.3.0+cu118
+xformers
 customtkinter~=5.2.2
 einops~=0.7.0
 tqdm~=4.66.2
