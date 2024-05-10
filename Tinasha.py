@@ -1,11 +1,17 @@
 import contextlib
+import glob
 import logging
 import math
 import os
+import pickle
 import random
-from abc import abstractmethod
+import threading
+import tkinter as tk
 from contextlib import contextmanager
+from tkinter import *
 from tkinter import filedialog
+
+import customtkinter as ctk
 import numpy as np
 import psutil
 import requests
@@ -14,22 +20,30 @@ import torch
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image, ImageTk
 from einops import rearrange
 from tqdm.auto import trange, tqdm
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
-from tkinter import *
-import customtkinter as ctk
-import tkinter as tk
-from PIL import Image, ImageTk
-import glob
-import threading
+
+load = pickle.load
+
+
+class Empty:
+    pass
+
+
+class Unpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if module.startswith("pytorch_lightning"):
+            return Empty
+        return super().find_class(module, name)
 
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
     if ckpt.lower().endswith(".safetensors"):
         sd = safetensors.torch.load_file(ckpt, device=device.type)
-    else:
+    elif ckpt is None:
         print("Downloading the model")
         response = requests.get(
             "https://huggingface.co/stabilityai/stable-diffusion-2/resolve/main/text_encoder/model.safetensors",
@@ -46,6 +60,22 @@ def load_torch_file(ckpt, safe_load=False, device=None):
         if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
             print("ERROR, something went wrong")
         sd = safetensors.torch.load_file("model.safetensors", device=device.type)
+    else:
+        if safe_load:
+            if not 'weights_only' in torch.load.__code__.co_varnames:
+                logging.warning(
+                    "Warning torch.load doesn't support weights_only on this pytorch version, loading unsafely.")
+                safe_load = False
+        if safe_load:
+            pl_sd = torch.load(ckpt, map_location=device, weights_only=True)
+        else:
+            pl_sd = torch.load(ckpt, map_location=device, pickle_module=Unpickler)
+        if "global_step" in pl_sd:
+            logging.debug(f"Global Step: {pl_sd['global_step']}")
+        if "state_dict" in pl_sd:
+            sd = pl_sd["state_dict"]
+        else:
+            sd = pl_sd
     return sd
 
 
@@ -537,7 +567,9 @@ def load_models_gpu(models, memory_required=0):
 
     total_memory_required = {}
     for loaded_model in models_to_load:
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,0) + loaded_model.model_memory_required(loaded_model.device)
+        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
+                                                                               0) + loaded_model.model_memory_required(
+            loaded_model.device)
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
@@ -2946,7 +2978,9 @@ def load_parameters_from_file():
         cfg = int(parameters['cfg'])
     return prompt, neg, width, height, cfg
 
+
 files = glob.glob('*.safetensors')
+import upscale_model as us
 
 class App(tk.Tk):  # TODO : Add LoRa support
     def __init__(self):
@@ -3073,39 +3107,16 @@ class App(tk.Tk):  # TODO : Add LoRa support
                 text=neg,
                 clip=checkpointloadersimple_241[1],
             )
-            upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
-            ultimatesdupscale = USDUpscaler()
-            ultimatesdupscale_250 = ultimatesdupscale.upscale(
-                upscale_by=3,
-                seed=random.randint(1, 2 ** 64),
-                steps=25,
-                cfg=7,
-                sampler_name="dpmpp_2m_sde",
-                scheduler="karras",
-                denoise=0.2,
-                mode_type="Linear",
-                tile_width=512,
-                tile_height=512,
-                mask_blur=16,
-                tile_padding=32,
-                seam_fix_mode="None",
-                seam_fix_denoise=0,
-                seam_fix_width=64,
-                seam_fix_mask_blur=16,
-                seam_fix_padding=32,
-                force_uniform_tiles="enable",
-                image=img,
-                model=checkpointloadersimple_241[0],
-                positive=cliptextencode_242[0],
-                negative=cliptextencode_243[0],
-                vae=checkpointloadersimple_241[2],
+            upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth") # TODO : Fix unsupported loaded image
+            upscale = us.ImageUpscaleWithModel().upscale(
                 upscale_model=upscalemodelloader_244[0],
+                image=img,
             )
             saveimage_277 = saveimage.save_images(
                 filename_prefix="ComfyUI",
-                images=ultimatesdupscale_250[0],
+                images=upscale[0],
             )
-            for image in ultimatesdupscale_250[0]:
+            for image in upscale[0]:
                 i = 255. * image.cpu().numpy()
                 img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
         img = img.resize((int(w / 2), int(h / 2)))
@@ -3144,7 +3155,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
                 self.vaedecode = VAEDecode()
                 self.saveimage = SaveImage()
                 self.latent_upscale = LatentUpscale()
-                self.upscalemodelloader = None
+                self.upscalemodelloader = us.UpscaleModelLoader()
         return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader
 
     def _generate_image(self):
@@ -3194,7 +3205,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
                     cfg=8,
                     sampler_name="euler_ancestral",
                     scheduler="normal",
-                    denoise=0.4,
+                    denoise=0.45,
                     model=checkpointloadersimple_241[0],
                     positive=cliptextencode_242[0],
                     negative=cliptextencode_243[0],
@@ -3205,10 +3216,15 @@ class App(tk.Tk):  # TODO : Add LoRa support
                     samples=ksampler_253[0],
                     vae=checkpointloadersimple_241[2],
                 )
-                saveimage.save_images(
-                    filename_prefix="LD", images=vaedecode_240[0]
+                upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
+                upscale = us.ImageUpscaleWithModel().upscale(
+                    upscale_model=upscalemodelloader_244[0],
+                    image=vaedecode_240[0],
                 )
-                for image in vaedecode_240[0]:
+                saveimage.save_images(
+                    filename_prefix="LD", images=upscale[0]
+                )
+                for image in upscale[0]:
                     i = 255. * image.cpu().numpy()
                     img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             else:
