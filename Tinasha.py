@@ -315,7 +315,7 @@ class DPMSolver(nn.Module):
         pid = PIDStepSizeController(h_init, pcoeff, icoeff, dcoeff, 1.5 if eta else order, accept_safety)
         info = {'steps': 0, 'nfe': 0, 'n_accept': 0, 'n_reject': 0}
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
-            def _progress(steps):  # TODO: fix latency on iterations progress
+            def _progress(steps):  # FIXME : latency on iterations progress
                 app.title(f"LightDiffusion - generating : {steps}it")
 
             threading.Thread(target=_progress, args=(info['steps'],)).start()
@@ -567,9 +567,12 @@ def load_models_gpu(models, memory_required=0):
 
     total_memory_required = {}
     for loaded_model in models_to_load:
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
-                                                                               0) + loaded_model.model_memory_required(
-            loaded_model.device)
+        model_memory_required = loaded_model.model_memory_required(loaded_model.device)
+        if model_memory_required is not None:
+            total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device,
+                                                                                   0) + model_memory_required
+        else:
+            total_memory_required[loaded_model.device]= 6000
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
@@ -3111,6 +3114,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
                 clip=checkpointloadersimple_241[1],
             )
             upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
+            app.title('LightDiffusion - Upscaling')
             upscale = us.ImageUpscaleWithModel().upscale(
                 upscale_model=upscalemodelloader_244[0],
                 image=img_tensor,
@@ -3125,6 +3129,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
         img = img.resize((int(w / 2), int(h / 2)))
         img = ImageTk.PhotoImage(img)
         self.image_label.after(0, self._update_image_label, img)
+        app.title('LightDiffusion')
 
     def img2img(self):
         # Open a file dialog to select an image
