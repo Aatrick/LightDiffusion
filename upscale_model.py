@@ -11,6 +11,7 @@ except ImportError:
 
 import torch
 import torch.nn as nn
+from torchvision import transforms
 
 
 def act(act_type: str, inplace=True, neg_slope=0.2, n_prelu=1):
@@ -681,7 +682,7 @@ class DropBlock2d(nn.Module):
         self.with_noise = with_noise
         self.inplace = inplace
         self.batchwise = batchwise
-        self.fast = fast  # FIXME finish comparisons of fast vs not
+        self.fast = fast
 
     def forward(self, x):
         if not self.training or not self.drop_prob:
@@ -1788,8 +1789,6 @@ class SwinIR(nn.Module):
             self.state["layers.0.residual_group.blocks.0.mlp.fc1.bias"].shape[0]
             / embed_dim
         )
-
-        # TODO: could actually count the layers, but this should do
         if "layers.0.conv.4.weight" in state_keys:
             resi_connection = "3conv"
         else:
@@ -3077,7 +3076,6 @@ class DAT(nn.Module):
             state_dict["layers.0.blocks.0.ffn.fc1.weight"].shape[0] / embed_dim
         )
 
-        # TODO: could actually count the layers, but this should do
         if "layers.0.conv.4.weight" in state_keys:
             resi_connection = "3conv"
         else:
@@ -4221,7 +4219,6 @@ class HAT(nn.Module):
             / embed_dim
         )
 
-        # TODO: could actually count the layers, but this should do
         if "layers.0.conv.4.weight" in state_keys:
             resi_connection = "3conv"
         else:
@@ -4542,8 +4539,6 @@ class WMSA(nn.Module):
         self.relative_position_params = nn.Parameter(
             torch.zeros((2 * window_size - 1) * (2 * window_size - 1), self.n_heads)
         )
-        # TODO recover
-        # self.relative_position_params = nn.Parameter(torch.zeros(self.n_heads, 2 * window_size - 1, 2 * window_size -1))
         self.relative_position_params = nn.Parameter(
             torch.zeros((2 * window_size - 1) * (2 * window_size - 1), self.n_heads)
         )
@@ -5574,7 +5569,6 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
-        # FIXME look at relaxing size constraints
         # assert H == self.img_size[0] and W == self.img_size[1],
         #     f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
@@ -5956,7 +5950,6 @@ class Swin2SR(nn.Module):
             / embed_dim
         )
 
-        # TODO: could actually count the layers, but this should do
         if "layers.0.conv.4.weight" in state_keys:
             resi_connection = "3conv"
         else:
@@ -9075,7 +9068,7 @@ class OmniSR(nn.Module):
         self.num_feat = num_feat
         self.scale = up_scale
 
-        self.supports_fp16 = True  # TODO: Test this
+        self.supports_fp16 = True
         self.supports_bfp16 = True
         self.min_size_restriction = 16
 
@@ -10411,13 +10404,7 @@ class VectorQuantizer(nn.Module):
 
         # get quantized latent vectors
         z_q = torch.matmul(min_encodings, self.embedding.weight).view(z.shape)
-        # .........\end
 
-        # with:
-        # .........\start
-        # min_encoding_indices = torch.argmin(d, dim=1)
-        # z_q = self.embedding(min_encoding_indices)
-        # ......\end......... (TODO)
 
         # compute loss for embedding
         loss = torch.mean((z_q.detach() - z) ** 2) + self.beta * torch.mean(
@@ -10439,7 +10426,6 @@ class VectorQuantizer(nn.Module):
 
     def get_codebook_entry(self, indices, shape):
         # shape specifying (batch, height, width, channel)
-        # TODO: check for more easy handling with nn.Embedding
         min_encodings = torch.zeros(indices.shape[0], self.n_e).to(indices)
         min_encodings.scatter_(1, indices[:, None], 1)
 

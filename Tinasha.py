@@ -3097,6 +3097,9 @@ class App(tk.Tk):  # TODO : Add LoRa support
         h = int(self.height_slider.get())
         cfg = int(self.cfg_slider.get())
         img = Image.open(file_path)
+        img_array = np.array(img)
+        img_tensor= torch.from_numpy(img_array).float().to('cpu') / 255.0
+        img_tensor = img_tensor.unsqueeze(0)
         with torch.inference_mode():
             checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader = self._prep()
             cliptextencode_242 = cliptextencode.encode(
@@ -3107,13 +3110,13 @@ class App(tk.Tk):  # TODO : Add LoRa support
                 text=neg,
                 clip=checkpointloadersimple_241[1],
             )
-            upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth") # TODO : Fix unsupported loaded image
+            upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
             upscale = us.ImageUpscaleWithModel().upscale(
                 upscale_model=upscalemodelloader_244[0],
-                image=img,
+                image=img_tensor,
             )
             saveimage_277 = saveimage.save_images(
-                filename_prefix="ComfyUI",
+                filename_prefix="LD",
                 images=upscale[0],
             )
             for image in upscale[0]:
@@ -3216,15 +3219,10 @@ class App(tk.Tk):  # TODO : Add LoRa support
                     samples=ksampler_253[0],
                     vae=checkpointloadersimple_241[2],
                 )
-                upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
-                upscale = us.ImageUpscaleWithModel().upscale(
-                    upscale_model=upscalemodelloader_244[0],
-                    image=vaedecode_240[0],
-                )
                 saveimage.save_images(
-                    filename_prefix="LD", images=upscale[0]
+                    filename_prefix="LD", images=vaedecode_240[0]
                 )
-                for image in upscale[0]:
+                for image in vaedecode_240[0]:
                     i = 255. * image.cpu().numpy()
                     img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
             else:
