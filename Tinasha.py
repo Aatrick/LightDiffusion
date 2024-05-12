@@ -315,11 +315,8 @@ class DPMSolver(nn.Module):
         accept = True
         pid = PIDStepSizeController(h_init, pcoeff, icoeff, dcoeff, 1.5 if eta else order, accept_safety)
         info = {'steps': 0, 'nfe': 0, 'n_accept': 0, 'n_reject': 0}
+        steps=0
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
-            def _progress(steps):  # FIXME : latency on iterations progress
-                app.title(f"LightDiffusion - generating : {steps}it")
-
-            threading.Thread(target=_progress, args=(info['steps'],)).start()
             eps_cache = {}
             t = torch.minimum(t_end, s + pid.h) if forward else torch.maximum(t_end, s + pid.h)
 
@@ -339,7 +336,13 @@ class DPMSolver(nn.Module):
                 info['n_accept'] += 1
             info['nfe'] += order
             info['steps'] += 1
+            steps += 1
+            def generate(steps):
+                steps = steps * 3
+                ratio = (steps * 100) / 70
+                app.title(f"LightDiffusion - generating : {int(ratio)}%")
 
+            threading.Thread(target=generate, args=(steps,), daemon=True).start()
             if self.info_callback is not None:
                 self.info_callback(
                     {'x': x, 'i': info['steps'] - 1, 't': s, 't_up': s, 'denoised': denoised, 'error': error,
@@ -382,6 +385,8 @@ def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, dis
         x = x + d * dt
         if sigmas[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        app.title(f"LightDiffusion - sampling {i + 1}")
+    app.title("LightDiffusion")
     return x
 
 
@@ -408,6 +413,8 @@ def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=No
             denoised_d = (1 + 1 / (2 * r)) * denoised - (1 / (2 * r)) * old_denoised
             x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
         old_denoised = denoised
+        app.title(f"LightDiffusion - sampling {i + 1}")
+    app.title("LightDiffusion")
     return x
 
 
