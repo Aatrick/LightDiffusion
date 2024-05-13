@@ -483,8 +483,7 @@ cpu_state = 0
 
 OOM_EXCEPTION = torch.cuda.OutOfMemoryError
 
-XFORMERS_ENABLED_VAE = True
-XFORMERS_IS_AVAILABLE = True
+
 
 
 def is_nvidia():
@@ -493,7 +492,7 @@ def is_nvidia():
         return True
 
 
-ENABLE_PYTORCH_ATTENTION = False
+
 
 VAE_DTYPE = torch.float16
 
@@ -658,6 +657,8 @@ def get_free_memory(dev=None, torch_free_too=False):
 def batch_area_memory(area):
     if XFORMERS_IS_AVAILABLE or ENABLE_PYTORCH_ATTENTION:
         return (area / 20) * (1024 * 1024)
+    else:
+        return (((area * 0.6) / 0.9) + 1024) * (1024 * 1024)
 
 
 def maximum_batch_area():
@@ -810,18 +811,15 @@ def xformers_attention(q, k, v):
     return out
 
 
-def attention_pytorch(q, k, v, heads, mask=None):
-    b, _, dim_head = q.shape
-    dim_head //= heads
+def pytorch_attention(q, k, v):
+    B, C, H, W = q.shape
     q, k, v = map(
-        lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
+        lambda t: t.view(B, C, -1).transpose(1, 2).contiguous(),
         (q, k, v),
     )
 
-    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
-    out = (
-        out.transpose(1, 2).reshape(b, -1, heads * dim_head)
-    )
+    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+    out = out.transpose(1, 2).reshape(B, C, H, W)
     return out
 
 
@@ -830,12 +828,17 @@ try:
     import xformers.ops
 
     XFORMERS_IS_AVAILABLE = True
+    XFORMERS_ENABLED_VAE = True
+    ENABLE_PYTORCH_ATTENTION = False
     print("Using xformers cross attention")
     optimized_attention = xformers_attention
 except:
     XFORMERS_IS_AVAILABLE = False
+    XFORMERS_ENABLED_VAE = False
+    ENABLE_PYTORCH_ATTENTION = True
     print("Using pytorch cross attention")
-    optimized_attention = attention_pytorch
+    optimized_attention = pytorch_attention
+
 
 
 class AttnBlock(nn.Module):
@@ -868,6 +871,9 @@ class AttnBlock(nn.Module):
         if XFORMERS_ENABLED_VAE:
             print("Using xformers attention in VAE")
             self.optimized_attention = xformers_attention
+        else:
+            print("Using pytorch attention in VAE")
+            self.optimized_attention = pytorch_attention
 
     def forward(self, x):
         h_ = x
@@ -1773,8 +1779,8 @@ def prepare_sampling(model, noise_shape, positive, negative, noise_mask):
     negative = convert_cond(negative)
     real_model = None
     models, inference_memory = get_additional_models(positive, negative, model.model_dtype())
-    load_models_gpu([model] + models, batch_area_memory(
-        noise_shape[0] * noise_shape[2] * noise_shape[3]) + inference_memory)
+    load_models_gpu([model] + models,
+                    batch_area_memory(noise_shape[0] * noise_shape[2] * noise_shape[3]) + inference_memory)
     real_model = model.model
 
     return real_model, positive, negative, noise_mask, models
@@ -1869,6 +1875,20 @@ def attention_xformers(q, k, v, heads, mask=None):
     return out
 
 
+def attention_pytorch(q, k, v, heads, mask=None):
+    b, _, dim_head = q.shape
+    dim_head //= heads
+    q, k, v = map(
+        lambda t: t.view(b, -1, heads, dim_head).transpose(1, 2),
+        (q, k, v),
+    )
+
+    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
+    out = (
+        out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    )
+    return out
+
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., dtype=None, device=None):
         super().__init__()
@@ -1890,8 +1910,10 @@ class CrossAttention(nn.Module):
         k = self.to_k(context)
         v = self.to_v(context)
 
-        if mask is None:
+        if XFORMERS_IS_AVAILABLE:
             out = attention_xformers(q, k, v, self.heads)
+        else:
+            out = attention_pytorch(q, k, v, self.heads)
         return self.to_out(out)
 
 
