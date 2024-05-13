@@ -2,4 +2,4 @@ prompt: ****, 1girl, solo, long hair, white hair, masterpiece, full shot, (sitti
 neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic)
 w: 512
 h: 1024
-cfg: 7
+cfg: 10

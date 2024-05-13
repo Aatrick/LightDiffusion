@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import glob
 import logging
 import os
@@ -8,6 +9,7 @@ import pickle
 import random
 import threading
 import tkinter as tk
+import uuid
 from contextlib import contextmanager
 from tkinter import *
 from tkinter import filedialog
@@ -39,6 +41,7 @@ class Unpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 
+# TODO : Add TensorRT optimization
 def load_torch_file(ckpt, safe_load=False, device=None):
     if device is None:
         device = torch.device("cpu")
@@ -338,8 +341,8 @@ class DPMSolver(nn.Module):
             info['steps'] += 1
             steps += 1
             def generate(steps):
-                steps = steps * 3
-                ratio = (steps * 100) / 70
+                steps = steps * 3.07
+                ratio = (steps * 100) / 90
                 app.title(f"LightDiffusion - generating : {int(ratio)}%")
 
             threading.Thread(target=generate, args=(steps,), daemon=True).start()
@@ -385,7 +388,7 @@ def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, dis
         x = x + d * dt
         if sigmas[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
-        app.title(f"LightDiffusion - sampling {i + 1}")
+        app.title(f"LightDiffusion - sampling {int(((i + 1) * 100) / len(sigmas) - 1)}%")
     app.title("LightDiffusion")
     return x
 
@@ -413,7 +416,7 @@ def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=No
             denoised_d = (1 + 1 / (2 * r)) * denoised - (1 / (2 * r)) * old_denoised
             x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
         old_denoised = denoised
-        app.title(f"LightDiffusion - sampling {i + 1}")
+        app.title(f"LightDiffusion - sampling {int(((i + 1) * 100) / len(sigmas))}%")
     app.title("LightDiffusion")
     return x
 
@@ -697,6 +700,7 @@ class ModelPatcher:
             self.current_device = current_device
 
         self.weight_inplace_update = weight_inplace_update
+        self.patches_uuid = uuid.uuid4()
 
     def model_size(self):
         model_sd = self.model.state_dict()
@@ -724,6 +728,20 @@ class ModelPatcher:
             self.current_device = device_to
         return self.model
 
+    def clone(self):
+        n = ModelPatcher(self.model, self.load_device, self.offload_device, self.size, self.current_device,
+                         weight_inplace_update=self.weight_inplace_update)
+        n.patches = {}
+        for k in self.patches:
+            n.patches[k] = self.patches[k][:]
+        n.patches_uuid = self.patches_uuid
+
+        n.object_patches = self.object_patches.copy()
+        n.model_options = copy.deepcopy(self.model_options)
+        n.model_keys = self.model_keys
+        n.backup = self.backup
+        n.object_patches_backup = self.object_patches_backup
+        return n
 
 class Upsample(nn.Module):
     pass
@@ -780,7 +798,7 @@ class ResnetBlock(nn.Module):
         return x + h
 
 
-def xformers_attention(q, k, v):  # TODO : Add stable-fast or TensorRT optimization
+def xformers_attention(q, k, v):
     # compute attention
     B, C, H, W = q.shape
     q, k, v = map(
@@ -2681,6 +2699,8 @@ def load_model_weights(model, sd):
 
 class CLIP:
     def __init__(self, target=None, embedding_directory=None, no_init=False):
+        if no_init:
+            return
         params = target.params.copy()
         clip = target.clip
         tokenizer = target.tokenizer
@@ -2711,6 +2731,16 @@ class CLIP:
         load_models_gpu([self.patcher])
         return self.patcher
 
+    def clone(self):
+        n = CLIP(no_init=True)
+        n.patcher = self.patcher.clone()
+        n.cond_stage_model = self.cond_stage_model
+        n.tokenizer = self.tokenizer
+        n.layer_idx = self.layer_idx
+        return n
+
+    def clip_layer(self, layer_idx):
+        self.layer_idx = layer_idx
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None):
@@ -2957,6 +2987,23 @@ class CheckpointLoaderSimple:
         out = load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True)
         return out[:3]
 
+
+class CLIPSetLastLayer:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"clip": ("CLIP",),
+                             "stop_at_clip_layer": ("INT", {"default": -1, "min": -24, "max": -1, "step": 1}),
+                             }}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "set_last_layer"
+
+    CATEGORY = "conditioning"
+
+    def set_last_layer(self, clip, stop_at_clip_layer):
+        clip = clip.clone()
+        clip.clip_layer(stop_at_clip_layer)
+        return (clip,)
 
 import functools
 import math
@@ -3705,7 +3752,6 @@ def load_parameters_from_file():
 
 files = glob.glob('*.safetensors')
 
-
 class App(tk.Tk):  # TODO : Add LoRa support
     def __init__(self):
         super().__init__()
@@ -3814,7 +3860,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
                                                                     self.cfg_slider.get()))
         self.display_most_recent_image()
 
-    def _img2img(self, file_path):  # TODO : add Img2Img with ultimate upscale
+    def _img2img(self, file_path):
         prompt = self.prompt_entry.get("1.0", tk.END)
         neg = self.neg.get("1.0", tk.END)
         w = int(self.width_slider.get())
@@ -3852,7 +3898,7 @@ class App(tk.Tk):  # TODO : Add LoRa support
         self.image_label.after(0, self._update_image_label, img)
         app.title('LightDiffusion')
 
-    def img2img(self):
+    def img2img(self):  # TODO : Add UltimateSDUpscale for Img2Img
         # Open a file dialog to select an image
         file_path = filedialog.askopenfilename()
         if file_path:
@@ -3897,13 +3943,18 @@ class App(tk.Tk):  # TODO : Add LoRa support
         with torch.inference_mode():
             checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader = self._prep()
 
+            clipsetlastlayer = CLIPSetLastLayer()
+            clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
+                stop_at_clip_layer=-2, clip=checkpointloadersimple_241[1]
+            )
+
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
-                clip=checkpointloadersimple_241[1],
+                clip=clipsetlastlayer_257[0],
             )
             cliptextencode_243 = cliptextencode.encode(
                 text=neg,
-                clip=checkpointloadersimple_241[1],
+                clip=clipsetlastlayer_257[0],
             )
             emptylatentimage_244 = emptylatentimage.generate(
                 width=w, height=h, batch_size=1
