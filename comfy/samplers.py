@@ -229,9 +229,9 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
         for o in range(batch_chunks):
             cond_index = cond_or_uncond[o]
             out_conds[cond_index][:, :, area[o][2]:area[o][0] + area[o][2], area[o][3]:area[o][1] + area[o][3]] += \
-            output[o] * mult[o]
+                output[o] * mult[o]
             out_counts[cond_index][:, :, area[o][2]:area[o][0] + area[o][2], area[o][3]:area[o][1] + area[o][3]] += \
-            mult[o]
+                mult[o]
 
     for i in range(len(out_conds)):
         out_conds[i] /= out_counts[i]

@@ -376,7 +376,7 @@ def bislerp(samples, width, height):
 
         # technically not mathematically correct, but more pleasing?
         res = (torch.sin((1.0 - r.squeeze(1)) * omega) / so).unsqueeze(1) * b1_normalized + (
-                    torch.sin(r.squeeze(1) * omega) / so).unsqueeze(1) * b2_normalized
+                torch.sin(r.squeeze(1) * omega) / so).unsqueeze(1) * b2_normalized
         res *= (b1_norms * (1.0 - r) + b2_norms * r).expand(-1, c)
 
         # edge cases for same or polar opposites

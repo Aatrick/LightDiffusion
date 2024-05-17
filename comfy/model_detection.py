@@ -260,7 +260,8 @@ def unet_config_from_diffusers_unet(state_dict, dtype=None):
             transformer_depth.append(transformer_count)
             if transformer_count > 0:
                 match["context_dim"] = \
-                state_dict["down_blocks.{}.attentions.{}.transformer_blocks.0.attn2.to_k.weight".format(i, ab)].shape[1]
+                    state_dict[
+                        "down_blocks.{}.attentions.{}.transformer_blocks.0.attn2.to_k.weight".format(i, ab)].shape[1]
 
         attn_res *= 2
         if attn_blocks == 0:

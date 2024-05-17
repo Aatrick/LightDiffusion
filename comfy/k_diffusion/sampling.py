@@ -93,7 +93,7 @@ class BatchedBrownianTree:
         if self.cpu_tree:
             w = torch.stack(
                 [tree(t0.cpu().float(), t1.cpu().float()).to(t0.dtype).to(t0.device) for tree in self.trees]) * (
-                            self.sign * sign)
+                        self.sign * sign)
         else:
             w = torch.stack([tree(t0, t1) for tree in self.trees]) * (self.sign * sign)
 
@@ -376,7 +376,7 @@ class DPMSolver(nn.Module):
         u1 = x - self.sigma(s1) * (r1 * h).expm1() * eps
         eps_r1, eps_cache = self.eps(eps_cache, 'eps_r1', u1, s1)
         u2 = x - self.sigma(s2) * (r2 * h).expm1() * eps - self.sigma(s2) * (r2 / r1) * (
-                    (r2 * h).expm1() / (r2 * h) - 1) * (eps_r1 - eps)
+                (r2 * h).expm1() / (r2 * h) - 1) * (eps_r1 - eps)
         eps_r2, eps_cache = self.eps(eps_cache, 'eps_r2', u2, s2)
         x_3 = x - self.sigma(t_next) * h.expm1() * eps - self.sigma(t_next) / r2 * (h.expm1() / h - 1) * (eps_r2 - eps)
         return x_3, eps_cache
@@ -666,7 +666,7 @@ def sample_dpmpp_2m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
 
             if eta:
                 x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (
-                            -2 * eta_h).expm1().neg().sqrt() * s_noise
+                        -2 * eta_h).expm1().neg().sqrt() * s_noise
 
         old_denoised = denoised
         h_last = h
@@ -723,7 +723,7 @@ def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
 
             if eta:
                 x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (
-                            -2 * h * eta).expm1().neg().sqrt() * s_noise
+                        -2 * h * eta).expm1().neg().sqrt() * s_noise
 
         denoised_1, denoised_2 = denoised, denoised_1
         h_1, h_2 = h, h_1

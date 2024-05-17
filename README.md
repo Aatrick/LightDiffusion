@@ -1,8 +1,10 @@
 # LightDiffusion
 
-The purpose of this repository and project is to remake the famous stable-diffusion in only one python script, with the least number of lines and in the least complex way.
+The purpose of this repository and project is to remake the famous stable-diffusion in only one python script, with the
+least number of lines and in the least complex way.
 
 ## Features
+
 - Original Txt2Img, Img2Img (ERSGAN Upscaling)
 - One click install and run (once you've added your .safetensors model)
 - Attention syntax

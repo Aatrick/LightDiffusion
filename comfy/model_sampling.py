@@ -31,16 +31,16 @@ class V_PREDICTION(EPS):
     def calculate_denoised(self, sigma, model_output, model_input):
         sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
         return model_input * self.sigma_data ** 2 / (
-                    sigma ** 2 + self.sigma_data ** 2) - model_output * sigma * self.sigma_data / (
-                    sigma ** 2 + self.sigma_data ** 2) ** 0.5
+                sigma ** 2 + self.sigma_data ** 2) - model_output * sigma * self.sigma_data / (
+                sigma ** 2 + self.sigma_data ** 2) ** 0.5
 
 
 class EDM(V_PREDICTION):
     def calculate_denoised(self, sigma, model_output, model_input):
         sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
         return model_input * self.sigma_data ** 2 / (
-                    sigma ** 2 + self.sigma_data ** 2) + model_output * sigma * self.sigma_data / (
-                    sigma ** 2 + self.sigma_data ** 2) ** 0.5
+                sigma ** 2 + self.sigma_data ** 2) + model_output * sigma * self.sigma_data / (
+                sigma ** 2 + self.sigma_data ** 2) ** 0.5
 
 
 class ModelSamplingDiscrete(torch.nn.Module):
