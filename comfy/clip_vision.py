@@ -5,11 +5,8 @@ import os
 import torch
 
 import comfy.clip_model
-import comfy.model_management
-import comfy.model_patcher
-import comfy.ops
-import comfy.utils
-from .utils import load_torch_file, transformers_convert, state_dict_prefix_replace
+import mono
+from mono import load_torch_file, transformers_convert, state_dict_prefix_replace
 
 
 class Output:
@@ -41,14 +38,14 @@ class ClipVisionModel():
         with open(json_config) as f:
             config = json.load(f)
 
-        self.load_device = comfy.model_management.text_encoder_device()
-        offload_device = comfy.model_management.text_encoder_offload_device()
-        self.dtype = comfy.model_management.text_encoder_dtype(self.load_device)
+        self.load_device = mono.text_encoder_device()
+        offload_device = mono.text_encoder_offload_device()
+        self.dtype = mono.text_encoder_dtype(self.load_device)
         self.model = comfy.clip_model.CLIPVisionModelProjection(config, self.dtype, offload_device,
-                                                                comfy.ops.manual_cast)
+                                                                mono.manual_cast)
         self.model.eval()
 
-        self.patcher = comfy.model_patcher.ModelPatcher(self.model, load_device=self.load_device,
+        self.patcher = mono.ModelPatcher(self.model, load_device=self.load_device,
                                                         offload_device=offload_device)
 
     def load_sd(self, sd):
@@ -58,14 +55,14 @@ class ClipVisionModel():
         return self.model.state_dict()
 
     def encode_image(self, image):
-        comfy.model_management.load_model_gpu(self.patcher)
+        mono.load_model_gpu(self.patcher)
         pixel_values = clip_preprocess(image.to(self.load_device)).float()
         out = self.model(pixel_values=pixel_values, intermediate_output=-2)
 
         outputs = Output()
-        outputs["last_hidden_state"] = out[0].to(comfy.model_management.intermediate_device())
-        outputs["image_embeds"] = out[2].to(comfy.model_management.intermediate_device())
-        outputs["penultimate_hidden_states"] = out[1].to(comfy.model_management.intermediate_device())
+        outputs["last_hidden_state"] = out[0].to(mono.intermediate_device())
+        outputs["image_embeds"] = out[2].to(mono.intermediate_device())
+        outputs["penultimate_hidden_states"] = out[1].to(mono.intermediate_device())
         return outputs
 
 

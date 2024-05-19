@@ -1,41 +1,34 @@
 import functools
+import hashlib
+import json
+import os
 import random
 import re
+import sys
+import traceback
 from collections import OrderedDict
 from typing import Literal
 from typing import Union
 
 import torch
+from PIL import ImageSequence, UnidentifiedImageError, ImageFile
+from PIL.PngImagePlugin import PngInfo
 from torch import nn
 
-from comfy.model_management import get_free_memory, OOM_EXCEPTION
-from comfy.utils import load_torch_file, state_dict_prefix_replace, ProgressBar
-
-
-import hashlib
-import json
-import os
-import sys
-import traceback
-
-import numpy as np
-import torch
-from PIL import Image, ImageOps, ImageSequence, UnidentifiedImageError, ImageFile
-from PIL.PngImagePlugin import PngInfo
+from mono import get_free_memory, OOM_EXCEPTION
+from mono import load_torch_file, state_dict_prefix_replace, ProgressBar
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
 import comfy.diffusers_load
-import comfy.samplers
-import comfy.sample
 import comfy.sd
-import comfy.utils
+import mono
 import comfy.controlnet
 
 import comfy.clip_vision
 
-import comfy.model_management
-from comfy.cli_args import args
+import mono
+from mono import args
 
 import importlib
 
@@ -50,44 +43,14 @@ folder_names_and_paths = {}
 base_path = os.path.dirname(os.path.realpath(__file__))
 models_dir = os.path.join(base_path, "models")
 folder_names_and_paths["checkpoints"] = ([os.path.join(models_dir, "checkpoints")], supported_pt_extensions)
-folder_names_and_paths["configs"] = ([os.path.join(models_dir, "configs")], [".yaml"])
 
 folder_names_and_paths["loras"] = ([os.path.join(models_dir, "loras")], supported_pt_extensions)
-folder_names_and_paths["vae"] = ([os.path.join(models_dir, "vae")], supported_pt_extensions)
-folder_names_and_paths["clip"] = ([os.path.join(models_dir, "clip")], supported_pt_extensions)
-folder_names_and_paths["unet"] = ([os.path.join(models_dir, "unet")], supported_pt_extensions)
-folder_names_and_paths["clip_vision"] = ([os.path.join(models_dir, "clip_vision")], supported_pt_extensions)
-folder_names_and_paths["style_models"] = ([os.path.join(models_dir, "style_models")], supported_pt_extensions)
-folder_names_and_paths["embeddings"] = ([os.path.join(models_dir, "embeddings")], supported_pt_extensions)
-folder_names_and_paths["diffusers"] = ([os.path.join(models_dir, "diffusers")], ["folder"])
-folder_names_and_paths["vae_approx"] = ([os.path.join(models_dir, "vae_approx")], supported_pt_extensions)
 
-folder_names_and_paths["controlnet"] = (
-    [os.path.join(models_dir, "controlnet"), os.path.join(models_dir, "t2i_adapter")], supported_pt_extensions)
-folder_names_and_paths["gligen"] = ([os.path.join(models_dir, "gligen")], supported_pt_extensions)
-
-folder_names_and_paths["upscale_models"] = ([os.path.join(models_dir, "upscale_models")], supported_pt_extensions)
-
-folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], [])
-
-folder_names_and_paths["hypernetworks"] = ([os.path.join(models_dir, "hypernetworks")], supported_pt_extensions)
-
-folder_names_and_paths["photomaker"] = ([os.path.join(models_dir, "photomaker")], supported_pt_extensions)
-
-folder_names_and_paths["classifiers"] = ([os.path.join(models_dir, "classifiers")], {""})
+folder_names_and_paths["ERSGAN"] = ([os.path.join(models_dir, "ERSGAN")], supported_pt_extensions)
 
 output_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "output")
-temp_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "temp")
-input_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "input")
-user_directory = os.path.join(os.path.dirname(os.path.realpath(__file__)), "user")
 
 filename_list_cache = {}
-
-if not os.path.exists(input_directory):
-    try:
-        os.makedirs(input_directory)
-    except:
-        logging.error("Failed to create input directory")
 
 
 def set_output_directory(output_dir):
@@ -337,11 +300,11 @@ def pillow(fn, arg):
 
 
 def before_node_execution():
-    comfy.model_management.throw_exception_if_processing_interrupted()
+    mono.throw_exception_if_processing_interrupted()
 
 
 def interrupt_processing(value=True):
-    comfy.model_management.interrupt_current_processing(value)
+    mono.interrupt_current_processing(value)
 
 
 MAX_RESOLUTION = 16384
@@ -406,7 +369,7 @@ class CheckpointLoaderSimple:
     def load_checkpoint(self, ckpt_name, output_vae=True, output_clip=True):
         ckpt_path = get_full_path("checkpoints", ckpt_name)
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True,
-                                                    embedding_directory=get_folder_paths("embeddings"))
+                                                    embedding_directory=".models\\embeddings\\")
         return out[:3]
 
 
@@ -461,7 +424,7 @@ class LoraLoader:
                 del temp
 
         if lora is None:
-            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            lora = mono.load_torch_file(lora_path, safe_load=True)
             self.loaded_lora = (lora_path, lora)
 
         model_lora, clip_lora = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
@@ -470,7 +433,7 @@ class LoraLoader:
 
 class EmptyLatentImage:
     def __init__(self):
-        self.device = comfy.model_management.intermediate_device()
+        self.device = mono.intermediate_device()
 
     @classmethod
     def INPUT_TYPES(s):
@@ -520,7 +483,7 @@ class LatentUpscale:
                 width = max(64, width)
                 height = max(64, height)
 
-            s["samples"] = comfy.utils.common_upscale(samples["samples"], width // 8, height // 8, upscale_method, crop)
+            s["samples"] = mono.common_upscale(samples["samples"], width // 8, height // 8, upscale_method, crop)
         return (s,)
 
 
@@ -531,14 +494,14 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
         noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
     else:
         batch_inds = latent["batch_index"] if "batch_index" in latent else None
-        noise = comfy.sample.prepare_noise(latent_image, seed, batch_inds)
+        noise = mono.prepare_noise(latent_image, seed, batch_inds)
 
     noise_mask = None
     if "noise_mask" in latent:
         noise_mask = latent["noise_mask"]
 
-    disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    samples = comfy.sample.sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
+    disable_pbar = not mono.PROGRESS_BAR_ENABLED
+    samples = mono.sample1(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                                   denoise=denoise, disable_noise=disable_noise, start_step=start_step,
                                   last_step=last_step,
                                   force_full_denoise=force_full_denoise, noise_mask=noise_mask,
@@ -556,8 +519,8 @@ class KSampler:
                      "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                      "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                      "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1, "round": 0.01}),
-                     "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
-                     "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                     "sampler_name": (mono.KSampler.SAMPLERS,),
+                     "scheduler": (mono.KSampler.SCHEDULERS,),
                      "positive": ("CONDITIONING",),
                      "negative": ("CONDITIONING",),
                      "latent_image": ("LATENT",),
@@ -775,79 +738,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 EXTENSION_WEB_DIRS = {}
-
-
-def load_custom_node(module_path, ignore=set()):
-    module_name = os.path.basename(module_path)
-    if os.path.isfile(module_path):
-        sp = os.path.splitext(module_path)
-        module_name = sp[0]
-    try:
-        logging.debug("Trying to load custom node {}".format(module_path))
-        if os.path.isfile(module_path):
-            module_spec = importlib.util.spec_from_file_location(module_name, module_path)
-            module_dir = os.path.split(module_path)[0]
-        else:
-            module_spec = importlib.util.spec_from_file_location(module_name, os.path.join(module_path, "__init__.py"))
-            module_dir = module_path
-
-        module = importlib.util.module_from_spec(module_spec)
-        sys.modules[module_name] = module
-        module_spec.loader.exec_module(module)
-
-        if hasattr(module, "WEB_DIRECTORY") and getattr(module, "WEB_DIRECTORY") is not None:
-            web_dir = os.path.abspath(os.path.join(module_dir, getattr(module, "WEB_DIRECTORY")))
-            if os.path.isdir(web_dir):
-                EXTENSION_WEB_DIRS[module_name] = web_dir
-
-        if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
-            for name in module.NODE_CLASS_MAPPINGS:
-                if name not in ignore:
-                    NODE_CLASS_MAPPINGS[name] = module.NODE_CLASS_MAPPINGS[name]
-            if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module,
-                                                                         "NODE_DISPLAY_NAME_MAPPINGS") is not None:
-                NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
-            return True
-        else:
-            logging.warning(f"Skip {module_path} module for custom nodes due to the lack of NODE_CLASS_MAPPINGS.")
-            return False
-    except Exception as e:
-        logging.warning(traceback.format_exc())
-        logging.warning(f"Cannot import {module_path} module for custom nodes: {e}")
-        return False
-
-
-def load_custom_nodes():
-    base_node_names = set(NODE_CLASS_MAPPINGS.keys())
-    node_paths = get_folder_paths("custom_nodes")
-    node_import_times = []
-    for custom_node_path in node_paths:
-        possible_modules = os.listdir(os.path.realpath(custom_node_path))
-        if "__pycache__" in possible_modules:
-            possible_modules.remove("__pycache__")
-
-        for possible_module in possible_modules:
-            module_path = os.path.join(custom_node_path, possible_module)
-            if os.path.isfile(module_path) and os.path.splitext(module_path)[1] != ".py": continue
-            if module_path.endswith(".disabled"): continue
-            time_before = time.perf_counter()
-            success = load_custom_node(module_path, base_node_names)
-            node_import_times.append((time.perf_counter() - time_before, module_path, success))
-
-    if len(node_import_times) > 0:
-        logging.info("\nImport times for custom nodes:")
-        for n in sorted(node_import_times):
-            if n[2]:
-                import_message = ""
-            else:
-                import_message = " (IMPORT FAILED)"
-            logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
-        logging.info("")
-
-
-def init_custom_nodes():
-    load_custom_nodes()
-
 
 
 def act(act_type: str, inplace=True, neg_slope=0.2, n_prelu=1):
@@ -1465,7 +1355,7 @@ class UpscaleModelLoader:
     CATEGORY = "loaders"
 
     def load_model(self, model_name):
-        model_path = f".\\models\\upscale_models\\{model_name}"
+        model_path = f".\\models\\ERSGAN\\{model_name}"
         sd = load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
             sd = state_dict_prefix_replace(sd, {"module.": ""})
@@ -2083,7 +1973,6 @@ class UpscalerData:
 
 
 from PIL import Image, ImageFilter
-
 
 if (not hasattr(Image, 'Resampling')):  # For older versions of Pillow
     Image.Resampling = Image
@@ -2840,8 +2729,8 @@ def USDU_base_inputs():
         ("seed", ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})),
         ("steps", ("INT", {"default": 20, "min": 1, "max": 10000, "step": 1})),
         ("cfg", ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0})),
-        ("sampler_name", (comfy.samplers.KSampler.SAMPLERS,)),
-        ("scheduler", (comfy.samplers.KSampler.SCHEDULERS,)),
+        ("sampler_name", (mono.KSampler.SAMPLERS,)),
+        ("scheduler", (mono.KSampler.SCHEDULERS,)),
         ("denoise", ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})),
         # Upscale Params
         ("upscale_model", ("UPSCALE_MODEL",)),

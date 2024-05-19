@@ -4,22 +4,16 @@ from enum import Enum
 import torch
 import yaml
 
-import comfy.lora
-import comfy.model_patcher
 import comfy.supported_models_base
-import comfy.t2i_adapter.adapter
-import comfy.taesd.taesd
-import comfy.utils
-from comfy import model_management
+import mono
+from mono import StageA
+from mono import StageC_coder
 from . import clip_vision
-from . import diffusers_convert
 from . import gligen
 from . import model_detection
 from . import sd1_clip
 from . import sd2_clip
 from . import sdxl_clip
-from .ldm.cascade.stage_a import StageA
-from .ldm.cascade.stage_c_coder import StageC_coder
 from .ldm.models.autoencoder import AutoencoderKL, AutoencodingEngine
 
 
@@ -51,18 +45,18 @@ def load_clip_weights(model, sd):
         if ids.dtype == torch.float32:
             sd['cond_stage_model.transformer.text_model.embeddings.position_ids'] = ids.round()
 
-    sd = comfy.utils.clip_text_transformers_convert(sd, "cond_stage_model.model.", "cond_stage_model.transformer.")
+    sd = mono.clip_text_transformers_convert(sd, "cond_stage_model.model.", "cond_stage_model.transformer.")
     return load_model_weights(model, sd)
 
 
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip):
     key_map = {}
     if model is not None:
-        key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
+        key_map = mono.model_lora_keys_unet(model.model, key_map)
     if clip is not None:
-        key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
+        key_map = mono.model_lora_keys_clip(clip.cond_stage_model, key_map)
 
-    loaded = comfy.lora.load_lora(lora, key_map)
+    loaded = mono.load_lora(lora, key_map)
     if model is not None:
         new_modelpatcher = model.clone()
         k = new_modelpatcher.add_patches(loaded, strength_model)
@@ -93,15 +87,15 @@ class CLIP:
         clip = target.clip
         tokenizer = target.tokenizer
 
-        load_device = model_management.text_encoder_device()
-        offload_device = model_management.text_encoder_offload_device()
+        load_device = mono.text_encoder_device()
+        offload_device = mono.text_encoder_offload_device()
         params['device'] = offload_device
-        params['dtype'] = model_management.text_encoder_dtype(load_device)
+        params['dtype'] = mono.text_encoder_dtype(load_device)
 
         self.cond_stage_model = clip(**(params))
 
         self.tokenizer = tokenizer(embedding_directory=embedding_directory)
-        self.patcher = comfy.model_patcher.ModelPatcher(self.cond_stage_model, load_device=load_device,
+        self.patcher = mono.ModelPatcher(self.cond_stage_model, load_device=load_device,
                                                         offload_device=offload_device)
         self.layer_idx = None
 
@@ -151,7 +145,7 @@ class CLIP:
         return self.cond_stage_model.state_dict()
 
     def load_model(self):
-        model_management.load_model_gpu(self.patcher)
+        mono.load_model_gpu(self.patcher)
         return self.patcher
 
     def get_key_patches(self):
@@ -161,11 +155,11 @@ class CLIP:
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None):
         if 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys():  # diffusers format
-            sd = diffusers_convert.convert_vae_state_dict(sd)
+            sd = mono.convert_vae_state_dict(sd)
 
-        self.memory_used_encode = lambda shape, dtype: (1767 * shape[2] * shape[3]) * model_management.dtype_size(
+        self.memory_used_encode = lambda shape, dtype: (1767 * shape[2] * shape[3]) * mono.dtype_size(
             dtype)  # These are for AutoencoderKL and need tweaking (should be lower)
-        self.memory_used_decode = lambda shape, dtype: (2178 * shape[2] * shape[3] * 64) * model_management.dtype_size(
+        self.memory_used_decode = lambda shape, dtype: (2178 * shape[2] * shape[3] * 64) * mono.dtype_size(
             dtype)
         self.downscale_ratio = 8
         self.upscale_ratio = 8
@@ -187,7 +181,7 @@ class VAE:
                                     'params': encoder_config},
                     decoder_config={'target': "comfy.ldm.modules.temporal_ae.VideoDecoder", 'params': decoder_config})
             elif "taesd_decoder.1.weight" in sd:
-                self.first_stage_model = comfy.taesd.taesd.TAESD()
+                self.first_stage_model = mono.TAESD()
             elif "vquantizer.codebook.weight" in sd:  # VQGan: stage a of stable cascade
                 self.first_stage_model = StageA()
                 self.downscale_ratio = 4
@@ -253,16 +247,16 @@ class VAE:
             logging.debug("Leftover VAE keys {}".format(u))
 
         if device is None:
-            device = model_management.vae_device()
+            device = mono.vae_device()
         self.device = device
-        offload_device = model_management.vae_offload_device()
+        offload_device = mono.vae_offload_device()
         if dtype is None:
-            dtype = model_management.vae_dtype()
+            dtype = mono.vae_dtype()
         self.vae_dtype = dtype
         self.first_stage_model.to(self.vae_dtype)
-        self.output_device = model_management.intermediate_device()
+        self.output_device = mono.intermediate_device()
 
-        self.patcher = comfy.model_patcher.ModelPatcher(self.first_stage_model, load_device=self.device,
+        self.patcher = mono.ModelPatcher(self.first_stage_model, load_device=self.device,
                                                         offload_device=offload_device)
 
     def vae_encode_crop_pixels(self, pixels):
@@ -275,46 +269,46 @@ class VAE:
         return pixels
 
     def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap=16):
-        steps = samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x, tile_y,
+        steps = samples.shape[0] * mono.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x, tile_y,
                                                                      overlap)
-        steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x // 2,
+        steps += samples.shape[0] * mono.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x // 2,
                                                                       tile_y * 2, overlap)
-        steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x * 2,
+        steps += samples.shape[0] * mono.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x * 2,
                                                                       tile_y // 2, overlap)
-        pbar = comfy.utils.ProgressBar(steps)
+        pbar = mono.ProgressBar(steps)
 
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).float()
         output = self.process_output(
-            (comfy.utils.tiled_scale(samples, decode_fn, tile_x // 2, tile_y * 2, overlap,
+            (mono.tiled_scale(samples, decode_fn, tile_x // 2, tile_y * 2, overlap,
                                      upscale_amount=self.upscale_ratio, output_device=self.output_device, pbar=pbar) +
-             comfy.utils.tiled_scale(samples, decode_fn, tile_x * 2, tile_y // 2, overlap,
+             mono.tiled_scale(samples, decode_fn, tile_x * 2, tile_y // 2, overlap,
                                      upscale_amount=self.upscale_ratio, output_device=self.output_device, pbar=pbar) +
-             comfy.utils.tiled_scale(samples, decode_fn, tile_x, tile_y, overlap, upscale_amount=self.upscale_ratio,
+             mono.tiled_scale(samples, decode_fn, tile_x, tile_y, overlap, upscale_amount=self.upscale_ratio,
                                      output_device=self.output_device, pbar=pbar))
             / 3.0)
         return output
 
     def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
-        steps = pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3],
+        steps = pixel_samples.shape[0] * mono.get_tiled_scale_steps(pixel_samples.shape[3],
                                                                            pixel_samples.shape[2], tile_x, tile_y,
                                                                            overlap)
-        steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3],
+        steps += pixel_samples.shape[0] * mono.get_tiled_scale_steps(pixel_samples.shape[3],
                                                                             pixel_samples.shape[2], tile_x // 2,
                                                                             tile_y * 2, overlap)
-        steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3],
+        steps += pixel_samples.shape[0] * mono.get_tiled_scale_steps(pixel_samples.shape[3],
                                                                             pixel_samples.shape[2], tile_x * 2,
                                                                             tile_y // 2, overlap)
-        pbar = comfy.utils.ProgressBar(steps)
+        pbar = mono.ProgressBar(steps)
 
         encode_fn = lambda a: self.first_stage_model.encode(
             (self.process_input(a)).to(self.vae_dtype).to(self.device)).float()
-        samples = comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x, tile_y, overlap,
+        samples = mono.tiled_scale(pixel_samples, encode_fn, tile_x, tile_y, overlap,
                                           upscale_amount=(1 / self.downscale_ratio), out_channels=self.latent_channels,
                                           output_device=self.output_device, pbar=pbar)
-        samples += comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x * 2, tile_y // 2, overlap,
+        samples += mono.tiled_scale(pixel_samples, encode_fn, tile_x * 2, tile_y // 2, overlap,
                                            upscale_amount=(1 / self.downscale_ratio), out_channels=self.latent_channels,
                                            output_device=self.output_device, pbar=pbar)
-        samples += comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x // 2, tile_y * 2, overlap,
+        samples += mono.tiled_scale(pixel_samples, encode_fn, tile_x // 2, tile_y * 2, overlap,
                                            upscale_amount=(1 / self.downscale_ratio), out_channels=self.latent_channels,
                                            output_device=self.output_device, pbar=pbar)
         samples /= 3.0
@@ -323,8 +317,8 @@ class VAE:
     def decode(self, samples_in):
         try:
             memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-            model_management.load_models_gpu([self.patcher], memory_required=memory_used)
-            free_memory = model_management.get_free_memory(self.device)
+            mono.load_models_gpu([self.patcher], memory_required=memory_used)
+            free_memory = mono.get_free_memory(self.device)
             batch_number = int(free_memory / memory_used)
             batch_number = max(1, batch_number)
 
@@ -334,7 +328,7 @@ class VAE:
                 samples = samples_in[x:x + batch_number].to(self.vae_dtype).to(self.device)
                 pixel_samples[x:x + batch_number] = self.process_output(
                     self.first_stage_model.decode(samples).to(self.output_device).float())
-        except model_management.OOM_EXCEPTION as e:
+        except mono.OOM_EXCEPTION as e:
             logging.warning("Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.")
             pixel_samples = self.decode_tiled_(samples_in)
 
@@ -342,7 +336,7 @@ class VAE:
         return pixel_samples
 
     def decode_tiled(self, samples, tile_x=64, tile_y=64, overlap=16):
-        model_management.load_model_gpu(self.patcher)
+        mono.load_model_gpu(self.patcher)
         output = self.decode_tiled_(samples, tile_x, tile_y, overlap)
         return output.movedim(1, -1)
 
@@ -351,8 +345,8 @@ class VAE:
         pixel_samples = pixel_samples.movedim(-1, 1)
         try:
             memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
-            model_management.load_models_gpu([self.patcher], memory_required=memory_used)
-            free_memory = model_management.get_free_memory(self.device)
+            mono.load_models_gpu([self.patcher], memory_required=memory_used)
+            free_memory = mono.get_free_memory(self.device)
             batch_number = int(free_memory / memory_used)
             batch_number = max(1, batch_number)
             samples = torch.empty((pixel_samples.shape[0], self.latent_channels,
@@ -362,7 +356,7 @@ class VAE:
                 pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype).to(self.device)
                 samples[x:x + batch_number] = self.first_stage_model.encode(pixels_in).to(self.output_device).float()
 
-        except model_management.OOM_EXCEPTION as e:
+        except mono.OOM_EXCEPTION as e:
             logging.warning("Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding.")
             samples = self.encode_tiled_(pixel_samples)
 
@@ -370,7 +364,7 @@ class VAE:
 
     def encode_tiled(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
-        model_management.load_model_gpu(self.patcher)
+        mono.load_model_gpu(self.patcher)
         pixel_samples = pixel_samples.movedim(-1, 1)
         samples = self.encode_tiled_(pixel_samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap)
         return samples
@@ -388,10 +382,10 @@ class StyleModel:
 
 
 def load_style_model(ckpt_path):
-    model_data = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+    model_data = mono.load_torch_file(ckpt_path, safe_load=True)
     keys = model_data.keys()
     if "style_embedding" in keys:
-        model = comfy.t2i_adapter.adapter.StyleAdapter(width=1024, context_dim=768, num_head=8, n_layes=3, num_token=8)
+        model = mono.StyleAdapter(width=1024, context_dim=768, num_head=8, n_layes=3, num_token=8)
     else:
         raise Exception("invalid style model {}".format(ckpt_path))
     model.load_state_dict(model_data)
@@ -406,14 +400,14 @@ class CLIPType(Enum):
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION):
     clip_data = []
     for p in ckpt_paths:
-        clip_data.append(comfy.utils.load_torch_file(p, safe_load=True))
+        clip_data.append(mono.load_torch_file(p, safe_load=True))
 
     class EmptyClass:
         pass
 
     for i in range(len(clip_data)):
         if "transformer.resblocks.0.ln_1.weight" in clip_data[i]:
-            clip_data[i] = comfy.utils.clip_text_transformers_convert(clip_data[i], "", "")
+            clip_data[i] = mono.clip_text_transformers_convert(clip_data[i], "", "")
         else:
             if "text_projection" in clip_data[i]:
                 clip_data[i]["text_projection.weight"] = clip_data[i]["text_projection"].transpose(0,
@@ -451,12 +445,12 @@ def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DI
 
 
 def load_gligen(ckpt_path):
-    data = comfy.utils.load_torch_file(ckpt_path, safe_load=True)
+    data = mono.load_torch_file(ckpt_path, safe_load=True)
     model = gligen.load_gligen(data)
-    if model_management.should_use_fp16():
+    if mono.should_use_fp16():
         model = model.half()
-    return comfy.model_patcher.ModelPatcher(model, load_device=model_management.get_torch_device(),
-                                            offload_device=model_management.unet_offload_device())
+    return mono.ModelPatcher(model, load_device=mono.get_torch_device(),
+                                            offload_device=mono.unet_offload_device())
 
 
 def load_checkpoint(config_path=None, ckpt_path=None, output_vae=True, output_clip=True, embedding_directory=None,
@@ -493,7 +487,7 @@ def load_checkpoint(config_path=None, ckpt_path=None, output_vae=True, output_cl
 
 def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, output_clipvision=False,
                                  embedding_directory=None, output_model=True):
-    sd = comfy.utils.load_torch_file(ckpt_path)
+    sd = mono.load_torch_file(ckpt_path)
     sd_keys = sd.keys()
     clip = None
     clipvision = None
@@ -502,13 +496,13 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
     model_patcher = None
     clip_target = None
 
-    parameters = comfy.utils.calculate_parameters(sd, "model.diffusion_model.")
-    load_device = model_management.get_torch_device()
+    parameters = mono.calculate_parameters(sd, "model.diffusion_model.")
+    load_device = mono.get_torch_device()
 
     model_config = model_detection.model_config_from_unet(sd, "model.diffusion_model.")
-    unet_dtype = model_management.unet_dtype(model_params=parameters,
+    unet_dtype = mono.unet_dtype(model_params=parameters,
                                              supported_dtypes=model_config.supported_inference_dtypes)
-    manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device,
+    manual_cast_dtype = mono.unet_manual_cast(unet_dtype, load_device,
                                                           model_config.supported_inference_dtypes)
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
 
@@ -520,13 +514,13 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
             clipvision = clip_vision.load_clipvision_from_sd(sd, model_config.clip_vision_prefix, True)
 
     if output_model:
-        inital_load_device = model_management.unet_inital_load_device(parameters, unet_dtype)
-        offload_device = model_management.unet_offload_device()
+        inital_load_device = mono.unet_inital_load_device(parameters, unet_dtype)
+        offload_device = mono.unet_offload_device()
         model = model_config.get_model(sd, "model.diffusion_model.", device=inital_load_device)
         model.load_model_weights(sd, "model.diffusion_model.")
 
     if output_vae:
-        vae_sd = comfy.utils.state_dict_prefix_replace(sd, {k: "" for k in model_config.vae_key_prefix},
+        vae_sd = mono.state_dict_prefix_replace(sd, {k: "" for k in model_config.vae_key_prefix},
                                                        filter_keys=True)
         vae_sd = model_config.process_vae_state_dict(vae_sd)
         vae = VAE(sd=vae_sd)
@@ -557,20 +551,20 @@ def load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, o
         logging.debug("left over keys: {}".format(left_over))
 
     if output_model:
-        model_patcher = comfy.model_patcher.ModelPatcher(model, load_device=load_device,
-                                                         offload_device=model_management.unet_offload_device(),
+        model_patcher = mono.ModelPatcher(model, load_device=load_device,
+                                                         offload_device=mono.unet_offload_device(),
                                                          current_device=inital_load_device)
         if inital_load_device != torch.device("cpu"):
             logging.info("loaded straight to GPU")
-            model_management.load_model_gpu(model_patcher)
+            mono.load_model_gpu(model_patcher)
 
     return (model_patcher, clip, vae, clipvision)
 
 
 def load_unet_state_dict(sd):  # load unet in diffusers format
-    parameters = comfy.utils.calculate_parameters(sd)
-    unet_dtype = model_management.unet_dtype(model_params=parameters)
-    load_device = model_management.get_torch_device()
+    parameters = mono.calculate_parameters(sd)
+    unet_dtype = mono.unet_dtype(model_params=parameters)
+    load_device = mono.get_torch_device()
 
     if "input_blocks.0.0.weight" in sd or 'clf.1.weight' in sd:  # ldm or stable cascade
         model_config = model_detection.model_config_from_unet(sd, "")
@@ -583,7 +577,7 @@ def load_unet_state_dict(sd):  # load unet in diffusers format
         if model_config is None:
             return None
 
-        diffusers_keys = comfy.utils.unet_to_diffusers(model_config.unet_config)
+        diffusers_keys = mono.unet_to_diffusers(model_config.unet_config)
 
         new_sd = {}
         for k in diffusers_keys:
@@ -592,10 +586,10 @@ def load_unet_state_dict(sd):  # load unet in diffusers format
             else:
                 logging.warning("{} {}".format(diffusers_keys[k], k))
 
-    offload_device = model_management.unet_offload_device()
-    unet_dtype = model_management.unet_dtype(model_params=parameters,
+    offload_device = mono.unet_offload_device()
+    unet_dtype = mono.unet_dtype(model_params=parameters,
                                              supported_dtypes=model_config.supported_inference_dtypes)
-    manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device,
+    manual_cast_dtype = mono.unet_manual_cast(unet_dtype, load_device,
                                                           model_config.supported_inference_dtypes)
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype)
     model = model_config.get_model(new_sd, "")
@@ -604,11 +598,11 @@ def load_unet_state_dict(sd):  # load unet in diffusers format
     left_over = sd.keys()
     if len(left_over) > 0:
         logging.info("left over keys in unet: {}".format(left_over))
-    return comfy.model_patcher.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    return mono.ModelPatcher(model, load_device=load_device, offload_device=offload_device)
 
 
 def load_unet(unet_path):
-    sd = comfy.utils.load_torch_file(unet_path)
+    sd = mono.load_torch_file(unet_path)
     model = load_unet_state_dict(sd)
     if model is None:
         logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
@@ -623,10 +617,10 @@ def save_checkpoint(output_path, model, clip=None, vae=None, clip_vision=None, m
         load_models.append(clip.load_model())
         clip_sd = clip.get_sd()
 
-    model_management.load_models_gpu(load_models, force_patch_weights=True)
+    mono.load_models_gpu(load_models, force_patch_weights=True)
     clip_vision_sd = clip_vision.get_sd() if clip_vision is not None else None
     sd = model.model.state_dict_for_saving(clip_sd, vae.get_sd(), clip_vision_sd)
     for k in extra_keys:
         sd[k] = extra_keys[k]
 
-    comfy.utils.save_torch_file(sd, output_path, metadata=metadata)
+    mono.save_torch_file(sd, output_path, metadata=metadata)

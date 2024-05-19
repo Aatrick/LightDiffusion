@@ -8,8 +8,7 @@ import torch
 from transformers import CLIPTokenizer
 
 import comfy.clip_model
-import comfy.ops
-from . import model_management
+import mono
 
 
 def gen_empty_tokens(special_tokens, length):
@@ -42,7 +41,7 @@ class ClipTokenWeightEncoder:
 
         out, pooled = self.encode(to_encode)
         if pooled is not None:
-            first_pooled = pooled[0:1].to(model_management.intermediate_device())
+            first_pooled = pooled[0:1].to(mono.intermediate_device())
         else:
             first_pooled = pooled
 
@@ -59,8 +58,8 @@ class ClipTokenWeightEncoder:
             output.append(z)
 
         if (len(output) == 0):
-            return out[-1:].to(model_management.intermediate_device()), first_pooled
-        return torch.cat(output, dim=-2).to(model_management.intermediate_device()), first_pooled
+            return out[-1:].to(mono.intermediate_device()), first_pooled
+        return torch.cat(output, dim=-2).to(mono.intermediate_device()), first_pooled
 
 
 class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
@@ -85,7 +84,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         with open(textmodel_json_config) as f:
             config = json.load(f)
 
-        self.transformer = model_class(config, dtype, device, comfy.ops.manual_cast)
+        self.transformer = model_class(config, dtype, device, mono.manual_cast)
         self.num_layers = self.transformer.num_layers
 
         self.max_length = max_length

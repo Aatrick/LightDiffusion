@@ -6,9 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-import comfy.ops
-from comfy.ldm.util import exists
-from .util import (
+import mono
+from mono import exists
+from mono import (
     checkpoint,
     avg_pool_nd,
     zero_module,
@@ -17,7 +17,7 @@ from .util import (
 )
 from ..attention import SpatialTransformer, SpatialVideoTransformer, default
 
-ops = comfy.ops.disable_weight_init
+ops = mono.disable_weight_init
 
 
 class TimestepBlock(nn.Module):

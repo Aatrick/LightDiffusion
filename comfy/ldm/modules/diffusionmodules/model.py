@@ -6,12 +6,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import comfy.ops
-from comfy import model_management
+import mono
 
-ops = comfy.ops.disable_weight_init
+ops = mono.disable_weight_init
 
-if model_management.xformers_enabled_vae():
+if mono.xformers_enabled_vae():
     import xformers
     import xformers.ops
 
@@ -242,7 +241,7 @@ def pytorch_attention(q, k, v):
     try:
         out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
         out = out.transpose(2, 3).reshape(B, C, H, W)
-    except model_management.OOM_EXCEPTION as e:
+    except mono.OOM_EXCEPTION as e:
         logging.warning("scaled_dot_product_attention OOMed: switched to slice attention")
         out = slice_attention(q.view(B, -1, C), k.view(B, -1, C).transpose(1, 2),
                               v.view(B, -1, C).transpose(1, 2)).reshape(B, C, H, W)
@@ -276,10 +275,10 @@ class AttnBlock(nn.Module):
                                    stride=1,
                                    padding=0)
 
-        if model_management.xformers_enabled_vae():
+        if mono.xformers_enabled_vae():
             logging.info("Using xformers attention in VAE")
             self.optimized_attention = xformers_attention
-        elif model_management.pytorch_attention_enabled():
+        elif mono.pytorch_attention_enabled():
             logging.info("Using pytorch attention in VAE")
             self.optimized_attention = pytorch_attention
         else:

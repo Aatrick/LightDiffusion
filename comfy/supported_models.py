@@ -1,13 +1,12 @@
 import torch
 
-from . import diffusers_convert
-from . import latent_formats
+
+import mono
 from . import model_base
 from . import sd1_clip
 from . import sd2_clip
 from . import sdxl_clip
 from . import supported_models_base
-from . import utils
 
 
 class SD15(supported_models_base.BASE):
@@ -24,7 +23,7 @@ class SD15(supported_models_base.BASE):
         "num_head_channels": -1,
     }
 
-    latent_format = latent_formats.SD15
+    latent_format = mono.SD15
 
     def process_clip_state_dict(self, state_dict):
         k = list(state_dict.keys())
@@ -41,7 +40,7 @@ class SD15(supported_models_base.BASE):
 
         replace_prefix = {}
         replace_prefix["cond_stage_model."] = "clip_l."
-        state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
+        state_dict = mono.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
         return state_dict
 
     def process_clip_state_dict_for_saving(self, state_dict):
@@ -51,7 +50,7 @@ class SD15(supported_models_base.BASE):
                 state_dict.pop(p)
 
         replace_prefix = {"clip_l.": "cond_stage_model."}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
+        return mono.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def clip_target(self):
         return supported_models_base.ClipTarget(sd1_clip.SD1Tokenizer, sd1_clip.SD1ClipModel)
@@ -66,7 +65,7 @@ class SD20(supported_models_base.BASE):
         "use_temporal_attention": False,
     }
 
-    latent_format = latent_formats.SD15
+    latent_format = mono.SD15
 
     def model_type(self, state_dict, prefix=""):
         if self.unet_config["in_channels"] == 4:  # SD2.0 inpainting models are not v prediction
@@ -81,15 +80,15 @@ class SD20(supported_models_base.BASE):
         replace_prefix = {}
         replace_prefix["conditioner.embedders.0.model."] = "clip_h."  # SD2 in sgm format
         replace_prefix["cond_stage_model.model."] = "clip_h."
-        state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
-        state_dict = utils.clip_text_transformers_convert(state_dict, "clip_h.", "clip_h.transformer.")
+        state_dict = mono.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
+        state_dict = mono.clip_text_transformers_convert(state_dict, "clip_h.", "clip_h.transformer.")
         return state_dict
 
     def process_clip_state_dict_for_saving(self, state_dict):
         replace_prefix = {}
         replace_prefix["clip_h"] = "cond_stage_model.model"
-        state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix)
-        state_dict = diffusers_convert.convert_text_enc_state_dict_v20(state_dict)
+        state_dict = mono.state_dict_prefix_replace(state_dict, replace_prefix)
+        state_dict = mono.convert_text_enc_state_dict_v20(state_dict)
         return state_dict
 
     def clip_target(self):
@@ -134,7 +133,7 @@ class SDXLRefiner(supported_models_base.BASE):
         "use_temporal_attention": False,
     }
 
-    latent_format = latent_formats.SDXL
+    latent_format = mono.SDXL
 
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.SDXLRefiner(self, device=device)
@@ -143,19 +142,19 @@ class SDXLRefiner(supported_models_base.BASE):
         keys_to_replace = {}
         replace_prefix = {}
         replace_prefix["conditioner.embedders.0.model."] = "clip_g."
-        state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
+        state_dict = mono.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
 
-        state_dict = utils.clip_text_transformers_convert(state_dict, "clip_g.", "clip_g.transformer.")
-        state_dict = utils.state_dict_key_replace(state_dict, keys_to_replace)
+        state_dict = mono.clip_text_transformers_convert(state_dict, "clip_g.", "clip_g.transformer.")
+        state_dict = mono.state_dict_key_replace(state_dict, keys_to_replace)
         return state_dict
 
     def process_clip_state_dict_for_saving(self, state_dict):
         replace_prefix = {}
-        state_dict_g = diffusers_convert.convert_text_enc_state_dict_v20(state_dict, "clip_g")
+        state_dict_g = mono.convert_text_enc_state_dict_v20(state_dict, "clip_g")
         if "clip_g.transformer.text_model.embeddings.position_ids" in state_dict_g:
             state_dict_g.pop("clip_g.transformer.text_model.embeddings.position_ids")
         replace_prefix["clip_g"] = "conditioner.embedders.0.model"
-        state_dict_g = utils.state_dict_prefix_replace(state_dict_g, replace_prefix)
+        state_dict_g = mono.state_dict_prefix_replace(state_dict_g, replace_prefix)
         return state_dict_g
 
     def clip_target(self):
@@ -172,11 +171,11 @@ class SDXL(supported_models_base.BASE):
         "use_temporal_attention": False,
     }
 
-    latent_format = latent_formats.SDXL
+    latent_format = mono.SDXL
 
     def model_type(self, state_dict, prefix=""):
         if 'edm_mean' in state_dict and 'edm_std' in state_dict:  # Playground V2.5
-            self.latent_format = latent_formats.SDXL_Playground_2_5()
+            self.latent_format = mono.SDXL_Playground_2_5()
             self.sampling_settings["sigma_data"] = 0.5
             self.sampling_settings["sigma_max"] = 80.0
             self.sampling_settings["sigma_min"] = 0.002
@@ -203,16 +202,16 @@ class SDXL(supported_models_base.BASE):
 
         replace_prefix["conditioner.embedders.0.transformer.text_model"] = "clip_l.transformer.text_model"
         replace_prefix["conditioner.embedders.1.model."] = "clip_g."
-        state_dict = utils.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
+        state_dict = mono.state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=True)
 
-        state_dict = utils.state_dict_key_replace(state_dict, keys_to_replace)
-        state_dict = utils.clip_text_transformers_convert(state_dict, "clip_g.", "clip_g.transformer.")
+        state_dict = mono.state_dict_key_replace(state_dict, keys_to_replace)
+        state_dict = mono.clip_text_transformers_convert(state_dict, "clip_g.", "clip_g.transformer.")
         return state_dict
 
     def process_clip_state_dict_for_saving(self, state_dict):
         replace_prefix = {}
         keys_to_replace = {}
-        state_dict_g = diffusers_convert.convert_text_enc_state_dict_v20(state_dict, "clip_g")
+        state_dict_g = mono.convert_text_enc_state_dict_v20(state_dict, "clip_g")
         for k in state_dict:
             if k.startswith("clip_l"):
                 state_dict_g[k] = state_dict[k]
@@ -225,7 +224,7 @@ class SDXL(supported_models_base.BASE):
 
         replace_prefix["clip_g"] = "conditioner.embedders.1.model"
         replace_prefix["clip_l"] = "conditioner.embedders.0"
-        state_dict_g = utils.state_dict_prefix_replace(state_dict_g, replace_prefix)
+        state_dict_g = mono.state_dict_prefix_replace(state_dict_g, replace_prefix)
         return state_dict_g
 
     def clip_target(self):
@@ -290,7 +289,7 @@ class SVD_img2vid(supported_models_base.BASE):
 
     clip_vision_prefix = "conditioner.embedders.0.open_clip.model.visual."
 
-    latent_format = latent_formats.SD15
+    latent_format = mono.SD15
 
     sampling_settings = {"sigma_max": 700.0, "sigma_min": 0.002}
 
@@ -360,7 +359,7 @@ class Stable_Zero123(supported_models_base.BASE):
 
     clip_vision_prefix = "cond_stage_model.model.visual."
 
-    latent_format = latent_formats.SD15
+    latent_format = mono.SD15
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.Stable_Zero123(self, device=device, cc_projection_weight=state_dict["cc_projection.weight"],
@@ -388,7 +387,7 @@ class SD_X4Upscaler(SD20):
         "num_head_channels": -1,
     }
 
-    latent_format = latent_formats.SD_X4
+    latent_format = mono.SD_X4
 
     sampling_settings = {
         "linear_start": 0.0001,
@@ -407,7 +406,7 @@ class Stable_Cascade_C(supported_models_base.BASE):
 
     unet_extra_config = {}
 
-    latent_format = latent_formats.SC_Prior
+    latent_format = mono.SC_Prior
     supported_inference_dtypes = [torch.bfloat16, torch.float32]
 
     sampling_settings = {
@@ -434,7 +433,7 @@ class Stable_Cascade_C(supported_models_base.BASE):
         return state_dict
 
     def process_clip_state_dict(self, state_dict):
-        state_dict = utils.state_dict_prefix_replace(state_dict, {k: "" for k in self.text_encoder_key_prefix},
+        state_dict = mono.state_dict_prefix_replace(state_dict, {k: "" for k in self.text_encoder_key_prefix},
                                                      filter_keys=True)
         if "clip_g.text_projection" in state_dict:
             state_dict["clip_g.transformer.text_projection.weight"] = state_dict.pop(
@@ -456,7 +455,7 @@ class Stable_Cascade_B(Stable_Cascade_C):
 
     unet_extra_config = {}
 
-    latent_format = latent_formats.SC_B
+    latent_format = mono.SC_B
     supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
 
     sampling_settings = {

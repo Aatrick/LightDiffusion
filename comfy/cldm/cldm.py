@@ -4,13 +4,13 @@
 import torch
 import torch.nn as nn
 
-import comfy.ops
+import mono
 from ..ldm.modules.attention import SpatialTransformer
 from ..ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, Downsample
-from ..ldm.modules.diffusionmodules.util import (
+from mono import (
     timestep_embedding,
 )
-from ..ldm.util import exists
+from mono import exists
 
 
 class ControlledUnetModel(UNetModel):
@@ -52,7 +52,7 @@ class ControlNet(nn.Module):
             transformer_depth_middle=None,
             transformer_depth_output=None,
             device=None,
-            operations=comfy.ops.disable_weight_init,
+            operations=mono.disable_weight_init,
             **kwargs,
     ):
         super().__init__()

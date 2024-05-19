@@ -4,9 +4,9 @@ from typing import Iterable, Union
 import torch
 from einops import rearrange, repeat
 
-import comfy.ops
+import mono
 
-ops = comfy.ops.disable_weight_init
+ops = mono.disable_weight_init
 
 from .diffusionmodules.model import (
     AttnBlock,

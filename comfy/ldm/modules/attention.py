@@ -7,18 +7,18 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from torch import nn, einsum
 
-from comfy import model_management
-from .diffusionmodules.util import checkpoint, AlphaBlender, timestep_embedding
+import mono
+from mono import checkpoint, AlphaBlender, timestep_embedding
 from .sub_quadratic_attention import efficient_dot_product_attention
 
-if model_management.xformers_enabled():
+if mono.xformers_enabled():
     import xformers
     import xformers.ops
 
-from comfy.cli_args import args
-import comfy.ops
+from mono import args
+import mono
 
-ops = comfy.ops.disable_weight_init
+ops = mono.disable_weight_init
 
 # CrossAttn precision handling
 if args.dont_upcast_attention:
@@ -161,7 +161,7 @@ def attention_sub_quad(query, key, value, heads, mask=None):
     _, _, k_tokens = key.shape
     qk_matmul_size_bytes = batch_x_heads * bytes_per_token * q_tokens * k_tokens
 
-    mem_free_total, mem_free_torch = model_management.get_free_memory(query.device, True)
+    mem_free_total, mem_free_torch = mono.get_free_memory(query.device, True)
 
     kv_chunk_size_min = None
     kv_chunk_size = None
@@ -220,7 +220,7 @@ def attention_split(q, k, v, heads, mask=None):
 
     r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=q.device, dtype=q.dtype)
 
-    mem_free_total = model_management.get_free_memory(q.device)
+    mem_free_total = mono.get_free_memory(q.device)
 
     if _ATTN_PRECISION == "fp32":
         element_size = 4
@@ -278,9 +278,9 @@ def attention_split(q, k, v, heads, mask=None):
                 r1[:, i:end] = einsum('b i j, b j d -> b i d', s2, v)
                 del s2
             break
-        except model_management.OOM_EXCEPTION as e:
+        except mono.OOM_EXCEPTION as e:
             if first_op_done == False:
-                model_management.soft_empty_cache(True)
+                mono.soft_empty_cache(True)
                 if cleared_cache == False:
                     cleared_cache = True
                     logging.warning("out of memory error, emptying cache and trying again")
@@ -362,10 +362,10 @@ def attention_pytorch(q, k, v, heads, mask=None):
 
 optimized_attention = attention_basic
 
-if model_management.xformers_enabled():
+if mono.xformers_enabled():
     logging.info("Using xformers cross attention")
     optimized_attention = attention_xformers
-elif model_management.pytorch_attention_enabled():
+elif mono.pytorch_attention_enabled():
     logging.info("Using pytorch cross attention")
     optimized_attention = attention_pytorch
 else:
@@ -382,7 +382,7 @@ optimized_attention_masked = optimized_attention
 
 def optimized_attention_for_device(device, mask=False, small_input=False):
     if small_input:
-        if model_management.pytorch_attention_enabled():
+        if mono.pytorch_attention_enabled():
             return attention_pytorch  # TODO: need to confirm but this is probably slightly faster for small inputs in all cases
         else:
             return attention_basic

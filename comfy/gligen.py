@@ -3,10 +3,10 @@ from inspect import isfunction
 import torch
 from torch import nn
 
-import comfy.ops
+import mono
 from .ldm.modules.attention import CrossAttention
 
-ops = comfy.ops.manual_cast
+ops = mono.manual_cast
 
 
 def exists(val):

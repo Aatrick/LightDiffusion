@@ -1,8 +1,7 @@
 import torch
 
-from . import latent_formats
+import mono
 from . import model_base
-from . import utils
 
 
 class ClipTarget:
@@ -25,7 +24,7 @@ class BASE:
     clip_vision_prefix = None
     noise_aug_config = None
     sampling_settings = {}
-    latent_format = latent_formats.LatentFormat
+    latent_format = mono.LatentFormat
     vae_key_prefix = ["first_stage_model."]
     text_encoder_key_prefix = ["cond_stage_model."]
     supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
@@ -67,7 +66,7 @@ class BASE:
         return out
 
     def process_clip_state_dict(self, state_dict):
-        state_dict = utils.state_dict_prefix_replace(state_dict, {k: "" for k in self.text_encoder_key_prefix},
+        state_dict = mono.state_dict_prefix_replace(state_dict, {k: "" for k in self.text_encoder_key_prefix},
                                                      filter_keys=True)
         return state_dict
 
@@ -79,21 +78,21 @@ class BASE:
 
     def process_clip_state_dict_for_saving(self, state_dict):
         replace_prefix = {"": self.text_encoder_key_prefix[0]}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
+        return mono.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def process_clip_vision_state_dict_for_saving(self, state_dict):
         replace_prefix = {}
         if self.clip_vision_prefix is not None:
             replace_prefix[""] = self.clip_vision_prefix
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
+        return mono.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def process_unet_state_dict_for_saving(self, state_dict):
         replace_prefix = {"": "model.diffusion_model."}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
+        return mono.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def process_vae_state_dict_for_saving(self, state_dict):
         replace_prefix = {"": self.vae_key_prefix[0]}
-        return utils.state_dict_prefix_replace(state_dict, replace_prefix)
+        return mono.state_dict_prefix_replace(state_dict, replace_prefix)
 
     def set_inference_dtype(self, dtype, manual_cast_dtype):
         self.unet_config['dtype'] = dtype

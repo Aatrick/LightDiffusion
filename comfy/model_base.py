@@ -3,15 +3,12 @@ from enum import Enum
 
 import torch
 
-import comfy.conds
-import comfy.model_management
-import comfy.ops
 from comfy.ldm.cascade.stage_b import StageB
 from comfy.ldm.cascade.stage_c import StageC
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
-from comfy.ldm.modules.diffusionmodules.upscaling import ImageConcatWithNoiseAugmentation
+from mono import ImageConcatWithNoiseAugmentation
 from comfy.ldm.modules.encoders.noise_aug_modules import CLIPEmbeddingNoiseAugmentation
-from . import utils
+import mono
 
 
 class ModelType(Enum):
@@ -22,7 +19,7 @@ class ModelType(Enum):
     EDM = 5
 
 
-from comfy.model_sampling import EPS, V_PREDICTION, EDM, ModelSamplingDiscrete, ModelSamplingContinuousEDM, \
+from mono import EPS, V_PREDICTION, EDM, ModelSamplingDiscrete, ModelSamplingContinuousEDM, \
     StableCascadeSampling
 
 
@@ -60,9 +57,9 @@ class BaseModel(torch.nn.Module):
 
         if not unet_config.get("disable_unet_model_creation", False):
             if self.manual_cast_dtype is not None:
-                operations = comfy.ops.manual_cast
+                operations = mono.manual_cast
             else:
-                operations = comfy.ops.disable_weight_init
+                operations = mono.disable_weight_init
             self.diffusion_model = unet_model(**unet_config, device=device, operations=operations)
         self.model_type = model_type
         self.model_sampling = model_sampling(model_config, model_type)
@@ -126,10 +123,10 @@ class BaseModel(torch.nn.Module):
             device = kwargs["device"]
 
             if concat_latent_image.shape[1:] != noise.shape[1:]:
-                concat_latent_image = utils.common_upscale(concat_latent_image, noise.shape[-1], noise.shape[-2],
+                concat_latent_image = mono.common_upscale(concat_latent_image, noise.shape[-1], noise.shape[-2],
                                                            "bilinear", "center")
 
-            concat_latent_image = utils.resize_to_batch_size(concat_latent_image, noise.shape[0])
+            concat_latent_image = mono.resize_to_batch_size(concat_latent_image, noise.shape[0])
 
             if denoise_mask is not None:
                 if len(denoise_mask.shape) == len(noise.shape):
@@ -137,9 +134,9 @@ class BaseModel(torch.nn.Module):
 
                 denoise_mask = denoise_mask.reshape((-1, 1, denoise_mask.shape[-2], denoise_mask.shape[-1]))
                 if denoise_mask.shape[-2:] != noise.shape[-2:]:
-                    denoise_mask = utils.common_upscale(denoise_mask, noise.shape[-1], noise.shape[-2], "bilinear",
+                    denoise_mask = mono.common_upscale(denoise_mask, noise.shape[-1], noise.shape[-2], "bilinear",
                                                         "center")
-                denoise_mask = utils.resize_to_batch_size(denoise_mask.round(), noise.shape[0])
+                denoise_mask = mono.resize_to_batch_size(denoise_mask.round(), noise.shape[0])
 
             for ck in self.concat_keys:
                 if denoise_mask is not None:
@@ -154,23 +151,23 @@ class BaseModel(torch.nn.Module):
                     elif ck == "masked_image":
                         cond_concat.append(self.blank_inpaint_image_like(noise))
             data = torch.cat(cond_concat, dim=1)
-            out['c_concat'] = comfy.conds.CONDNoiseShape(data)
+            out['c_concat'] = mono.CONDNoiseShape(data)
 
         adm = self.encode_adm(**kwargs)
         if adm is not None:
-            out['y'] = comfy.conds.CONDRegular(adm)
+            out['y'] = mono.CONDRegular(adm)
 
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
-            out['c_crossattn'] = comfy.conds.CONDCrossAttn(cross_attn)
+            out['c_crossattn'] = mono.CONDCrossAttn(cross_attn)
 
         cross_attn_cnet = kwargs.get("cross_attn_controlnet", None)
         if cross_attn_cnet is not None:
-            out['crossattn_controlnet'] = comfy.conds.CONDCrossAttn(cross_attn_cnet)
+            out['crossattn_controlnet'] = mono.CONDCrossAttn(cross_attn_cnet)
 
         c_concat = kwargs.get("noise_concat", None)
         if c_concat is not None:
-            out['c_concat'] = comfy.conds.CONDNoiseShape(c_concat)
+            out['c_concat'] = mono.CONDNoiseShape(c_concat)
 
         return out
 
@@ -210,7 +207,7 @@ class BaseModel(torch.nn.Module):
         unet_state_dict = self.model_config.process_unet_state_dict_for_saving(unet_state_dict)
 
         if self.get_dtype() == torch.float16:
-            extra_sds = map(lambda sd: utils.convert_sd_to(sd, torch.float16), extra_sds)
+            extra_sds = map(lambda sd: mono.convert_sd_to(sd, torch.float16), extra_sds)
 
         if self.model_type == ModelType.V_PREDICTION:
             unet_state_dict["v_pred"] = torch.tensor([])
@@ -235,13 +232,13 @@ class BaseModel(torch.nn.Module):
         self.blank_inpaint_image_like = blank_inpaint_image_like
 
     def memory_required(self, input_shape):
-        if comfy.model_management.xformers_enabled() or comfy.model_management.pytorch_attention_flash_attention():
+        if mono.xformers_enabled() or mono.pytorch_attention_flash_attention():
             dtype = self.get_dtype()
             if self.manual_cast_dtype is not None:
                 dtype = self.manual_cast_dtype
             # TODO: this needs to be tweaked
             area = input_shape[0] * input_shape[2] * input_shape[3]
-            return (area * comfy.model_management.dtype_size(dtype) / 50) * (1024 * 1024)
+            return (area * mono.dtype_size(dtype) / 50) * (1024 * 1024)
         else:
             # TODO: this formula might be too aggressive since I tweaked the sub-quad and split algorithms to use less memory.
             area = input_shape[0] * input_shape[2] * input_shape[3]
@@ -378,7 +375,7 @@ class SVD_img2vid(BaseModel):
         out = {}
         adm = self.encode_adm(**kwargs)
         if adm is not None:
-            out['y'] = comfy.conds.CONDRegular(adm)
+            out['y'] = mono.CONDRegular(adm)
 
         latent_image = kwargs.get("concat_latent_image", None)
         noise = kwargs.get("noise", None)
@@ -388,20 +385,20 @@ class SVD_img2vid(BaseModel):
             latent_image = torch.zeros_like(noise)
 
         if latent_image.shape[1:] != noise.shape[1:]:
-            latent_image = utils.common_upscale(latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
+            latent_image = mono.common_upscale(latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
 
-        latent_image = utils.resize_to_batch_size(latent_image, noise.shape[0])
+        latent_image = mono.resize_to_batch_size(latent_image, noise.shape[0])
 
-        out['c_concat'] = comfy.conds.CONDNoiseShape(latent_image)
+        out['c_concat'] = mono.CONDNoiseShape(latent_image)
 
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
-            out['c_crossattn'] = comfy.conds.CONDCrossAttn(cross_attn)
+            out['c_crossattn'] = mono.CONDCrossAttn(cross_attn)
 
         if "time_conditioning" in kwargs:
-            out["time_context"] = comfy.conds.CONDCrossAttn(kwargs["time_conditioning"])
+            out["time_context"] = mono.CONDCrossAttn(kwargs["time_conditioning"])
 
-        out['num_video_frames'] = comfy.conds.CONDConstant(noise.shape[0])
+        out['num_video_frames'] = mono.CONDConstant(noise.shape[0])
         return out
 
 
@@ -432,7 +429,7 @@ class SV3D_p(SVD_img2vid):
         out.append(self.embedder_512(torch.deg2rad(torch.fmod(torch.flatten(90 - torch.Tensor([elevation])), 360.0))))
         out.append(self.embedder_512(torch.deg2rad(torch.fmod(torch.flatten(torch.Tensor([azimuth])), 360.0))))
 
-        out = list(map(lambda a: utils.resize_to_batch_size(a, noise.shape[0]), out))
+        out = list(map(lambda a: mono.resize_to_batch_size(a, noise.shape[0]), out))
         return torch.cat(out, dim=1)
 
 
@@ -440,7 +437,7 @@ class Stable_Zero123(BaseModel):
     def __init__(self, model_config, model_type=ModelType.EPS, device=None, cc_projection_weight=None,
                  cc_projection_bias=None):
         super().__init__(model_config, model_type, device=device)
-        self.cc_projection = comfy.ops.manual_cast.Linear(cc_projection_weight.shape[1], cc_projection_weight.shape[0],
+        self.cc_projection = mono.manual_cast.Linear(cc_projection_weight.shape[1], cc_projection_weight.shape[0],
                                                           dtype=self.get_dtype(), device=device)
         self.cc_projection.weight.copy_(cc_projection_weight)
         self.cc_projection.bias.copy_(cc_projection_bias)
@@ -455,17 +452,17 @@ class Stable_Zero123(BaseModel):
             latent_image = torch.zeros_like(noise)
 
         if latent_image.shape[1:] != noise.shape[1:]:
-            latent_image = utils.common_upscale(latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
+            latent_image = mono.common_upscale(latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
 
-        latent_image = utils.resize_to_batch_size(latent_image, noise.shape[0])
+        latent_image = mono.resize_to_batch_size(latent_image, noise.shape[0])
 
-        out['c_concat'] = comfy.conds.CONDNoiseShape(latent_image)
+        out['c_concat'] = mono.CONDNoiseShape(latent_image)
 
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
             if cross_attn.shape[-1] != 768:
                 cross_attn = self.cc_projection(cross_attn)
-            out['c_crossattn'] = comfy.conds.CONDCrossAttn(cross_attn)
+            out['c_crossattn'] = mono.CONDCrossAttn(cross_attn)
         return out
 
 
@@ -490,16 +487,16 @@ class SD_X4Upscaler(BaseModel):
             image = torch.zeros_like(noise)[:, :3]
 
         if image.shape[1:] != noise.shape[1:]:
-            image = utils.common_upscale(image.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
+            image = mono.common_upscale(image.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
 
         noise_level = torch.tensor([noise_level], device=device)
         if noise_augment > 0:
             image, noise_level = self.noise_augmentor(image.to(device), noise_level=noise_level, seed=seed)
 
-        image = utils.resize_to_batch_size(image, noise.shape[0])
+        image = mono.resize_to_batch_size(image, noise.shape[0])
 
-        out['c_concat'] = comfy.conds.CONDNoiseShape(image)
-        out['y'] = comfy.conds.CONDRegular(noise_level)
+        out['c_concat'] = mono.CONDNoiseShape(image)
+        out['y'] = mono.CONDRegular(noise_level)
         return out
 
 
@@ -515,14 +512,14 @@ class IP2P:
             image = torch.zeros_like(noise)
 
         if image.shape[1:] != noise.shape[1:]:
-            image = utils.common_upscale(image.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
+            image = mono.common_upscale(image.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
 
-        image = utils.resize_to_batch_size(image, noise.shape[0])
+        image = mono.resize_to_batch_size(image, noise.shape[0])
 
-        out['c_concat'] = comfy.conds.CONDNoiseShape(self.process_ip2p_image_in(image))
+        out['c_concat'] = mono.CONDNoiseShape(self.process_ip2p_image_in(image))
         adm = self.encode_adm(**kwargs)
         if adm is not None:
-            out['y'] = comfy.conds.CONDRegular(adm)
+            out['y'] = mono.CONDRegular(adm)
         return out
 
 
@@ -550,7 +547,7 @@ class StableCascade_C(BaseModel):
         out = {}
         clip_text_pooled = kwargs["pooled_output"]
         if clip_text_pooled is not None:
-            out['clip_text_pooled'] = comfy.conds.CONDRegular(clip_text_pooled)
+            out['clip_text_pooled'] = mono.CONDRegular(clip_text_pooled)
 
         if "unclip_conditioning" in kwargs:
             embeds = []
@@ -560,13 +557,13 @@ class StableCascade_C(BaseModel):
             clip_img = torch.cat(embeds, dim=1)
         else:
             clip_img = torch.zeros((1, 1, 768))
-        out["clip_img"] = comfy.conds.CONDRegular(clip_img)
-        out["sca"] = comfy.conds.CONDRegular(torch.zeros((1,)))
-        out["crp"] = comfy.conds.CONDRegular(torch.zeros((1,)))
+        out["clip_img"] = mono.CONDRegular(clip_img)
+        out["sca"] = mono.CONDRegular(torch.zeros((1,)))
+        out["crp"] = mono.CONDRegular(torch.zeros((1,)))
 
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
-            out['clip_text'] = comfy.conds.CONDCrossAttn(cross_attn)
+            out['clip_text'] = mono.CONDCrossAttn(cross_attn)
         return out
 
 
@@ -581,13 +578,13 @@ class StableCascade_B(BaseModel):
 
         clip_text_pooled = kwargs["pooled_output"]
         if clip_text_pooled is not None:
-            out['clip'] = comfy.conds.CONDRegular(clip_text_pooled)
+            out['clip'] = mono.CONDRegular(clip_text_pooled)
 
         # size of prior doesn't really matter if zeros because it gets resized but I still want it to get batched
         prior = kwargs.get("stable_cascade_prior",
                            torch.zeros((1, 16, (noise.shape[2] * 4) // 42, (noise.shape[3] * 4) // 42),
                                        dtype=noise.dtype, layout=noise.layout, device=noise.device))
 
-        out["effnet"] = comfy.conds.CONDRegular(prior)
-        out["sca"] = comfy.conds.CONDRegular(torch.zeros((1,)))
+        out["effnet"] = mono.CONDRegular(prior)
+        out["sca"] = mono.CONDRegular(torch.zeros((1,)))
         return out
