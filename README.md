@@ -1,7 +1,8 @@
 # LightDiffusion
 
 The purpose of this repository and project is to remake the famous stable-diffusion in only one python script, with the
-least number of lines and in the least complex way.
+least number of lines and in the least complex way. It's made by retro-engineering Stable-Diffusion, ComfyUI and
+SDWebUI.
 
 ## Features
 
