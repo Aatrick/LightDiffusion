@@ -1182,7 +1182,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         self.num_layers = 12
 
         if textmodel_json_config is None:
-            textmodel_json_config = ".\\_internal\\sd1_clip_config.json"
+            textmodel_json_config = ".\\_internal\\clip\\sd1_clip_config.json"
         config = config_class.from_json_file(textmodel_json_config)
         self.num_layers = config.num_hidden_layers
         with use_comfy_ops(device, dtype):
@@ -3655,7 +3655,7 @@ class UpscaleModelLoader:
     CATEGORY = "loaders"
 
     def load_model(self, model_name):
-        model_path = f".\\_internal\\{model_name}"
+        model_path = f".\\_internal\\ERSGAN\\{model_name}"
         sd = load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
             sd = state_dict_prefix_replace(sd, {"module.": ""})
@@ -3772,7 +3772,7 @@ def load_parameters_from_file():
     return prompt, neg, width, height, cfg
 
 
-files = glob.glob('*.safetensors')
+files = glob.glob('.\\_internal\\checkpoints\\*.safetensors')
 
 class App(tk.Tk):  # TODO : Add LoRa support
     def __init__(self):

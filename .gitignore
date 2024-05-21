@@ -4,3 +4,6 @@
 *.safetensors
 *.png
 /.idea
+/htmlcov
+.coverage
+.toml
