@@ -1,0 +1,5 @@
+prompt: ****, 1girl, solo, long hair, white hair, masterpiece, full shot, (sitting, sitting in blood, waruza), particles, reflections, petals, rose petals, reflections on blood, dramatic light, (blood, blood pool), red dress, simple background
+neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic)
+w: 512
+h: 1024
+cfg: 10
