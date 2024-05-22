@@ -1,7 +1,34 @@
+from __future__ import annotations
 import os
 import random
 import sys
 from typing import Literal
+import contextlib
+import copy
+import glob
+import logging
+import os
+import pickle
+import random
+import threading
+import tkinter as tk
+import uuid
+from contextlib import contextmanager
+from tkinter import *
+from tkinter import filedialog
+
+import customtkinter as ctk
+import numpy as np
+import psutil
+import requests
+import safetensors.torch
+import torch
+import torch as th
+import torch.nn as nn
+from PIL import Image, ImageTk
+from einops import rearrange
+from tqdm.auto import trange, tqdm
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextConfig, modeling_utils
 
 from PIL import ImageSequence, UnidentifiedImageError, ImageFile
 from PIL.PngImagePlugin import PngInfo
@@ -469,7 +496,6 @@ class Empty:
 
 class Unpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        # TODO: safe unpickle
         if module.startswith("pytorch_lightning"):
             return Empty
         return super().find_class(module, name)
@@ -934,7 +960,7 @@ class AdamWwithEMAandWings(optim.Optimizer):
         params,
         lr=1.0e-3,
         betas=(0.9, 0.999),
-        eps=1.0e-8,  # TODO: check hyperparameters before using
+        eps=1.0e-8,
         weight_decay=1.0e-2,
         amsgrad=False,
         ema_decay=0.9999,  # ema decay to match previous code
@@ -3627,7 +3653,7 @@ def model_lora_keys_clip(model, key_map={}):
 
     text_model_lora_key = "lora_te_text_model_encoder_layers_{}_{}"
     clip_l_present = False
-    for b in range(32):  # TODO: clean up
+    for b in range(32):
         for c in LORA_CLIP_MAP:
             k = "clip_h.transformer.text_model.encoder.layers.{}.{}.weight".format(b, c)
             if k in sdk:
@@ -3670,7 +3696,7 @@ def model_lora_keys_clip(model, key_map={}):
                 else:
                     lora_key = "lora_te_text_model_encoder_layers_{}_{}".format(
                         b, LORA_CLIP_MAP[c]
-                    )  # TODO: test if this is correct for SDXL-Refiner
+                    )
                     key_map[lora_key] = k
                     lora_key = "text_encoder.text_model.encoder.layers.{}.{}".format(
                         b, c
@@ -3678,13 +3704,13 @@ def model_lora_keys_clip(model, key_map={}):
                     key_map[lora_key] = k
                     lora_key = "lora_prior_te_text_model_encoder_layers_{}_{}".format(
                         b, LORA_CLIP_MAP[c]
-                    )  # cascade lora: TODO put lora key prefix in the model config
+                    )  # cascade lora:
                     key_map[lora_key] = k
 
     k = "clip_g.transformer.text_projection.weight"
     if k in sdk:
         key_map["lora_prior_te_text_projection"] = k  # cascade lora?
-        # key_map["text_encoder.text_projection"] = k #TODO: check if other lora have the text_projection too
+        # key_map["text_encoder.text_projection"] = k
         # key_map["lora_te_text_projection"] = k
 
     return key_map
@@ -3698,7 +3724,7 @@ def model_lora_keys_unet(model, key_map={}):
             key_lora = k[len("diffusion_model.") : -len(".weight")].replace(".", "_")
             key_map["lora_unet_{}".format(key_lora)] = k
             key_map["lora_prior_unet_{}".format(key_lora)] = (
-                k  # cascade lora: TODO put lora key prefix in the model config
+                k  # cascade lora:
             )
 
     diffusers_keys = unet_to_diffusers(model.model_config.unet_config)
@@ -3719,7 +3745,7 @@ def model_lora_keys_unet(model, key_map={}):
     return key_map
 
 
-def lcm(a, b):  # TODO: eventually replace by math.lcm (added in python3.9)
+def lcm(a, b):
     return abs(a * b) // math.gcd(a, b)
 
 
@@ -6551,7 +6577,7 @@ if args.directml is not None:
         )
     )
     # torch_directml.disable_tiled_resources(True)
-    lowvram_available = False  # TODO: need to find a way to get free memory in directml before this can be enabled by default.
+    lowvram_available = False
 
 try:
     import intel_extension_for_pytorch as ipex
@@ -6608,7 +6634,7 @@ def get_total_memory(dev=None, torch_total_too=False):
         mem_total_torch = mem_total
     else:
         if directml_enabled:
-            mem_total = 1024 * 1024 * 1024  # TODO
+            mem_total = 1024 * 1024 * 1024
             mem_total_torch = mem_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
@@ -6963,7 +6989,7 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False):
             loaded = current_loaded_models[loaded_model_index]
             if loaded.should_reload_model(
                 force_patch_weights=force_patch_weights
-            ):  # TODO: cleanup this model reload logic
+            ):
                 current_loaded_models.pop(loaded_model_index).model_unload(
                     unpatch_weights=True
                 )
@@ -7058,7 +7084,6 @@ def cleanup_models(keep_clone_weights_loaded=False):
         if sys.getrefcount(current_loaded_models[i].model) <= 2:
             if not keep_clone_weights_loaded:
                 to_delete = [i] + to_delete
-            # TODO: find a less fragile way to do this.
             elif (
                 sys.getrefcount(current_loaded_models[i].real_model) <= 3
             ):  # references from .real_model + the .model
@@ -7224,7 +7249,7 @@ def get_autocast_device(dev):
     return "cuda"
 
 
-def supports_dtype(device, dtype):  # TODO
+def supports_dtype(device, dtype):
     if dtype == torch.float32:
         return True
     if is_device_cpu(device):
@@ -7240,7 +7265,7 @@ def device_supports_non_blocking(device):
     if is_device_mps(device):
         return False  # pytorch bug? mps doesn't support non blocking
     return False
-    # return True #TODO: figure out why this causes issues
+    # return True
 
 
 def cast_to_device(tensor, device, dtype, copy=False):
@@ -7298,7 +7323,6 @@ def pytorch_attention_enabled():
 def pytorch_attention_flash_attention():
     global ENABLE_PYTORCH_ATTENTION
     if ENABLE_PYTORCH_ATTENTION:
-        # TODO: more reliable way of checking for flash attention?
         if is_nvidia():  # pytorch flash attention only works on Nvidia
             return True
     return False
@@ -7314,7 +7338,7 @@ def get_free_memory(dev=None, torch_free_too=False):
         mem_free_torch = mem_free_total
     else:
         if directml_enabled:
-            mem_free_total = 1024 * 1024 * 1024  # TODO
+            mem_free_total = 1024 * 1024 * 1024
             mem_free_torch = mem_free_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
@@ -7412,7 +7436,6 @@ def should_use_fp16(
     fp16_works = False
     # FP16 is confirmed working on a 1080 (GP104) but it's a bit slower than FP32 so it should only be enabled
     # when the model doesn't actually fit on the card
-    # TODO: actually test if GP106 and others have the same type of behavior
     nvidia_10_series = [
         "1080",
         "1070",
@@ -7469,10 +7492,10 @@ def should_use_bf16(
     device=None, model_params=0, prioritize_performance=True, manual_cast=False
 ):
     if device is not None:
-        if is_device_cpu(device):  # TODO ? bf16 works on CPU but is extremely slow
+        if is_device_cpu(device):
             return False
 
-    if device is not None:  # TODO not sure about mps bf16 support
+    if device is not None:
         if is_device_mps(device):
             return False
 
@@ -7523,11 +7546,11 @@ def unload_all_models():
     free_memory(1e30, get_torch_device())
 
 
-def resolve_lowvram_weight(weight, model, key):  # TODO: remove
+def resolve_lowvram_weight(weight, model, key):
     return weight
 
 
-# TODO: might be cleaner to put this somewhere else
+
 import threading
 
 
@@ -7593,7 +7616,7 @@ def convert_cond(cond):
         temp = c[1].copy()
         model_conds = temp.get("model_conds", {})
         if c[0] is not None:
-            model_conds["c_crossattn"] = CONDCrossAttn(c[0])  # TODO: remove
+            model_conds["c_crossattn"] = CONDCrossAttn(c[0])
             temp["cross_attn"] = c[0]
         temp["model_conds"] = model_conds
         out.append(temp)
@@ -8086,7 +8109,7 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
 
 def calc_cond_uncond_batch(
     model, cond, uncond, x_in, timestep, model_options
-):  # TODO: remove
+):
     logging.warning(
         "WARNING: The comfy.samplers.calc_cond_uncond_batch function is deprecated please use the calc_cond_batch one instead."
     )
@@ -8344,7 +8367,7 @@ def create_cond_with_same_area_if_none(conds, c):
     out = c.copy()
     out["model_conds"] = smallest[
         "model_conds"
-    ].copy()  # TODO: which fields should be copied?
+    ].copy()
     conds += [out]
 
 
@@ -8495,7 +8518,7 @@ class KSAMPLER(Sampler):
         model_k.latent_image = latent_image
         if self.inpaint_options.get(
             "random", False
-        ):  # TODO: Should this be the default?
+        ):
             generator = torch.manual_seed(extra_args.get("seed", 41) + 1)
             model_k.noise = (
                 torch.randn(noise.shape, generator=generator, device="cpu")
@@ -10006,11 +10029,11 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         ddconfig = kwargs.pop("ddconfig")
         super().__init__(
             encoder_config={
-                "target": "workflow_api.Encoder",
+                "target": "LightDiffusion.Encoder",
                 "params": ddconfig,
             },
             decoder_config={
-                "target": "workflow_api.Decoder",
+                "target": "LightDiffusion.Decoder",
                 "params": ddconfig,
             },
             **kwargs,
@@ -10074,7 +10097,7 @@ class AutoencoderKL(AutoencodingEngineLegacy):
         if "lossconfig" in kwargs:
             kwargs["loss_config"] = kwargs.pop("lossconfig")
         super().__init__(
-            regularizer_config={"target": ("workflow_api.DiagonalGaussianRegularizer")},
+            regularizer_config={"target": ("LightDiffusion.DiagonalGaussianRegularizer")},
             **kwargs,
         )
 
@@ -10933,7 +10956,7 @@ def attention_basic(q, k, v, heads, mask=None):
         if mask.dtype == torch.bool:
             mask = rearrange(
                 mask, "b ... -> b (...)"
-            )  # TODO: check if this bool part matches pytorch attention
+            )
             max_neg_value = -torch.finfo(sim.dtype).max
             mask = repeat(mask, "b j -> (b h) () j", h=h)
             sim.masked_fill_(~mask, max_neg_value)
@@ -11158,7 +11181,7 @@ optimized_attention_masked = optimized_attention
 def optimized_attention_for_device(device, mask=False, small_input=False):
     if small_input:
         if pytorch_attention_enabled():
-            return attention_pytorch  # TODO: need to confirm but this is probably slightly faster for small inputs in all cases
+            return attention_pytorch
         else:
             return attention_basic
 
@@ -11710,7 +11733,7 @@ class SpatialVideoTransformer(SpatialTransformer):
 
             B, S, C = x_mix.shape
             x_mix = rearrange(x_mix, "(b t) s c -> (b s) t c", t=timesteps)
-            x_mix = mix_block(x_mix, context=time_context)  # TODO: transformer_options
+            x_mix = mix_block(x_mix, context=time_context)
             x_mix = rearrange(
                 x_mix, "(b s) t c -> (b t) s c", s=S, b=B // timesteps, c=C, t=timesteps
             )
@@ -12045,7 +12068,6 @@ class CLIPVision(torch.nn.Module):
     def forward(self, pixel_values, attention_mask=None, intermediate_output=None):
         x = self.embeddings(pixel_values)
         x = self.pre_layrnorm(x)
-        # TODO: attention_mask?
         x, i = self.encoder(x, mask=None, intermediate_output=intermediate_output)
         pooled_output = self.post_layernorm(x[:, 0, :])
         return x, i, pooled_output
@@ -16710,11 +16732,9 @@ class BaseModel(torch.nn.Module):
             dtype = self.get_dtype()
             if self.manual_cast_dtype is not None:
                 dtype = self.manual_cast_dtype
-            # TODO: this needs to be tweaked
             area = input_shape[0] * input_shape[2] * input_shape[3]
             return (area * dtype_size(dtype) / 50) * (1024 * 1024)
         else:
-            # TODO: this formula might be too aggressive since I tweaked the sub-quad and split algorithms to use less memory.
             area = input_shape[0] * input_shape[2] * input_shape[3]
             return (((area * 0.6) / 0.9) + 1024) * (1024 * 1024)
 
@@ -19102,7 +19122,7 @@ def ctrload_controlnet(ckpt_path, model=None):
     filename = os.path.splitext(ckpt_path)[0]
     if filename.endswith("_shuffle") or filename.endswith(
         "_shuffle_fp16"
-    ):  # TODO: smarter way of enabling global_average_pooling
+    ):
         global_average_pooling = True
 
     control = ctrControlNet(
@@ -19467,14 +19487,14 @@ class VAE:
                 decoder_config["alpha"] = 0.0
                 self.first_stage_model = AutoencodingEngine(
                     regularizer_config={
-                        "target": "workflow_api.DiagonalGaussianRegularizer"
+                        "target": "LightDiffusion.DiagonalGaussianRegularizer"
                     },
                     encoder_config={
-                        "target": "workflow_api.Encoder",
+                        "target": "LightDiffusion.Encoder",
                         "params": encoder_config,
                     },
                     decoder_config={
-                        "target": "workflow_api.VideoDecoder",
+                        "target": "LightDiffusion.VideoDecoder",
                         "params": decoder_config,
                     },
                 )
@@ -19484,7 +19504,6 @@ class VAE:
                 self.first_stage_model = StageA()
                 self.downscale_ratio = 4
                 self.upscale_ratio = 4
-                # TODO
                 # self.memory_used_encode
                 # self.memory_used_decode
                 self.process_input = lambda image: image
@@ -19547,14 +19566,14 @@ class VAE:
                 else:
                     self.first_stage_model = AutoencodingEngine(
                         regularizer_config={
-                            "target": "workflow_api.DiagonalGaussianRegularizer"
+                            "target": "LightDiffusion.DiagonalGaussianRegularizer"
                         },
                         encoder_config={
-                            "target": "workflow_api.Encoder",
+                            "target": "LightDiffusion.Encoder",
                             "params": ddconfig,
                         },
                         decoder_config={
-                            "target": "workflow_api.Decoder",
+                            "target": "LightDiffusion.Decoder",
                             "params": ddconfig,
                         },
                     )
@@ -19908,7 +19927,6 @@ def load_checkpoint(
         embedding_directory=embedding_directory,
         output_model=True,
     )
-    # TODO: this function is a mess and should be removed eventually
     if config is None:
         with open(config_path, "r") as stream:
             config = yaml.safe_load(stream)
@@ -20463,20 +20481,6 @@ MAX_RESOLUTION = 16384
 
 
 class CLIPTextEncode:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "text": ("STRING", {"multiline": True, "dynamicPrompts": True}),
-                "clip": ("CLIP",),
-            }
-        }
-
-    RETURN_TYPES = ("CONDITIONING",)
-    FUNCTION = "encode"
-
-    CATEGORY = "conditioning"
-
     def encode(self, clip, text):
         tokens = clip.tokenize(text)
         cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
@@ -20527,7 +20531,7 @@ class CheckpointLoaderSimple:
     CATEGORY = "loaders"
 
     def load_checkpoint(self, ckpt_name, output_vae=True, output_clip=True):
-        ckpt_path = get_full_path("checkpoints", ckpt_name)
+        ckpt_path = f"{ckpt_name}"
         out = load_checkpoint_guess_config(
             ckpt_path,
             output_vae=True,
@@ -23575,94 +23579,179 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 
-def main():
-    with torch.inference_mode():
-        checkpointloadersimple = CheckpointLoaderSimple()
-        checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
-            ckpt_name="meinamix_meinaV11.safetensors"
-        )
+def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
+    with open('.\\_internal\\prompt.txt', 'w') as f:
+        f.write(f'prompt: {prompt_entry}')
+        f.write(f'neg: {neg}')
+        f.write(f'w: {int(width)}\n')
+        f.write(f'h: {int(height)}\n')
+        f.write(f'cfg: {int(cfg)}\n')
 
-        loraloader = LoraLoader()
-        loraloader_274 = loraloader.load_lora(
-            lora_name="add_detail.safetensors",
-            strength_model=-2,
-            strength_clip=-2,
-            model=checkpointloadersimple_241[0],
-            clip=checkpointloadersimple_241[1],
-        )
 
-        clipsetlastlayer = CLIPSetLastLayer()
-        clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
-            stop_at_clip_layer=-2, clip=loraloader_274[1]
-        )
+def load_parameters_from_file():
+    with open('.\\_internal\\prompt.txt', 'r') as f:
+        lines = f.readlines()
+        parameters = {}
+        for line in lines:
+            # Skip empty lines
+            if line.strip() == "":
+                continue
+            key, value = line.split(': ')
+            parameters[key] = value.strip() 
+        prompt = parameters['prompt']
+        neg = parameters['neg']
+        width = int(parameters['w'])
+        height = int(parameters['h'])
+        cfg = int(parameters['cfg'])
+    return prompt, neg, width, height, cfg
 
-        cliptextencode = CLIPTextEncode()
-        cliptextencode_242 = cliptextencode.encode(
-            text="****, masterpiece, best quality, (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl,((colourful paint splashes on transparent background, dulux,)), ((caustic)), dynamic angle,beautiful detailed glow,full body, cowboy shot",
-            clip=clipsetlastlayer_257[0],
-        )
 
-        cliptextencode_243 = cliptextencode.encode(
-            text="' (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic) '",
-            clip=clipsetlastlayer_257[0],
-        )
+files = glob.glob('.\\_internal\\checkpoints\\*.safetensors')
 
-        emptylatentimage = EmptyLatentImage()
-        emptylatentimage_244 = emptylatentimage.generate(
-            width=512, height=1024, batch_size=1
-        )
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
 
-        upscalemodelloader = UpscaleModelLoader()
-        upscalemodelloader_251 = upscalemodelloader.load_model(
-            model_name="RealESRGAN_x4plus_anime_6B.pth"
-        )
+        self.title('LightDiffusion')
+        self.geometry('800x600')
 
-        ksampler = KSampler2()
-        latentupscale = LatentUpscale()
-        vaedecode = VAEDecode()
-        ultimatesdupscale = UltimateSDUpscale()
-        saveimage = SaveImage()
+        selected_file = tk.StringVar()
+        if files:
+            selected_file.set(files[0])
 
-        for q in range(1):
-            ksampler_239 = ksampler.sample(
-                seed=random.randint(1, 2**64),
-                steps=50,
-                cfg=10,
-                sampler_name="dpm_adaptive",
-                scheduler="karras",
-                denoise=1,
-                model=loraloader_274[0],
-                positive=cliptextencode_242[0],
-                negative=cliptextencode_243[0],
-                latent_image=emptylatentimage_244[0],
+        # Create a frame for the sidebar
+        self.sidebar = tk.Frame(self, width=200, bg='black')
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Text input for the prompt
+        self.prompt_entry = ctk.CTkTextbox(self.sidebar, width=400, height=200)
+        self.prompt_entry.pack(pady=10, padx=10)
+
+        self.neg = ctk.CTkTextbox(self.sidebar, width=400, height=50)
+        self.neg.pack(pady=10, padx=10)
+
+        self.dropdown = ctk.CTkOptionMenu(self.sidebar, values=files)
+        self.dropdown.pack()
+
+        # Sliders for the resolution
+        self.width_label = ctk.CTkLabel(self.sidebar, text="")
+        self.width_label.pack()
+        self.width_slider = ctk.CTkSlider(self.sidebar, from_=1, to=2048, number_of_steps=2047)
+        self.width_slider.pack()
+
+        self.height_label = ctk.CTkLabel(self.sidebar, text="")
+        self.height_label.pack()
+        self.height_slider = ctk.CTkSlider(self.sidebar, from_=1, to=2048, number_of_steps=2047)
+        self.height_slider.pack()
+
+        self.cfg_label = ctk.CTkLabel(self.sidebar, text="")
+        self.cfg_label.pack()
+        self.cfg_slider = ctk.CTkSlider(self.sidebar, from_=1, to=15, number_of_steps=14)
+        self.cfg_slider.pack()
+
+        # checkbox for hiresfix
+        self.hires_fix_var = tk.BooleanVar()
+
+        self.hires_fix_checkbox = ctk.CTkCheckBox(self.sidebar, text="Hires Fix", variable=self.hires_fix_var,
+                                                  command=self.print_hires_fix)
+        self.hires_fix_checkbox.pack()
+
+        # Button to launch the generation
+        self.generate_button = ctk.CTkButton(self.sidebar, text="Generate", command=self.generate_image)
+        self.generate_button.pack(pady=20)
+
+        # Create a frame for the image display, without border
+        self.display = tk.Frame(self, bg='black', border=0)
+        self.display.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
+
+        # Label to display the generated image
+        self.image_label = tk.Label(self.display, bg='black')# TODO: adapt to window size
+        self.image_label.pack(pady=20)
+
+        self.ckpt = None
+
+        # load the checkpoint on an another thread
+        threading.Thread(target=self._prep, daemon=True).start()
+
+        # add an img2img button, the button opens the file selector, run img2img on the selected image
+        self.img2img_button = ctk.CTkButton(self.sidebar, text="img2img", command=self.img2img)
+        self.img2img_button.pack()
+
+        prompt, neg, width, height, cfg = load_parameters_from_file()
+        self.prompt_entry.insert(tk.END, prompt)
+        self.neg.insert(tk.END, neg)
+        self.width_slider.set(width)
+        self.height_slider.set(height)
+        self.cfg_slider.set(cfg)
+
+        self.width_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.height_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.cfg_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.update_labels()
+        self.prompt_entry.bind("<KeyRelease>",
+                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                      self.neg.get("1.0", tk.END),
+                                                                      self.width_slider.get(),
+                                                                      self.height_slider.get(), self.cfg_slider.get()))
+        self.neg.bind("<KeyRelease>",
+                      lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                             self.neg.get("1.0", tk.END),
+                                                             self.width_slider.get(),
+                                                             self.height_slider.get(), self.cfg_slider.get()))
+        self.width_slider.bind("<ButtonRelease-1>",
+                               lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                      self.neg.get("1.0", tk.END),
+                                                                      self.width_slider.get(), self.height_slider.get(),
+                                                                      self.cfg_slider.get()))
+        self.height_slider.bind("<ButtonRelease-1>",
+                                lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                       self.neg.get("1.0", tk.END),
+                                                                       self.width_slider.get(),
+                                                                       self.height_slider.get(),
+                                                                       self.cfg_slider.get()))
+        self.cfg_slider.bind("<ButtonRelease-1>",
+                             lambda event: write_parameters_to_file(self.prompt_entry.get("1.0", tk.END),
+                                                                    self.neg.get("1.0", tk.END),
+                                                                    self.width_slider.get(), self.height_slider.get(),
+                                                                    self.cfg_slider.get()))
+        self.display_most_recent_image()
+
+    def _img2img(self, file_path):
+        prompt = self.prompt_entry.get("1.0", tk.END)
+        neg = self.neg.get("1.0", tk.END)
+        w = int(self.width_slider.get())
+        h = int(self.height_slider.get())
+        cfg = int(self.cfg_slider.get())
+        img = Image.open(file_path)
+        img_array = np.array(img)
+        img_tensor = torch.from_numpy(img_array).float().to('cpu') / 255.0
+        img_tensor = img_tensor.unsqueeze(0)
+        with torch.inference_mode():
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader, ultimatesdupscale = self._prep()
+            loraloader = LoraLoader()
+            loraloader_274 = loraloader.load_lora(
+                  lora_name="add_detail.safetensors",
+                  strength_model=0.6,
+                  strength_clip=0.6,
+                  model=checkpointloadersimple_241[0],
+                  clip=checkpointloadersimple_241[1],
             )
-
-            latentupscale_254 = latentupscale.upscale(
-                upscale_method="nearest-exact",
-                width=1024,
-                height=2048,
-                crop="disabled",
-                samples=ksampler_239[0],
+            
+            clipsetlastlayer = CLIPSetLastLayer()
+            clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
+                        stop_at_clip_layer=-2, clip=loraloader_274[1]
             )
-
-            ksampler_253 = ksampler.sample(
-                seed=random.randint(1, 2**64),
-                steps=10,
-                cfg=8,
-                sampler_name="euler_ancestral",
-                scheduler="normal",
-                denoise=0.45,
-                model=loraloader_274[0],
-                positive=cliptextencode_242[0],
-                negative=cliptextencode_243[0],
-                latent_image=latentupscale_254[0],
+        
+            cliptextencode_242 = cliptextencode.encode(
+                text=prompt,
+                clip=clipsetlastlayer_257[0],
             )
-
-            vaedecode_240 = vaedecode.decode(
-                samples=ksampler_253[0],
-                vae=checkpointloadersimple_241[2],
+            cliptextencode_243 = cliptextencode.encode(
+                text=neg,
+                clip=clipsetlastlayer_257[0],
             )
-
+            upscalemodelloader_244 = upscalemodelloader.load_model("RealESRGAN_x4plus_anime_6B.pth")
+            app.title('LightDiffusion - Upscaling')
             ultimatesdupscale_250 = ultimatesdupscale.upscale(
                 upscale_by=2,
                 seed=random.randint(1, 2**64),
@@ -23682,19 +23771,185 @@ def main():
                 seam_fix_mask_blur=16,
                 seam_fix_padding=32,
                 force_uniform_tiles="enable",
-                image=vaedecode_240[0],
+                image=img_tensor,
                 model=loraloader_274[0],
                 positive=cliptextencode_242[0],
                 negative=cliptextencode_243[0],
                 vae=checkpointloadersimple_241[2],
-                upscale_model=upscalemodelloader_251[0],
+                upscale_model=upscalemodelloader_244[0],
             )
-
             saveimage_277 = saveimage.save_images(
                 filename_prefix="LD",
                 images=ultimatesdupscale_250[0],
             )
+            for image in ultimatesdupscale_250[0]:
+                i = 255. * image.cpu().numpy()
+                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        img = img.resize((int(w / 2), int(h / 2)))
+        img = ImageTk.PhotoImage(img)
+        self.image_label.after(0, self._update_image_label, img)
+        app.title('LightDiffusion')
+
+    def img2img(self):
+        file_path = filedialog.askopenfilename()
+        if file_path:
+            threading.Thread(target=self._img2img, args=(file_path,), daemon=True).start()
+
+    def print_hires_fix(self):
+        if self.hires_fix_var.get() == True:
+            print("Hires fix is ON")
+        else:
+            print("Hires fix is OFF")
+
+    def generate_image(self):
+        threading.Thread(target=self._generate_image, daemon=True).start()
+
+    def _prep(self):# TODO : Add TensorRT optimization
+        if self.dropdown.get() != self.ckpt:
+            self.ckpt = self.dropdown.get()
+            with torch.inference_mode():
+                self.checkpointloadersimple = CheckpointLoaderSimple()
+                self.checkpointloadersimple_241 = self.checkpointloadersimple.load_checkpoint(
+                    ckpt_name=self.ckpt
+                )
+                self.cliptextencode = CLIPTextEncode()
+                self.emptylatentimage = EmptyLatentImage()
+                self.ksampler_instance = KSampler2()
+                self.vaedecode = VAEDecode()
+                self.saveimage = SaveImage()
+                self.latent_upscale = LatentUpscale()
+                self.upscalemodelloader = UpscaleModelLoader()
+                self.ultimatesdupscale = UltimateSDUpscale()
+        return self.checkpointloadersimple_241, self.cliptextencode, self.emptylatentimage, self.ksampler_instance, self.vaedecode, self.saveimage, self.latent_upscale, self.upscalemodelloader, self.ultimatesdupscale
+
+    def _generate_image(self):
+        prompt = self.prompt_entry.get("1.0", tk.END)
+        neg = self.neg.get("1.0", tk.END)
+        w = int(self.width_slider.get())
+        h = int(self.height_slider.get())
+        cfg = int(self.cfg_slider.get())
+        with torch.inference_mode():
+            checkpointloadersimple_241, cliptextencode, emptylatentimage, ksampler_instance, vaedecode, saveimage, latentupscale, upscalemodelloader, ultimatesdupscale = self._prep()
+            
+            loraloader = LoraLoader()
+            loraloader_274 = loraloader.load_lora(
+                  lora_name="add_detail.safetensors",
+                  strength_model=0.6,
+                  strength_clip=0.6,
+                  model=checkpointloadersimple_241[0],
+                  clip=checkpointloadersimple_241[1],
+            )
+            
+            clipsetlastlayer = CLIPSetLastLayer()
+            clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
+                        stop_at_clip_layer=-2, clip=loraloader_274[1]
+            )
+
+            cliptextencode_242 = cliptextencode.encode(
+                text=prompt,
+                clip=clipsetlastlayer_257[0],
+            )
+            cliptextencode_243 = cliptextencode.encode(
+                text=neg,
+                clip=clipsetlastlayer_257[0],
+            )
+            emptylatentimage_244 = emptylatentimage.generate(
+                width=w, height=h, batch_size=1
+            )
+            ksampler_239 = ksampler_instance.sample(
+                seed=random.randint(1, 2 ** 64),
+                steps=300,
+                cfg=cfg,
+                sampler_name="dpm_adaptive",
+                scheduler="karras",
+                denoise=1,
+                model=loraloader_274[0],
+                positive=cliptextencode_242[0],
+                negative=cliptextencode_243[0],
+                latent_image=emptylatentimage_244[0],
+            )
+            if self.hires_fix_var.get() == True:
+                latentupscale_254 = latentupscale.upscale(
+                    upscale_method="nearest-exact",
+                    width=w * 2,
+                    height=h * 2,
+                    crop="disabled",
+                    samples=ksampler_239[0],
+                )
+                ksampler_253 = ksampler_instance.sample(
+                    seed=random.randint(1, 2 ** 64),
+                    steps=10,
+                    cfg=8,
+                    sampler_name="euler_ancestral",
+                    scheduler="normal",
+                    denoise=0.45,
+                    model=loraloader_274[0],
+                    positive=cliptextencode_242[0],
+                    negative=cliptextencode_243[0],
+                    latent_image=latentupscale_254[0],
+                )
+
+                vaedecode_240 = vaedecode.decode(
+                    samples=ksampler_253[0],
+                    vae=checkpointloadersimple_241[2],
+                )
+                saveimage.save_images(
+                    filename_prefix="LD", images=vaedecode_240[0]
+                )
+                for image in vaedecode_240[0]:
+                    i = 255. * image.cpu().numpy()
+                    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            else:
+                vaedecode_240 = vaedecode.decode(
+                    samples=ksampler_239[0],
+                    vae=checkpointloadersimple_241[2],
+                )
+                saveimage.save_images(
+                    filename_prefix="LD", images=vaedecode_240[0]
+                )
+                for image in vaedecode_240[0]:
+                    i = 255. * image.cpu().numpy()
+                    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+
+        # Convert the image to PhotoImage and display it
+        img = img.resize((int(w / 2), int(h / 2)))
+        img = ImageTk.PhotoImage(img)
+        self.image_label.after(0, self._update_image_label, img)
+
+    def _update_image_label(self, img):
+        self.image_label.config(image=img)
+        self.image_label.image = img  # Keep a reference to prevent garbage collection
+
+    def update_labels(self):
+        self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
+        self.height_label.configure(text=f"Height: {int(self.height_slider.get())}")
+        self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
+
+    def display_most_recent_image(self):
+        # Get a list of all image files in the output directory
+        image_files = glob.glob('.\\_internal\\output\\*')
+
+        # If there are no image files, return
+        if not image_files:
+            return
+
+        # Sort the files by modification time in descending order
+        image_files.sort(key=os.path.getmtime, reverse=True)
+
+        # Open the most recent image file
+        img = Image.open(image_files[0])
+
+        # Resize the image if necessary
+        img = img.resize((int(self.width_slider.get() / 2), int(self.height_slider.get() / 2)))
+
+        # Convert the image to PhotoImage
+        img = ImageTk.PhotoImage(img)
+
+        # Display the image
+        self.image_label.config(image=img)
+        self.image_label.image = img
 
 
 if __name__ == "__main__":
-    main()
+    app = App()
+    app.mainloop()
