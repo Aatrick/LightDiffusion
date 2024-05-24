@@ -2534,7 +2534,7 @@ class AbstractAutoencoder(torch.nn.Module):
         self.use_ema = ema_decay is not None
 
 
-class AutoencodingEngine(AbstractAutoencoder):
+class AutoencodingEngine(AbstractAutoencoder):  # TODO : remove abstraction layer
     def __init__(
         self,
         *args,
