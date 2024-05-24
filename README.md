@@ -6,7 +6,7 @@ SDWebUI.
 
 ## Features
 
-- Original Txt2Img, Img2Img (ERSGAN Upscaling)
+- Original Txt2Img, Img2Img (R-ERSGAN4x+ UltimateSDUpscaling DPM++ 2M)
 - One click install and run (once you've added your .safetensors model)
 - Attention syntax
 - Hires-Fix (euler ancestral normal)
@@ -15,7 +15,8 @@ SDWebUI.
 - FP16 and FP32 precision support
 - Saved state in between starts
 - GUI
-- DPM Adaptive and DPM++ 2M Karras
+- DPM Adaptive Karras
 - Clip Skip
+- LoRa and textual inversion (embeddings) support
 
 ![Screenshot 2024-04-26 190424](https://github.com/Aatrick/Aatricks1111/assets/113598245/c127a5c5-1662-485f-b73d-fb1be75538b1)

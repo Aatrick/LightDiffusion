@@ -1,6 +1,7 @@
 
 *.pyc
 *.pth
+*.pt
 *.safetensors
 *.png
 /.idea
