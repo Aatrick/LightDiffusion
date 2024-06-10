@@ -90,15 +90,6 @@ from collections import OrderedDict
 import importlib
 
 
-def instantiate_from_config(config):
-    return get_obj_from_str(config["target"])(**config.get("params", dict()))
-
-
-def get_obj_from_str(string, reload=False):
-    module, cls = string.rsplit(".", 1)
-    return getattr(importlib.import_module(module, package=None), cls)
-
-
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False):
         self.parameters = parameters
@@ -3194,62 +3185,19 @@ class DiagonalGaussianRegularizer(torch.nn.Module):
         return z, log
 
 
-class AbstractAutoencoder(torch.nn.Module):
-    def __init__(
-        self,
-        ema_decay: Union[None, float] = None,
-        monitor: Union[None, str] = None,
-        input_key: str = "jpg",
-        **kwargs,
-    ):
+class AutoencodingEngine(nn.Module):
+    def __init__(self, encoder, decoder, regularizer):
         super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.regularization = regularizer
+        self.post_quant_conv = disable_weight_init.Conv2d(4, 4, 1)
+        self.quant_conv = disable_weight_init.Conv2d(8, 8, 1)
 
-        self.input_key = input_key
-        self.use_ema = ema_decay is not None
-
-
-class AutoencodingEngine(AbstractAutoencoder):
-    def __init__(
-        self,
-        *args,
-        encoder_config: Dict,
-        decoder_config: Dict,
-        regularizer_config: Dict,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-
-        self.encoder: torch.nn.Module = instantiate_from_config(encoder_config)
-        self.decoder: torch.nn.Module = instantiate_from_config(decoder_config)
-        self.regularization: AbstractRegularizer = instantiate_from_config(
-            regularizer_config
-        )
-
-
-class AutoencodingEngineLegacy(AutoencodingEngine):
-    def __init__(self, embed_dim: int, **kwargs):
-        self.max_batch_size = kwargs.pop("max_batch_size", None)
-        ddconfig = kwargs.pop("ddconfig")
-        super().__init__(
-            encoder_config={
-                "target": "LightDiffusion.Encoder",
-                "params": ddconfig,
-            },
-            decoder_config={
-                "target": "LightDiffusion.Decoder",
-                "params": ddconfig,
-            },
-            **kwargs,
-        )
-        self.quant_conv = disable_weight_init.Conv2d(
-            (1 + ddconfig["double_z"]) * ddconfig["z_channels"],
-            (1 + ddconfig["double_z"]) * embed_dim,
-            1,
-        )
-        self.post_quant_conv = disable_weight_init.Conv2d(
-            embed_dim, ddconfig["z_channels"], 1
-        )
-        self.embed_dim = embed_dim
+    def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
+        dec = self.post_quant_conv(z)
+        dec = self.decoder(dec, **decoder_kwargs)
+        return dec
 
     def encode(
         self, x: torch.Tensor, return_reg_log: bool = False
@@ -3259,20 +3207,6 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         z, reg_log = self.regularization(z)
         return z
 
-    def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
-        dec = self.post_quant_conv(z)
-        dec = self.decoder(dec, **decoder_kwargs)
-        return dec
-
-
-class AutoencoderKL(AutoencodingEngineLegacy):  # TODO : Remove abstraction layer
-    def __init__(self, **kwargs):
-        super().__init__(
-            regularizer_config={
-                "target": ("LightDiffusion.DiagonalGaussianRegularizer")
-            },
-            **kwargs,
-        )
 
 import torch.nn as nn
 
@@ -6088,26 +6022,42 @@ class VAE:
         self.process_output = lambda image: torch.clamp(
             (image + 1.0) / 2.0, min=0.0, max=1.0
         )
-        ddconfig = {
-            "double_z": True,
-            "z_channels": 4,
-            "resolution": 256,
-            "in_channels": 3,
-            "out_ch": 3,
-            "ch": 128,
-            "ch_mult": [1, 2, 4, 4],
-            "num_res_blocks": 2,
-            "attn_resolutions": [],
-            "dropout": 0.0,
-        }
-
-        self.latent_channels = ddconfig["z_channels"] = sd[
-            "decoder.conv_in.weight"
-        ].shape[1]
-        self.first_stage_model = AutoencoderKL(ddconfig=ddconfig, embed_dim=4)
+        if config is None:
+            config = {
+                "encoder": {
+                    "double_z": True,
+                    "z_channels": 4,
+                    "resolution": 256,
+                    "in_channels": 3,
+                    "out_ch": 3,
+                    "ch": 128,
+                    "ch_mult": [1, 2, 4, 4],
+                    "num_res_blocks": 2,
+                    "attn_resolutions": [],
+                    "dropout": 0.0,
+                },
+                "decoder": {
+                    "double_z": True,
+                    "z_channels": 4,
+                    "resolution": 256,
+                    "in_channels": 3,
+                    "out_ch": 3,
+                    "ch": 128,
+                    "ch_mult": [1, 2, 4, 4],
+                    "num_res_blocks": 2,
+                    "attn_resolutions": [],
+                    "dropout": 0.0,
+                },
+                "regularizer": {"sample": True},
+            }
+            self.first_stage_model = AutoencodingEngine(
+                Encoder(**config["encoder"]),
+                Decoder(**config["decoder"]),
+                DiagonalGaussianRegularizer(**config["regularizer"]),
+            )
         self.first_stage_model = self.first_stage_model.eval()
 
-        m, u = self.first_stage_model.load_state_dict(sd, strict=False)
+        self.first_stage_model.load_state_dict(sd, strict=False)
 
         if device is None:
             device = vae_device()
@@ -8365,6 +8315,8 @@ def load_parameters_from_file():
 
 
 files = glob.glob(".\\_internal\\checkpoints\\*.safetensors")
+loras = glob.glob(".\\_internal\\loras\\*.safetensors")
+loras += glob.glob(".\\_internal\\loras\\*.pt")
 
 
 class App(tk.Tk):
@@ -8372,7 +8324,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title("LightDiffusion")
-        self.geometry("800x610")
+        self.geometry("800x650")
 
         selected_file = tk.StringVar()
         if files:
@@ -8391,6 +8343,9 @@ class App(tk.Tk):
 
         self.dropdown = ctk.CTkOptionMenu(self.sidebar, values=files)
         self.dropdown.pack()
+
+        self.lora_selection = ctk.CTkOptionMenu(self.sidebar, values=loras)
+        self.lora_selection.pack(pady=10)
 
         # Sliders for the resolution
         self.width_label = ctk.CTkLabel(self.sidebar, text="")
@@ -8547,14 +8502,17 @@ class App(tk.Tk):
                 upscalemodelloader,
                 ultimatesdupscale,
             ) = self._prep()
-            loraloader = LoraLoader()
-            loraloader_274 = loraloader.load_lora(
-                lora_name="add_detail.safetensors",
-                strength_model=2,
-                strength_clip=2,
-                model=checkpointloadersimple_241[0],
-                clip=checkpointloadersimple_241[1],
-            )
+            try:
+                loraloader = LoraLoader()
+                loraloader_274 = loraloader.load_lora(
+                    lora_name="add_detail.safetensors",
+                    strength_model=2,
+                    strength_clip=2,
+                    model=checkpointloadersimple_241[0],
+                    clip=checkpointloadersimple_241[1],
+                )
+            except:
+                loraloader_274 = checkpointloadersimple_241
 
             if self.stable_fast_var.get() == True:
                 app.title("LigtDiffusion - Generating StableFast model")
@@ -8683,14 +8641,17 @@ class App(tk.Tk):
                 upscalemodelloader,
                 ultimatesdupscale,
             ) = self._prep()
-            loraloader = LoraLoader()
-            loraloader_274 = loraloader.load_lora(
-                lora_name="add_detail.safetensors",
-                strength_model=0.8,
-                strength_clip=0.8,
-                model=checkpointloadersimple_241[0],
-                clip=checkpointloadersimple_241[1],
-            )
+            try:
+                loraloader = LoraLoader()
+                loraloader_274 = loraloader.load_lora(
+                    lora_name="add_detail.safetensors",
+                    strength_model=0.8,
+                    strength_clip=0.8,
+                    model=checkpointloadersimple_241[0],
+                    clip=checkpointloadersimple_241[1],
+                )
+            except:
+                loraloader_274 = checkpointloadersimple_241
 
             clipsetlastlayer = CLIPSetLastLayer()
             clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
