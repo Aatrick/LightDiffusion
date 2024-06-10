@@ -1,5 +1,5 @@
 prompt: ****, (masterpiece, best quality), (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),1girl, long white hair, dynamic angle,beautiful detailed glow,full body
-neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic)
-w: 512
+neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic), (embedding:EasyNegativeV2)
+w: 256
 h: 1024
 cfg: 10

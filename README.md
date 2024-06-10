@@ -12,6 +12,7 @@ SDWebUI.
 - Hires-Fix (euler ancestral normal)
 - GPU only
 - Xformers and Pytorch optimization
+- Stable-Fast implementation offering a 70% speedup at the cost of pre inference model optimization windup time
 - FP16 and FP32 precision support
 - Saved state in between starts
 - GUI
