@@ -20,4 +20,5 @@ SDWebUI.
 - Clip Skip
 - LoRa and textual inversion (embeddings) support
 
-![Screenshot 2024-04-26 190424](https://github.com/Aatrick/Aatricks1111/assets/113598245/c127a5c5-1662-485f-b73d-fb1be75538b1)
+
+![Screenshot 2024-06-10 140130](https://github.com/Aatrick/LightDiffusion/assets/113598245/711100ee-3af6-49aa-9de6-81361a64f3f9)
