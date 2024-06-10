@@ -3274,9 +3274,6 @@ class AutoencoderKL(AutoencodingEngineLegacy):  # TODO : Remove abstraction laye
             **kwargs,
         )
 
-
-# pytorch_diffusion + derived encoder decoder
-
 import torch.nn as nn
 
 ops = disable_weight_init
@@ -3968,7 +3965,7 @@ class SpatialTransformer(nn.Module):
         dropout=0.0,
         context_dim=None,
         disable_self_attn=False,
-        use_linear=False,  # TODO : check if linear attention is faster
+        use_linear=False,
         use_checkpoint=True,
         dtype=None,
         device=None,
@@ -8288,7 +8285,7 @@ def gen_stable_fast_config():
     # CUDA Graph is suggested for small batch sizes.
     # After capturing, the model only accepts one fixed image size.
     # If you want the model to be dynamic, don't enable it.
-    config.enable_cuda_graph = False  # FIXME : make the model dynamic
+    config.enable_cuda_graph = True
     # config.enable_jit_freeze = False
     return config
 
@@ -8450,11 +8447,9 @@ class App(tk.Tk):
         self.display = tk.Frame(self, bg="black", border=0)
         self.display.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
 
-        # Label to display the generated image
-        self.image_label = tk.Label(
-            self.display, bg="black"
-        )  # TODO: adapt to window size
-        self.image_label.pack(pady=20)
+        # centered Label to display the generated image
+        self.image_label = tk.Label(self.display, bg="black")
+        self.image_label.pack(expand=True, padx=10, pady=10)
 
         self.ckpt = None
 
@@ -8691,8 +8686,8 @@ class App(tk.Tk):
             loraloader = LoraLoader()
             loraloader_274 = loraloader.load_lora(
                 lora_name="add_detail.safetensors",
-                strength_model=-2,
-                strength_clip=-2,
+                strength_model=0.8,
+                strength_clip=0.8,
                 model=checkpointloadersimple_241[0],
                 clip=checkpointloadersimple_241[1],
             )
@@ -8705,7 +8700,7 @@ class App(tk.Tk):
                 app.title("LigtDiffusion - Generating StableFast model")
                 applystablefast = ApplyStableFastUnet()
                 applystablefast_158 = applystablefast.apply_stable_fast(
-                    enable_cuda_graph=False,
+                    enable_cuda_graph=True,
                     model=loraloader_274[0],
                 )
             else:
@@ -8791,6 +8786,10 @@ class App(tk.Tk):
         # Get a list of all image files in the output directory
         image_files = glob.glob(".\\_internal\\output\\*")
 
+        # Get the current size of the window
+        window_width = self.winfo_width() - 400
+        window_height = self.winfo_height()
+
         # If there are no image files, return
         if not image_files:
             return
@@ -8801,10 +8800,8 @@ class App(tk.Tk):
         # Open the most recent image file
         img = Image.open(image_files[0])
 
-        # Resize the image if necessary
-        img = img.resize(
-            (int(self.width_slider.get() / 2), int(self.height_slider.get() / 2))
-        )
+        # resize the image to fit the window while keeping the aspect ratio
+        img.thumbnail((window_width, window_height))
 
         # Convert the image to PhotoImage
         img = ImageTk.PhotoImage(img)
@@ -8812,6 +8809,7 @@ class App(tk.Tk):
         # Display the image
         self.image_label.config(image=img)
         self.image_label.image = img
+        self.after(1000, self.display_most_recent_image)
 
 
 if __name__ == "__main__":
