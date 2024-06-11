@@ -7,7 +7,6 @@ SDWebUI.
 ## Features
 
 - Original Txt2Img, Img2Img (R-ERSGAN4x+ UltimateSDUpscaling DPM++ 2M)
-- One click install and run (once you've added your .safetensors model)
 - Attention syntax
 - Hires-Fix (euler ancestral normal)
 - GPU only
@@ -22,3 +21,15 @@ SDWebUI.
 
 
 ![Screenshot 2024-06-10 140130](https://github.com/Aatrick/LightDiffusion/assets/113598245/711100ee-3af6-49aa-9de6-81361a64f3f9)
+
+
+## Installation
+
+To install, please clone this repo and install the python dependencies by writing ```pip install -r requirements.txt```
+
+After doing that, add your SD1/1.5 safetensors model to the checkpoints directory and you should be good to go.
+
+
+### Stable-Fast 
+
+To use the stable-fast optimization refer to this [guide](https://github.com/chengzeyi/stable-fast?tab=readme-ov-file#installation) to install from the wheel file.
