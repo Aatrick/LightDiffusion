@@ -4701,6 +4701,7 @@ class SDTokenizer:
                             tokens.append(
                                 [(embed[x], weight) for x in range(embed.shape[0])]
                             )
+                        print("loading ", embedding_name)
                     # if we accidentally have leftover text, continue parsing using leftover, else move on to next word
                     if leftover != "":
                         word = leftover
@@ -6329,6 +6330,7 @@ class CheckpointLoaderSimple:
             output_clip=True,
             embedding_directory=".\\_internal\\embeddings\\",
         )
+        print("loading", ckpt_path)
         return out[:3]
 
 
@@ -8714,12 +8716,13 @@ class App(tk.Tk):
             try:
                 loraloader = LoraLoader()
                 loraloader_274 = loraloader.load_lora(
-                    lora_name="add_detail.safetensors",
+                    lora_name=self.lora_selection.get().replace(".\\_internal\\loras\\",""),
                     strength_model=0.7,
                     strength_clip=0.7,
                     model=checkpointloadersimple_241[0],
                     clip=checkpointloadersimple_241[1],
                 )
+                print("loading", self.lora_selection.get().replace(".\\_internal\\loras\\",""))
             except:
                 loraloader_274 = checkpointloadersimple_241
 
