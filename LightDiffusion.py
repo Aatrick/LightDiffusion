@@ -574,6 +574,10 @@ class CONDCrossAttn(CONDRegular):
 
         out = []
         for c in conds:
+            if c.shape[1] < crossattn_max_len:
+                c = c.repeat(
+                    1, crossattn_max_len // c.shape[1], 1
+                )  # padding with repeat doesn't change result, but avoids an error on tensor shape
             out.append(c)
         return torch.cat(out)
 
@@ -8021,14 +8025,18 @@ import logging
 from dataclasses import dataclass
 
 import torch
-from sfast.compilers.diffusion_pipeline_compiler import CompilationConfig
-from sfast.compilers.diffusion_pipeline_compiler import (
-    _enable_xformers,
-    _modify_model,
-)
-from sfast.cuda.graphs import make_dynamic_graphed_callable
-from sfast.jit import utils as jit_utils
-from sfast.jit.trace_helper import trace_with_kwargs
+
+try:
+    from sfast.compilers.diffusion_pipeline_compiler import CompilationConfig
+    from sfast.compilers.diffusion_pipeline_compiler import (
+        _enable_xformers,
+        _modify_model,
+    )
+    from sfast.cuda.graphs import make_dynamic_graphed_callable
+    from sfast.jit import utils as jit_utils
+    from sfast.jit.trace_helper import trace_with_kwargs
+except:
+    pass
 
 
 def hash_arg(arg):
@@ -8235,7 +8243,7 @@ def gen_stable_fast_config():
     # CUDA Graph is suggested for small batch sizes.
     # After capturing, the model only accepts one fixed image size.
     # If you want the model to be dynamic, don't enable it.
-    config.enable_cuda_graph = True
+    config.enable_cuda_graph = False
     # config.enable_jit_freeze = False
     return config
 
@@ -8645,8 +8653,8 @@ class App(tk.Tk):
                 loraloader = LoraLoader()
                 loraloader_274 = loraloader.load_lora(
                     lora_name="add_detail.safetensors",
-                    strength_model=0.8,
-                    strength_clip=0.8,
+                    strength_model=0.7,
+                    strength_clip=0.7,
                     model=checkpointloadersimple_241[0],
                     clip=checkpointloadersimple_241[1],
                 )
@@ -8658,10 +8666,10 @@ class App(tk.Tk):
                 stop_at_clip_layer=-2, clip=loraloader_274[1]
             )
             if self.stable_fast_var.get() == True:
-                app.title("LigtDiffusion - Generating StableFast model")
+                app.title("LightDiffusion - Generating StableFast model")
                 applystablefast = ApplyStableFastUnet()
                 applystablefast_158 = applystablefast.apply_stable_fast(
-                    enable_cuda_graph=True,
+                    enable_cuda_graph=False,
                     model=loraloader_274[0],
                 )
             else:
@@ -8680,7 +8688,7 @@ class App(tk.Tk):
             )
             ksampler_239 = ksampler_instance.sample(
                 seed=random.randint(1, 2**64),
-                steps=300,
+                steps=40,
                 cfg=cfg,
                 sampler_name="dpm_adaptive",
                 scheduler="karras",
