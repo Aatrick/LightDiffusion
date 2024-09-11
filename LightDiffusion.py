@@ -17,6 +17,8 @@ import os
 import packaging.version
 import torch
 
+import ollama
+
 if packaging.version.parse(torch.__version__) >= packaging.version.parse("1.12.0"):
     torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -8295,6 +8297,54 @@ class ApplyStableFastUnet:
         return (model_stable_fast,)
 
 
+def enhance_prompt():
+    prompt, neg, width, height, cfg = load_parameters_from_file()
+    print(prompt)
+    response = ollama.chat(
+        model="llama3.1",
+        messages=[
+            {
+                "role": "user",
+                "content": f"""Your goal is to generate a text-to-image prompt based on a user's input, detailing their desired final outcome for an image. The user will provide specific details about the characteristics, features, or elements they want the image to include. The prompt should guide the generation of an image that aligns with the user's desired outcome.
+
+                        Generate a text-to-image prompt by arranging the following blocks in a single string, separated by commas:
+
+                        Image Type: [Specify desired image type]
+
+                        Aesthetic or Mood: [Describe desired aesthetic or mood]
+
+                        Lighting Conditions: [Specify desired lighting conditions]
+
+                        Composition or Framing: [Provide details about desired composition or framing]
+
+                        Background: [Specify desired background elements or setting]
+
+                        Colors: [Mention any specific colors or color palette]
+
+                        Objects or Elements: [List specific objects or features]
+
+                        Style or Artistic Influence: [Mention desired artistic style or influence]
+
+                        Subject's Appearance: [Describe appearance of main subject]
+
+                        Ensure the blocks are arranged in order of visual importance, from the most significant to the least significant, to effectively guide image generation, a block can be surrounded by parentheses to gain additionnal significance.
+
+                        This is an example of a user's input: "a beautiful blonde lady in lingerie sitting in seiza in a seducing way with a focus on her assets"
+
+                        And this is an example of a desired output: "portrait| serene and mysterious| soft, diffused lighting| close-up shot, emphasizing facial features| simple and blurred background| earthy tones with a hint of warm highlights| renaissance painting| a beautiful lady with freckles and dark makeup"
+                        
+                        Here is the user's input: {prompt}
+
+                        Write the prompt in the same style as the example above, in a single line , with absolutely no additional information, words or symbols other than the enhanced prompt.
+
+                        Output:""",
+            },
+        ],
+    )
+    print("here's the enhanced prompt :", response["message"]["content"])
+    return response["message"]["content"]
+
+
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open(".\\_internal\\prompt.txt", "w") as f:
         f.write(f"prompt: {prompt_entry}")
@@ -8332,7 +8382,7 @@ class App(tk.Tk):
         super().__init__()
 
         self.title("LightDiffusion")
-        self.geometry("800x650")
+        self.geometry("800x800")
 
         selected_file = tk.StringVar()
         if files:
@@ -8399,6 +8449,14 @@ class App(tk.Tk):
             variable=self.stable_fast_var,
         )
         self.stable_fast_checkbox.pack(pady=5)
+
+        self.enhancer_var = tk.BooleanVar()
+        self.enhancer_checkbox = ctk.CTkCheckBox(
+            self.sidebar,
+            text="Prompt enhancer",
+            variable=self.enhancer_var,
+        )
+        self.enhancer_checkbox.pack(pady=5)
 
         # Button to launch the generation
         self.generate_button = ctk.CTkButton(
@@ -8633,6 +8691,10 @@ class App(tk.Tk):
 
     def _generate_image(self):
         prompt = self.prompt_entry.get("1.0", tk.END)
+        if self.enhancer_var.get() == True:
+            prompt = enhance_prompt()
+            while prompt == None:
+                pass
         neg = self.neg.get("1.0", tk.END)
         w = int(self.width_slider.get())
         h = int(self.height_slider.get())
