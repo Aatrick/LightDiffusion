@@ -750,7 +750,9 @@ def sample_euler_ancestral(
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
-        app.title(f"LightDiffusion - {i}it")
+        try:
+            app.title(f"LightDiffusion - {i}it")
+        except:pass
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
         d = to_d(x, sigmas[i], denoised)
@@ -890,7 +892,9 @@ class DPMSolver(nn.Module):
         info = {"steps": 0, "nfe": 0, "n_accept": 0, "n_reject": 0}
 
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
-            app.title(f"LightDiffusion - {info['steps']*3}it")
+            try:
+                app.title(f"LightDiffusion - {info['steps']*3}it")
+            except: pass
             eps_cache = {}
             t = (
                 torch.minimum(t_end, s + pid.h)
@@ -918,7 +922,9 @@ class DPMSolver(nn.Module):
                 info["n_reject"] += 1
             info["nfe"] += order
             info["steps"] += 1
-        app.title("LightDiffusion")
+        try:
+            app.title("LightDiffusion")
+        except:pass
         return x, info
 
 
@@ -8299,8 +8305,12 @@ class ApplyStableFastUnet:
         return (model_stable_fast,)
 
 
-def enhance_prompt():
+def enhance_prompt(p=None):
     prompt, neg, width, height, cfg = load_parameters_from_file()
+    if p is None:
+        pass
+    else :
+        prompt = p
     print(prompt)
     response = ollama.chat(
         model="llama3.1",
@@ -8346,6 +8356,92 @@ def enhance_prompt():
     print("here's the enhanced prompt :", response["message"]["content"])
     return response["message"]["content"]
 
+def pipeline(prompt, w, h):
+    ckpt = ".\\_internal\\checkpoints\\meinamix_meinaV11.safetensors"
+    with torch.inference_mode():
+        checkpointloadersimple = CheckpointLoaderSimple()
+        checkpointloadersimple_241 = (
+            checkpointloadersimple.load_checkpoint(ckpt_name=ckpt)
+        )
+        cliptextencode = CLIPTextEncode()
+        emptylatentimage = EmptyLatentImage()
+        ksampler_instance = KSampler2()
+        vaedecode = VAEDecode()
+        saveimage = SaveImage()
+        latent_upscale = LatentUpscale()
+        upscalemodelloader = UpscaleModelLoader()
+        ultimatesdupscale = UltimateSDUpscale()
+    prompt = enhance_prompt(prompt)
+    while prompt == None:
+        pass
+    with torch.inference_mode():
+        try:
+            loraloader = LoraLoader()
+            loraloader_274 = loraloader.load_lora(
+                lora_name="add_detail.safetensors",
+                strength_model=0.7,
+                strength_clip=0.7,
+                model=checkpointloadersimple_241[0],
+                clip=checkpointloadersimple_241[1],
+            )
+            print("loading add_detail.safetensors")
+        except:
+            loraloader_274 = checkpointloadersimple_241
+        clipsetlastlayer = CLIPSetLastLayer()
+        clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
+            stop_at_clip_layer=-2, clip=loraloader_274[1]
+        )
+        applystablefast_158 = loraloader_274
+        cliptextencode_242 = cliptextencode.encode(
+            text=prompt,
+            clip=clipsetlastlayer_257[0],
+        )
+        cliptextencode_243 = cliptextencode.encode(
+            text="(worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic), (embedding:EasyNegative), (embedding:badhandv4), (embedding:lr), (embedding:ng_deepnegative_v1_75t)",
+            clip=clipsetlastlayer_257[0],
+        )
+        emptylatentimage_244 = emptylatentimage.generate(
+            width=w, height=h, batch_size=1
+        )
+        ksampler_239 = ksampler_instance.sample(
+            seed=random.randint(1, 2**64),
+            steps=40,
+            cfg=7,
+            sampler_name="dpm_adaptive",
+            scheduler="karras",
+            denoise=1,
+            model=applystablefast_158[0],
+            positive=cliptextencode_242[0],
+            negative=cliptextencode_243[0],
+            latent_image=emptylatentimage_244[0],
+        )
+        latentupscale_254 = latent_upscale.upscale(
+            upscale_method="bislerp",
+            width=w * 2,
+            height=h * 2,
+            crop="disabled",
+            samples=ksampler_239[0],
+        )
+        ksampler_253 = ksampler_instance.sample(
+            seed=random.randint(1, 2**64),
+            steps=10,
+            cfg=8,
+            sampler_name="euler_ancestral",
+            scheduler="normal",
+            denoise=0.45,
+            model=applystablefast_158[0],
+            positive=cliptextencode_242[0],
+            negative=cliptextencode_243[0],
+            latent_image=latentupscale_254[0],
+        )
+        vaedecode_240 = vaedecode.decode(
+            samples=ksampler_253[0],
+            vae=checkpointloadersimple_241[2],
+        )
+        saveimage.save_images(filename_prefix="LD", images=vaedecode_240[0])
+        for image in vaedecode_240[0]:
+            i = 255.0 * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open(".\\_internal\\prompt.txt", "w") as f:
@@ -8583,7 +8679,9 @@ class App(tk.Tk):
                 loraloader_274 = checkpointloadersimple_241
 
             if self.stable_fast_var.get() == True:
-                app.title("LigtDiffusion - Generating StableFast model")
+                try:
+                    app.title("LigtDiffusion - Generating StableFast model")
+                except:pass
                 applystablefast = ApplyStableFastUnet()
                 applystablefast_158 = applystablefast.apply_stable_fast(
                     enable_cuda_graph=False,
@@ -8608,7 +8706,9 @@ class App(tk.Tk):
             upscalemodelloader_244 = upscalemodelloader.load_model(
                 "RealESRGAN_x4plus_anime_6B.pth"
             )
-            app.title("LightDiffusion - Upscaling")
+            try:
+                app.title("LightDiffusion - Upscaling")
+            except:pass
             ultimatesdupscale_250 = ultimatesdupscale.upscale(
                 upscale_by=2,
                 seed=random.randint(1, 2**64),
@@ -8645,7 +8745,9 @@ class App(tk.Tk):
         img = img.resize((int(w / 2), int(h / 2)))
         img = ImageTk.PhotoImage(img)
         self.image_label.after(0, self._update_image_label, img)
-        app.title("LightDiffusion")
+        try:
+            app.title("LightDiffusion")
+        except:pass
 
     def img2img(self):
         file_path = filedialog.askopenfilename()
@@ -8731,7 +8833,9 @@ class App(tk.Tk):
                 stop_at_clip_layer=-2, clip=loraloader_274[1]
             )
             if self.stable_fast_var.get() == True:
-                app.title("LightDiffusion - Generating StableFast model")
+                try:
+                    app.title("LightDiffusion - Generating StableFast model")
+                except:pass
                 applystablefast = ApplyStableFastUnet()
                 applystablefast_158 = applystablefast.apply_stable_fast(
                     enable_cuda_graph=False,

@@ -19,6 +19,7 @@ SDWebUI.
 - Clip Skip
 - LoRa and textual inversion (embeddings) support
 - Automatic Prompt-Enhancing with llama3.1 (ollama)
+- Discord bot integration with the installation of [Boubou](https://github.com/Aatrick/Boubou) and the usage of LightDiffusion's pipeline
 
 ![Screenshot 2024-06-10 140130](https://github.com/Aatrick/LightDiffusion/assets/113598245/711100ee-3af6-49aa-9de6-81361a64f3f9)
 
@@ -37,3 +38,7 @@ To use the stable-fast optimization refer to this [guide](https://github.com/che
 To use the Prompt enhancer refer to this [guide](https://github.com/ollama/ollama?tab=readme-ov-file) to install and run those commands
 `ollama run llama3.1`
 `pip install ollama`
+
+### Discord
+
+To use LightDiffusion in discord, refer to the installation guide in this [repo](https://github.com/Aatrick/Boubou)
