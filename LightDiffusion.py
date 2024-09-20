@@ -752,8 +752,7 @@ def sample_euler_ancestral(
     for i in trange(len(sigmas) - 1, disable=disable):
         try:
             app.title(f"LightDiffusion - {i}it")
-        except:
-            pass
+        except:pass
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
         d = to_d(x, sigmas[i], denoised)
@@ -895,8 +894,7 @@ class DPMSolver(nn.Module):
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
             try:
                 app.title(f"LightDiffusion - {info['steps']*3}it")
-            except:
-                pass
+            except: pass
             eps_cache = {}
             t = (
                 torch.minimum(t_end, s + pid.h)
@@ -926,8 +924,7 @@ class DPMSolver(nn.Module):
             info["steps"] += 1
         try:
             app.title("LightDiffusion")
-        except:
-            pass
+        except:pass
         return x, info
 
 
@@ -8312,7 +8309,7 @@ def enhance_prompt(p=None):
     prompt, neg, width, height, cfg = load_parameters_from_file()
     if p is None:
         pass
-    else:
+    else :
         prompt = p
     print(prompt)
     response = ollama.chat(
@@ -8359,13 +8356,12 @@ def enhance_prompt(p=None):
     print("here's the enhanced prompt :", response["message"]["content"])
     return response["message"]["content"]
 
-
-def pipeline(oprompt, w, h):
+def pipeline(prompt, w, h):
     ckpt = ".\\_internal\\checkpoints\\meinamix_meinaV11.safetensors"
     with torch.inference_mode():
         checkpointloadersimple = CheckpointLoaderSimple()
-        checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
-            ckpt_name=ckpt
+        checkpointloadersimple_241 = (
+            checkpointloadersimple.load_checkpoint(ckpt_name=ckpt)
         )
         cliptextencode = CLIPTextEncode()
         emptylatentimage = EmptyLatentImage()
@@ -8375,9 +8371,8 @@ def pipeline(oprompt, w, h):
         latent_upscale = LatentUpscale()
         upscalemodelloader = UpscaleModelLoader()
         ultimatesdupscale = UltimateSDUpscale()
-    prompt = "****, (masterpiece, best quality), (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),"
-    prompt += enhance_prompt(oprompt)
-    while prompt == "****, (masterpiece, best quality), (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),":
+    prompt = enhance_prompt(prompt)
+    while prompt == None:
         pass
     with torch.inference_mode():
         try:
@@ -8447,7 +8442,6 @@ def pipeline(oprompt, w, h):
         for image in vaedecode_240[0]:
             i = 255.0 * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
     with open(".\\_internal\\prompt.txt", "w") as f:
@@ -8687,8 +8681,7 @@ class App(tk.Tk):
             if self.stable_fast_var.get() == True:
                 try:
                     app.title("LigtDiffusion - Generating StableFast model")
-                except:
-                    pass
+                except:pass
                 applystablefast = ApplyStableFastUnet()
                 applystablefast_158 = applystablefast.apply_stable_fast(
                     enable_cuda_graph=False,
@@ -8715,8 +8708,7 @@ class App(tk.Tk):
             )
             try:
                 app.title("LightDiffusion - Upscaling")
-            except:
-                pass
+            except:pass
             ultimatesdupscale_250 = ultimatesdupscale.upscale(
                 upscale_by=2,
                 seed=random.randint(1, 2**64),
@@ -8755,8 +8747,7 @@ class App(tk.Tk):
         self.image_label.after(0, self._update_image_label, img)
         try:
             app.title("LightDiffusion")
-        except:
-            pass
+        except:pass
 
     def img2img(self):
         file_path = filedialog.askopenfilename()
@@ -8805,8 +8796,7 @@ class App(tk.Tk):
     def _generate_image(self):
         prompt = self.prompt_entry.get("1.0", tk.END)
         if self.enhancer_var.get() == True:
-            prompt = "****, (masterpiece, best quality), (extremely detailed CG unity 8k wallpaper, masterpiece, best quality, ultra-detailed, best shadow), (detailed background), (beautiful detailed face, beautiful detailed eyes), High contrast, (best illumination, an extremely delicate and beautiful),"
-            prompt += enhance_prompt()
+            prompt = enhance_prompt()
             while prompt == None:
                 pass
         neg = self.neg.get("1.0", tk.END)
@@ -8828,18 +8818,13 @@ class App(tk.Tk):
             try:
                 loraloader = LoraLoader()
                 loraloader_274 = loraloader.load_lora(
-                    lora_name=self.lora_selection.get().replace(
-                        ".\\_internal\\loras\\", ""
-                    ),
+                    lora_name=self.lora_selection.get().replace(".\\_internal\\loras\\",""),
                     strength_model=0.7,
                     strength_clip=0.7,
                     model=checkpointloadersimple_241[0],
                     clip=checkpointloadersimple_241[1],
                 )
-                print(
-                    "loading",
-                    self.lora_selection.get().replace(".\\_internal\\loras\\", ""),
-                )
+                print("loading", self.lora_selection.get().replace(".\\_internal\\loras\\",""))
             except:
                 loraloader_274 = checkpointloadersimple_241
 
@@ -8850,8 +8835,7 @@ class App(tk.Tk):
             if self.stable_fast_var.get() == True:
                 try:
                     app.title("LightDiffusion - Generating StableFast model")
-                except:
-                    pass
+                except:pass
                 applystablefast = ApplyStableFastUnet()
                 applystablefast_158 = applystablefast.apply_stable_fast(
                     enable_cuda_graph=False,
