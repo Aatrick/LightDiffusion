@@ -9,4 +9,4 @@
 .coverage
 .toml
 __pycache__
-venv
+.venv
