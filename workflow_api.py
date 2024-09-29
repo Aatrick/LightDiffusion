@@ -18796,8 +18796,8 @@ def main():
         loraloader = LoraLoader()
         loraloader_274 = loraloader.load_lora(
             lora_name="add_detail.safetensors",
-            strength_model=-2,
-            strength_clip=-2,
+            strength_model=0.8,
+            strength_clip=0.8,
             model=checkpointloadersimple_241[0],
             clip=checkpointloadersimple_241[1],
         )
@@ -18832,7 +18832,7 @@ def main():
         
         samloader = wkms.SAMLoader()
         samloader_87 = samloader.load_model(
-            model_name="_internal\sam_vit_b_01ec64.pth", device_mode="AUTO"
+            model_name="sam_vit_b_01ec64.pth", device_mode="AUTO"
         )
 
         cliptextencode_124 = cliptextencode.encode(
@@ -18842,7 +18842,8 @@ def main():
 
         ultralyticsdetectorprovider = wkms.UltralyticsDetectorProvider()
         ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
-            model_name="_internal/face_yolov8m.pt"
+            #model_name="face_yolov8m.pt"
+            model_name="person_yolov8m-seg.pt"
         )
 
         
@@ -18891,11 +18892,139 @@ def main():
                 negative=cliptextencode_243[0],
                 latent_image=latentupscale_254[0],
             )
+            
 
             vaedecode_240 = vaedecode.decode(
                 samples=ksampler_253[0],
                 vae=checkpointloadersimple_241[2],
             )
+            
+            saveimage_115 = saveimage.save_images(
+                filename_prefix="base",
+                images=vaedecode_240[0],
+            )
+            
+            bboxdetectorsegs_132 = bboxdetectorsegs.doit(
+                threshold=0.5,
+                dilation=10,
+                crop_factor=2,
+                drop_size=10,
+                labels="all",
+                bbox_detector=ultralyticsdetectorprovider_151[0],
+                image=vaedecode_240[0],
+            )
+
+            samdetectorcombined_139 = samdetectorcombined.doit(
+                detection_hint="center-1",
+                dilation=0,
+                threshold=0.93,
+                bbox_expansion=0,
+                mask_hint_threshold=0.7,
+                mask_hint_use_negative="False",
+                sam_model=samloader_87[0],
+                segs=bboxdetectorsegs_132[0],
+                image=vaedecode_240[0],
+            )
+
+            impactsegsandmask_152 = impactsegsandmask.doit(
+                segs=bboxdetectorsegs_132[0],
+                mask=samdetectorcombined_139[0],
+            )
+
+            detailerforeachdebug_145 = detailerforeachdebug.doit(
+                guide_size=512,
+                guide_size_for=False,
+                max_size=768,
+                seed=random.randint(1, 2**64),
+                steps=40,
+                cfg=6.5,
+                sampler_name="dpmpp_2m_sde",
+                scheduler="karras",
+                denoise=0.5,
+                feather=5,
+                noise_mask=True,
+                force_inpaint=True,
+                wildcard="",
+                cycle=1,
+                inpaint_model=False,
+                noise_mask_feather=20,
+                image=vaedecode_240[0],
+                segs=impactsegsandmask_152[0],
+                model=loraloader_274[0],
+                clip=loraloader_274[1],
+                vae=checkpointloadersimple_241[2],
+                positive=cliptextencode_124[0],
+                negative=cliptextencode_243[0],
+            )
+
+            saveimage_115 = saveimage.save_images(
+                filename_prefix="refined",
+                images=detailerforeachdebug_145[0],
+            )
+            
+            ultralyticsdetectorprovider = wkms.UltralyticsDetectorProvider()
+            ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
+                model_name="face_yolov9c.pt"
+            )
+            
+            bboxdetectorsegs_132 = bboxdetectorsegs.doit(
+                threshold=0.5,
+                dilation=10,
+                crop_factor=2,
+                drop_size=10,
+                labels="all",
+                bbox_detector=ultralyticsdetectorprovider_151[0],
+                image=detailerforeachdebug_145[0],
+            )
+
+            samdetectorcombined_139 = samdetectorcombined.doit(
+                detection_hint="center-1",
+                dilation=0,
+                threshold=0.93,
+                bbox_expansion=0,
+                mask_hint_threshold=0.7,
+                mask_hint_use_negative="False",
+                sam_model=samloader_87[0],
+                segs=bboxdetectorsegs_132[0],
+                image=detailerforeachdebug_145[0],
+            )
+
+            impactsegsandmask_152 = impactsegsandmask.doit(
+                segs=bboxdetectorsegs_132[0],
+                mask=samdetectorcombined_139[0],
+            )
+
+            detailerforeachdebug_145 = detailerforeachdebug.doit(
+                guide_size=512,
+                guide_size_for=False,
+                max_size=768,
+                seed=random.randint(1, 2**64),
+                steps=40,
+                cfg=6.5,
+                sampler_name="dpmpp_2m_sde",
+                scheduler="karras",
+                denoise=0.5,
+                feather=5,
+                noise_mask=True,
+                force_inpaint=True,
+                wildcard="",
+                cycle=1,
+                inpaint_model=False,
+                noise_mask_feather=20,
+                image=detailerforeachdebug_145[0],
+                segs=impactsegsandmask_152[0],
+                model=loraloader_274[0],
+                clip=loraloader_274[1],
+                vae=checkpointloadersimple_241[2],
+                positive=cliptextencode_124[0],
+                negative=cliptextencode_243[0],
+            )
+
+            saveimage_115 = saveimage.save_images(
+                filename_prefix="2ndrefined",
+                images=detailerforeachdebug_145[0],
+            )
+            
 
             ultimatesdupscale_250 = ultimatesdupscale.upscale(
                 upscale_by=2,
@@ -18916,7 +19045,7 @@ def main():
                 seam_fix_mask_blur=16,
                 seam_fix_padding=32,
                 force_uniform_tiles="enable",
-                image=vaedecode_240[0],
+                image=detailerforeachdebug_145[0],
                 model=loraloader_274[0],
                 positive=cliptextencode_242[0],
                 negative=cliptextencode_243[0],
@@ -18929,66 +19058,11 @@ def main():
                 images=ultimatesdupscale_250[0],
             )
             
-            
-
-            bboxdetectorsegs_132 = bboxdetectorsegs.doit(
-                threshold=0.5,
-                dilation=10,
-                crop_factor=2,
-                drop_size=10,
-                labels="all",
-                bbox_detector=ultralyticsdetectorprovider_151[0],
-                image=ultimatesdupscale_250[0],
-            )
-
-            samdetectorcombined_139 = samdetectorcombined.doit(
-                detection_hint="center-1",
-                dilation=0,
-                threshold=0.93,
-                bbox_expansion=0,
-                mask_hint_threshold=0.7,
-                mask_hint_use_negative="False",
-                sam_model=samloader_87[0],
-                segs=bboxdetectorsegs_132[0],
-                image=ultimatesdupscale_250[0],
-            )
-
-            impactsegsandmask_152 = impactsegsandmask.doit(
-                segs=bboxdetectorsegs_132[0],
-                mask=samdetectorcombined_139[0],
-            )
-
-            detailerforeachdebug_145 = detailerforeachdebug.doit(
-                guide_size=512,
-                guide_size_for=False,
-                max_size=768,
-                seed=random.randint(1, 2**64),
-                steps=40,
-                cfg=6.5,
-                sampler_name="euler_ancestral",
-                scheduler="normal",
-                denoise=0.5,
-                feather=5,
-                noise_mask=True,
-                force_inpaint=True,
-                wildcard="",
-                cycle=1,
-                inpaint_model=False,
-                noise_mask_feather=20,
-                image=ultimatesdupscale_250[0],
-                segs=impactsegsandmask_152[0],
-                model=loraloader_274[0],
-                clip=loraloader_274[1],
-                vae=checkpointloadersimple_241[2],
-                positive=cliptextencode_124[0],
-                negative=cliptextencode_243[0],
-            )
-
-            saveimage_115 = saveimage.save_images(
-                filename_prefix="refined",
-                images=detailerforeachdebug_145[0],
-            )
 
 
 if __name__ == "__main__":
     main()
+
+#TODO : Fix adetailer inference time
+#TODO : Cleanup and import adetailer with og LightDIffusion
+#TODO : Make flux.dev support
