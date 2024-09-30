@@ -26,7 +26,11 @@ SDWebUI.
 
 ## Installation
 
-To install, please clone this repo and install the python dependencies by writing `pip install -r requirements.txt`
+To install, please clone this repo and execute the run.bat file and you should be good to go.
+
+#### From Source
+
+Else install the python dependencies by writing `pip install -r requirements.txt`
 
 After doing that, add your SD1/1.5 safetensors model to the checkpoints directory and you should be good to go.
 
