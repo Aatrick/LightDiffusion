@@ -8491,6 +8491,26 @@ files = glob.glob(".\\_internal\\checkpoints\\*.safetensors")
 loras = glob.glob(".\\_internal\\loras\\*.safetensors")
 loras += glob.glob(".\\_internal\\loras\\*.pt")
 
+if files == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="Meina/MeinaMix", filename="Meina V10 - baked VAE.safetensors")
+if glob.glob(".\\_internal\\yolos\\*.pt") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="Bingsu/adetailer", filename="hand_yolov9c.pt")
+    hf_hub_download(repo_id="Bingsu/adetailer", filename="face_yolov9c.pt")
+    hf_hub_download(repo_id="Bingsu/adetailer", filename="person_yolov8m-seg.pt")
+if glob.glob(".\\_internal\\ERSGAN\\*.pth") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="ximso/RealESRGAN_x4plus_anime_6B", filename="RealESRGAN_x4plus_anime_6B.pth")
+if glob.glob(".\\_internal\\loras\\*.safetensors") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="EvilEngine/add_detail", filename="add_detail.safetensors")
+if glob.glob(".\\_internal\\embeddings\\*.pt") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="EvilEngine/badhandv4", filename="badhandv4.pt")
+    hf_hub_download(repo_id="gsdf/EasyNegative", filename="EasyNegative.pt")
+
+
 import wkms
 class App(tk.Tk):
     def __init__(self):

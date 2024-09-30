@@ -1,5 +1,5 @@
 prompt: a picture of a landscape with a castle on top of a mountain
-neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic), (embedding:EasyNegative)
+neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic), (embedding:EasyNegative), (embedding:badhandv4)
 w: 768
 h: 512
 cfg: 8
