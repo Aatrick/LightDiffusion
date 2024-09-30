@@ -12,6 +12,7 @@ from typing import Literal
 import customtkinter as ctk
 import safetensors.torch
 from PIL import ImageTk
+import PIL
 
 import os
 import packaging.version
@@ -9107,7 +9108,7 @@ class App(tk.Tk):
         img = Image.open(image_files[0])
 
         # resize the image to fit the window while keeping the aspect ratio
-        img.thumbnail((window_width, window_height))
+        img.thumbnail([window_width, window_height])
 
         # Convert the image to PhotoImage
         img = ImageTk.PhotoImage(img)
