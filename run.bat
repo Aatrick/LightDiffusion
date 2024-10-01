@@ -28,7 +28,7 @@ IF EXIST requirements.txt (
 
 REM Launch the script
 echo Launching LightDiffusion...
-python workflow_api.py
+python LightDiffusion.py
 
 REM Deactivate the virtual environment
 deactivate
