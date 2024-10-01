@@ -20,12 +20,17 @@ SDWebUI.
 - LoRa and textual inversion (embeddings) support
 - Automatic Prompt-Enhancing with llama3.1 (ollama)
 - Discord bot integration with the installation of [Boubou](https://github.com/Aatrick/Boubou) and the usage of LightDiffusion's pipeline
+- Automatic Face and body Detailer (based on [Impact pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack))
 
 ![Screenshot 2024-06-10 140130](https://github.com/Aatrick/LightDiffusion/assets/113598245/711100ee-3af6-49aa-9de6-81361a64f3f9)
 
 ## Installation
 
-To install, please clone this repo and install the python dependencies by writing `pip install -r requirements.txt`
+To install, please clone this repo and execute the run.bat file and you should be good to go.
+
+#### From Source
+
+Else install the python dependencies by writing `pip install -r requirements.txt`
 
 After doing that, add your SD1/1.5 safetensors model to the checkpoints directory and you should be good to go.
 
