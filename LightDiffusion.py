@@ -48,6 +48,56 @@ output_directory = ".\\_internal\\output"
 
 filename_list_cache = {}
 
+if glob.glob(".\\_internal\\checkpoints\\*.safetensors") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="Meina/MeinaMix",
+        filename="Meina V10 - baked VAE.safetensors",
+        local_dir=".\\_internal\\checkpoints\\",
+    )
+if glob.glob(".\\_internal\\yolos\\*.pt") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="Bingsu/adetailer",
+        filename="hand_yolov9c.pt",
+        local_dir=".\\_internal\\yolos\\",
+    )
+    hf_hub_download(
+        repo_id="Bingsu/adetailer",
+        filename="face_yolov9c.pt",
+        local_dir=".\\_internal\\yolos\\",
+    )
+    hf_hub_download(
+        repo_id="Bingsu/adetailer",
+        filename="person_yolov8m-seg.pt",
+        local_dir=".\\_internal\\yolos\\",
+    )
+if glob.glob(".\\_internal\\ERSGAN\\*.pth") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="ximso/RealESRGAN_x4plus_anime_6B",
+        filename="RealESRGAN_x4plus_anime_6B.pth",
+        local_dir=".\\_internal\\ERSGAN\\",
+    )
+if glob.glob(".\\_internal\\loras\\*.safetensors") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="EvilEngine/add_detail",
+        filename="add_detail.safetensors",
+        local_dir=".\\_internal\\loras\\",
+    )
+if glob.glob(".\\_internal\\embeddings\\*.pt") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="EvilEngine/badhandv4",
+        filename="badhandv4.pt",
+        local_dir=".\\_internal\\embeddings\\",
+    )
 
 args_parsing = False
 
@@ -3090,7 +3140,7 @@ class ModelPatcher:
 
     def set_model_denoise_mask_function(self, denoise_mask_function):
         self.model_options["denoise_mask_function"] = denoise_mask_function
-    
+
     def get_model_object(self, name):
         return get_attr(self.model, name)
 
@@ -7485,13 +7535,39 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
     return processed
 
 
-def sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=None, callback=None,
-                  disable_pbar=False, seed=None):
-    samples = sample(model, noise, positive, negative, cfg, model.load_device, sampler, sigmas,
-                     model_options=model.model_options, latent_image=latent_image,
-                     denoise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
+def sample_custom(
+    model,
+    noise,
+    cfg,
+    sampler,
+    sigmas,
+    positive,
+    negative,
+    latent_image,
+    noise_mask=None,
+    callback=None,
+    disable_pbar=False,
+    seed=None,
+):
+    samples = sample(
+        model,
+        noise,
+        positive,
+        negative,
+        cfg,
+        model.load_device,
+        sampler,
+        sigmas,
+        model_options=model.model_options,
+        latent_image=latent_image,
+        denoise_mask=noise_mask,
+        callback=callback,
+        disable_pbar=disable_pbar,
+        seed=seed,
+    )
     samples = samples.to(intermediate_device())
     return samples
+
 
 from enum import Enum
 
@@ -8730,9 +8806,7 @@ def to_latent_image(pixels, vae):
 
 
 def calculate_sigmas2(model, sampler, scheduler, steps):
-    return calculate_sigmas(
-        model.get_model_object("model_sampling"), scheduler, steps
-    )
+    return calculate_sigmas(model.get_model_object("model_sampling"), scheduler, steps)
 
 
 def get_noise_sampler(x, cpu, total_sigmas, **kwargs):
@@ -9391,7 +9465,6 @@ class DetailerForEachTest(DetailerForEach):
         )
 
 
-
 import contextlib
 import functools
 import logging
@@ -9839,24 +9912,6 @@ files = glob.glob(".\\_internal\\checkpoints\\*.safetensors")
 loras = glob.glob(".\\_internal\\loras\\*.safetensors")
 loras += glob.glob(".\\_internal\\loras\\*.pt")
 
-if files == [] :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="Meina/MeinaMix", filename="Meina V10 - baked VAE.safetensors")
-if glob.glob(".\\_internal\\yolos\\*.pt") == [] :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="Bingsu/adetailer", filename="hand_yolov9c.pt")
-    hf_hub_download(repo_id="Bingsu/adetailer", filename="face_yolov9c.pt")
-    hf_hub_download(repo_id="Bingsu/adetailer", filename="person_yolov8m-seg.pt")
-if glob.glob(".\\_internal\\ERSGAN\\*.pth") == [] :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="ximso/RealESRGAN_x4plus_anime_6B", filename="RealESRGAN_x4plus_anime_6B.pth")
-if glob.glob(".\\_internal\\loras\\*.safetensors") == [] :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="EvilEngine/add_detail", filename="add_detail.safetensors")
-if glob.glob(".\\_internal\\embeddings\\*.pt") == [] :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="EvilEngine/badhandv4", filename="badhandv4.pt")
-
 
 class App(tk.Tk):
     def __init__(self):
@@ -10231,16 +10286,16 @@ class App(tk.Tk):
 
                 ultralyticsdetectorprovider = UltralyticsDetectorProvider()
                 ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
-                    #model_name="face_yolov8m.pt"
+                    # model_name="face_yolov8m.pt"
                     model_name="person_yolov8m-seg.pt"
                 )
-            
 
                 bboxdetectorsegs = BboxDetectorForEach()
                 samdetectorcombined = SAMDetectorCombined()
                 impactsegsandmask = SegsBitwiseAndMask()
                 detailerforeachdebug = DetailerForEachTest()
-            except:pass
+            except:
+                pass
             clipsetlastlayer = CLIPSetLastLayer()
             clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
                 stop_at_clip_layer=-2, clip=loraloader_274[1]
@@ -10310,7 +10365,7 @@ class App(tk.Tk):
                 for image in vaedecode_240[0]:
                     i = 255.0 * image.cpu().numpy()
                     img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-                try :
+                try:
                     bboxdetectorsegs_132 = bboxdetectorsegs.doit(
                         threshold=0.5,
                         dilation=10,
@@ -10431,7 +10486,8 @@ class App(tk.Tk):
                         filename_prefix="2ndrefined",
                         images=detailerforeachdebug_145[0],
                     )
-                except:pass
+                except:
+                    pass
             else:
                 vaedecode_240 = vaedecode.decode(
                     samples=ksampler_239[0],
