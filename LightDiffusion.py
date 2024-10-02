@@ -74,6 +74,11 @@ if glob.glob(".\\_internal\\yolos\\*.pt") == []:
         filename="person_yolov8m-seg.pt",
         local_dir=".\\_internal\\yolos\\",
     )
+    hf_hub_download(
+        repo_id="segments-arnaud/sam_vit_b",
+        filename="sam_vit_b_01ec64.pth",
+        local_dir=".\\_internal\\yolos\\",
+    )
 if glob.glob(".\\_internal\\ERSGAN\\*.pth") == []:
     from huggingface_hub import hf_hub_download
 
@@ -96,6 +101,11 @@ if glob.glob(".\\_internal\\embeddings\\*.pt") == []:
     hf_hub_download(
         repo_id="EvilEngine/badhandv4",
         filename="badhandv4.pt",
+        local_dir=".\\_internal\\embeddings\\",
+    )
+    hf_hub_download(
+        repo_id="segments-arnaud/sam_vit_b",
+        filename="EasyNegative.safetensors",
         local_dir=".\\_internal\\embeddings\\",
     )
 
