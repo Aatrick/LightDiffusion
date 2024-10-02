@@ -9839,24 +9839,23 @@ files = glob.glob(".\\_internal\\checkpoints\\*.safetensors")
 loras = glob.glob(".\\_internal\\loras\\*.safetensors")
 loras += glob.glob(".\\_internal\\loras\\*.pt")
 
-if files == None :
+if files == [] :
     from huggingface_hub import hf_hub_download
     hf_hub_download(repo_id="Meina/MeinaMix", filename="Meina V10 - baked VAE.safetensors")
-if glob.glob(".\\_internal\\yolos\\*.pt") == None :
+if glob.glob(".\\_internal\\yolos\\*.pt") == [] :
     from huggingface_hub import hf_hub_download
     hf_hub_download(repo_id="Bingsu/adetailer", filename="hand_yolov9c.pt")
     hf_hub_download(repo_id="Bingsu/adetailer", filename="face_yolov9c.pt")
     hf_hub_download(repo_id="Bingsu/adetailer", filename="person_yolov8m-seg.pt")
-if glob.glob(".\\_internal\\ERSGAN\\*.pth") == None :
+if glob.glob(".\\_internal\\ERSGAN\\*.pth") == [] :
     from huggingface_hub import hf_hub_download
     hf_hub_download(repo_id="ximso/RealESRGAN_x4plus_anime_6B", filename="RealESRGAN_x4plus_anime_6B.pth")
-if glob.glob(".\\_internal\\loras\\*.safetensors") == None :
+if glob.glob(".\\_internal\\loras\\*.safetensors") == [] :
     from huggingface_hub import hf_hub_download
     hf_hub_download(repo_id="EvilEngine/add_detail", filename="add_detail.safetensors")
-if glob.glob(".\\_internal\\embeddings\\*.pt") == None :
+if glob.glob(".\\_internal\\embeddings\\*.pt") == [] :
     from huggingface_hub import hf_hub_download
     hf_hub_download(repo_id="EvilEngine/badhandv4", filename="badhandv4.pt")
-    hf_hub_download(repo_id="gsdf/EasyNegative", filename="EasyNegative.pt")
 
 
 class App(tk.Tk):
@@ -10219,29 +10218,29 @@ class App(tk.Tk):
                 )
             except:
                 loraloader_274 = checkpointloadersimple_241
+            try:
+                samloader = SAMLoader()
+                samloader_87 = samloader.load_model(
+                    model_name="sam_vit_b_01ec64.pth", device_mode="AUTO"
+                )
+
+                cliptextencode_124 = cliptextencode.encode(
+                    text="royal, detailed, magnificient, beautiful, seducing",
+                    clip=loraloader_274[1],
+                )
+
+                ultralyticsdetectorprovider = UltralyticsDetectorProvider()
+                ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
+                    #model_name="face_yolov8m.pt"
+                    model_name="person_yolov8m-seg.pt"
+                )
             
-            samloader = SAMLoader()
-            samloader_87 = samloader.load_model(
-                model_name="sam_vit_b_01ec64.pth", device_mode="AUTO"
-            )
 
-            cliptextencode_124 = cliptextencode.encode(
-                text="royal, detailed, magnificient, beautiful, seducing",
-                clip=loraloader_274[1],
-            )
-
-            ultralyticsdetectorprovider = UltralyticsDetectorProvider()
-            ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
-                #model_name="face_yolov8m.pt"
-                model_name="person_yolov8m-seg.pt"
-            )
-
-        
-            bboxdetectorsegs = BboxDetectorForEach()
-            samdetectorcombined = SAMDetectorCombined()
-            impactsegsandmask = SegsBitwiseAndMask()
-            detailerforeachdebug = DetailerForEachTest()
-
+                bboxdetectorsegs = BboxDetectorForEach()
+                samdetectorcombined = SAMDetectorCombined()
+                impactsegsandmask = SegsBitwiseAndMask()
+                detailerforeachdebug = DetailerForEachTest()
+            except:pass
             clipsetlastlayer = CLIPSetLastLayer()
             clipsetlastlayer_257 = clipsetlastlayer.set_last_layer(
                 stop_at_clip_layer=-2, clip=loraloader_274[1]
@@ -10311,127 +10310,128 @@ class App(tk.Tk):
                 for image in vaedecode_240[0]:
                     i = 255.0 * image.cpu().numpy()
                     img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            
-                bboxdetectorsegs_132 = bboxdetectorsegs.doit(
-                    threshold=0.5,
-                    dilation=10,
-                    crop_factor=2,
-                    drop_size=10,
-                    labels="all",
-                    bbox_detector=ultralyticsdetectorprovider_151[0],
-                    image=vaedecode_240[0],
-                )
+                try :
+                    bboxdetectorsegs_132 = bboxdetectorsegs.doit(
+                        threshold=0.5,
+                        dilation=10,
+                        crop_factor=2,
+                        drop_size=10,
+                        labels="all",
+                        bbox_detector=ultralyticsdetectorprovider_151[0],
+                        image=vaedecode_240[0],
+                    )
 
-                samdetectorcombined_139 = samdetectorcombined.doit(
-                    detection_hint="center-1",
-                    dilation=0,
-                    threshold=0.93,
-                    bbox_expansion=0,
-                    mask_hint_threshold=0.7,
-                    mask_hint_use_negative="False",
-                    sam_model=samloader_87[0],
-                    segs=bboxdetectorsegs_132[0],
-                    image=vaedecode_240[0],
-                )
+                    samdetectorcombined_139 = samdetectorcombined.doit(
+                        detection_hint="center-1",
+                        dilation=0,
+                        threshold=0.93,
+                        bbox_expansion=0,
+                        mask_hint_threshold=0.7,
+                        mask_hint_use_negative="False",
+                        sam_model=samloader_87[0],
+                        segs=bboxdetectorsegs_132[0],
+                        image=vaedecode_240[0],
+                    )
 
-                impactsegsandmask_152 = impactsegsandmask.doit(
-                    segs=bboxdetectorsegs_132[0],
-                    mask=samdetectorcombined_139[0],
-                )
+                    impactsegsandmask_152 = impactsegsandmask.doit(
+                        segs=bboxdetectorsegs_132[0],
+                        mask=samdetectorcombined_139[0],
+                    )
 
-                detailerforeachdebug_145 = detailerforeachdebug.doit(
-                    guide_size=512,
-                    guide_size_for=False,
-                    max_size=768,
-                    seed=random.randint(1, 2**64),
-                    steps=40,
-                    cfg=6.5,
-                    sampler_name="dpmpp_2m_sde",
-                    scheduler="karras",
-                    denoise=0.5,
-                    feather=5,
-                    noise_mask=True,
-                    force_inpaint=True,
-                    wildcard="",
-                    cycle=1,
-                    inpaint_model=False,
-                    noise_mask_feather=20,
-                    image=vaedecode_240[0],
-                    segs=impactsegsandmask_152[0],
-                    model=checkpointloadersimple_241[0],
-                    clip=checkpointloadersimple_241[1],
-                    vae=checkpointloadersimple_241[2],
-                    positive=cliptextencode_124[0],
-                    negative=cliptextencode_243[0],
-                )
+                    detailerforeachdebug_145 = detailerforeachdebug.doit(
+                        guide_size=512,
+                        guide_size_for=False,
+                        max_size=768,
+                        seed=random.randint(1, 2**64),
+                        steps=40,
+                        cfg=6.5,
+                        sampler_name="dpmpp_2m_sde",
+                        scheduler="karras",
+                        denoise=0.5,
+                        feather=5,
+                        noise_mask=True,
+                        force_inpaint=True,
+                        wildcard="",
+                        cycle=1,
+                        inpaint_model=False,
+                        noise_mask_feather=20,
+                        image=vaedecode_240[0],
+                        segs=impactsegsandmask_152[0],
+                        model=checkpointloadersimple_241[0],
+                        clip=checkpointloadersimple_241[1],
+                        vae=checkpointloadersimple_241[2],
+                        positive=cliptextencode_124[0],
+                        negative=cliptextencode_243[0],
+                    )
 
-                saveimage_115 = saveimage.save_images(
-                    filename_prefix="refined",
-                    images=detailerforeachdebug_145[0],
-                )
+                    saveimage_115 = saveimage.save_images(
+                        filename_prefix="refined",
+                        images=detailerforeachdebug_145[0],
+                    )
 
-                ultralyticsdetectorprovider = UltralyticsDetectorProvider()
-                ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
-                    model_name="face_yolov9c.pt"
-                )
+                    ultralyticsdetectorprovider = UltralyticsDetectorProvider()
+                    ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
+                        model_name="face_yolov9c.pt"
+                    )
 
-                bboxdetectorsegs_132 = bboxdetectorsegs.doit(
-                    threshold=0.5,
-                    dilation=10,
-                    crop_factor=2,
-                    drop_size=10,
-                    labels="all",
-                    bbox_detector=ultralyticsdetectorprovider_151[0],
-                    image=detailerforeachdebug_145[0],
-                )
+                    bboxdetectorsegs_132 = bboxdetectorsegs.doit(
+                        threshold=0.5,
+                        dilation=10,
+                        crop_factor=2,
+                        drop_size=10,
+                        labels="all",
+                        bbox_detector=ultralyticsdetectorprovider_151[0],
+                        image=detailerforeachdebug_145[0],
+                    )
 
-                samdetectorcombined_139 = samdetectorcombined.doit(
-                    detection_hint="center-1",
-                    dilation=0,
-                    threshold=0.93,
-                    bbox_expansion=0,
-                    mask_hint_threshold=0.7,
-                    mask_hint_use_negative="False",
-                    sam_model=samloader_87[0],
-                    segs=bboxdetectorsegs_132[0],
-                    image=detailerforeachdebug_145[0],
-                )
+                    samdetectorcombined_139 = samdetectorcombined.doit(
+                        detection_hint="center-1",
+                        dilation=0,
+                        threshold=0.93,
+                        bbox_expansion=0,
+                        mask_hint_threshold=0.7,
+                        mask_hint_use_negative="False",
+                        sam_model=samloader_87[0],
+                        segs=bboxdetectorsegs_132[0],
+                        image=detailerforeachdebug_145[0],
+                    )
 
-                impactsegsandmask_152 = impactsegsandmask.doit(
-                    segs=bboxdetectorsegs_132[0],
-                    mask=samdetectorcombined_139[0],
-                )
+                    impactsegsandmask_152 = impactsegsandmask.doit(
+                        segs=bboxdetectorsegs_132[0],
+                        mask=samdetectorcombined_139[0],
+                    )
 
-                detailerforeachdebug_145 = detailerforeachdebug.doit(
-                    guide_size=512,
-                    guide_size_for=False,
-                    max_size=768,
-                    seed=random.randint(1, 2**64),
-                    steps=40,
-                    cfg=6.5,
-                    sampler_name="dpmpp_2m_sde",
-                    scheduler="karras",
-                    denoise=0.5,
-                    feather=5,
-                    noise_mask=True,
-                    force_inpaint=True,
-                    wildcard="",
-                    cycle=1,
-                    inpaint_model=False,
-                    noise_mask_feather=20,
-                    image=detailerforeachdebug_145[0],
-                    segs=impactsegsandmask_152[0],
-                    model=checkpointloadersimple_241[0],
-                    clip=checkpointloadersimple_241[1],
-                    vae=checkpointloadersimple_241[2],
-                    positive=cliptextencode_124[0],
-                    negative=cliptextencode_243[0],
-                )
+                    detailerforeachdebug_145 = detailerforeachdebug.doit(
+                        guide_size=512,
+                        guide_size_for=False,
+                        max_size=768,
+                        seed=random.randint(1, 2**64),
+                        steps=40,
+                        cfg=6.5,
+                        sampler_name="dpmpp_2m_sde",
+                        scheduler="karras",
+                        denoise=0.5,
+                        feather=5,
+                        noise_mask=True,
+                        force_inpaint=True,
+                        wildcard="",
+                        cycle=1,
+                        inpaint_model=False,
+                        noise_mask_feather=20,
+                        image=detailerforeachdebug_145[0],
+                        segs=impactsegsandmask_152[0],
+                        model=checkpointloadersimple_241[0],
+                        clip=checkpointloadersimple_241[1],
+                        vae=checkpointloadersimple_241[2],
+                        positive=cliptextencode_124[0],
+                        negative=cliptextencode_243[0],
+                    )
 
-                saveimage_115 = saveimage.save_images(
-                    filename_prefix="2ndrefined",
-                    images=detailerforeachdebug_145[0],
-                )
+                    saveimage_115 = saveimage.save_images(
+                        filename_prefix="2ndrefined",
+                        images=detailerforeachdebug_145[0],
+                    )
+                except:pass
             else:
                 vaedecode_240 = vaedecode.decode(
                     samples=ksampler_239[0],
