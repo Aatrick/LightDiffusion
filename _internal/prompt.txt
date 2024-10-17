@@ -1,5 +1,5 @@
-prompt: a girl with white long hair, sitting in wariza, in a seducing way
-neg: (worst quality, low quality:1.4), (zombie, sketch, interlocked fingers, comic), (embedding:EasyNegative), (embedding:badhandv4)
-w: 512
-h: 1024
+prompt: a frontview of a lockheed martin f35 preparing for takeoff at night on an aircraft carrier, majestic, bokeh, cinematic, hyperrealistic
+neg: (embedding:UnrealisticDream), (embedding:BadDream)
+w: 768
+h: 1408
 cfg: 8

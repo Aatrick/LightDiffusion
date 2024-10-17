@@ -10089,7 +10089,7 @@ class App(tk.Tk):
                 clip=clipsetlastlayer_257[0],
             )
             upscalemodelloader_244 = upscalemodelloader.load_model(
-                "RealESRGAN_x4plus_anime_6B.pth"
+                "RealESRGAN_x4.pth"
             )
             try:
                 app.title("LightDiffusion - Upscaling")
