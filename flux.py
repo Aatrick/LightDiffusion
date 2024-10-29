@@ -14,11 +14,6 @@ from enum import Enum
 import safetensors
 import inspect
 import uuid
-
-
-
-
-
 import glob
 import numbers
 import os
@@ -263,6 +258,7 @@ args_parsing = False
 
 class LatentFormat:
     scale_factor = 1.0
+    latent_channels = 4
     latent_rgb_factors = None
     taesd_decoder_name = None
 
@@ -310,6 +306,10 @@ class DiagonalGaussianDistribution(object):
         self.deterministic = deterministic
         self.std = torch.exp(0.5 * self.logvar)
         self.var = torch.exp(self.logvar)
+        if self.deterministic:
+            self.var = self.std = torch.zeros_like(self.mean).to(
+                device=self.parameters.device
+            )
 
     def sample(self):
         x = self.mean + self.std * torch.randn(self.mean.shape).to(
@@ -318,11 +318,35 @@ class DiagonalGaussianDistribution(object):
         return x
 
     def kl(self, other=None):
+        if self.deterministic:
+            return torch.Tensor([0.0])
+        else:
+            if other is None:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
+                    dim=[1, 2, 3],
+                )
+            else:
+                return 0.5 * torch.sum(
+                    torch.pow(self.mean - other.mean, 2) / other.var
+                    + self.var / other.var
+                    - 1.0
+                    - self.logvar
+                    + other.logvar,
+                    dim=[1, 2, 3],
+                )
+
+    def nll(self, sample, dims=[1, 2, 3]):
+        if self.deterministic:
+            return torch.Tensor([0.0])
+        logtwopi = np.log(2.0 * np.pi)
         return 0.5 * torch.sum(
-            torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-            dim=[1, 2, 3],
+            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
+            dim=dims,
         )
 
+    def mode(self):
+        return self.mean
 
 def append_dims(x, target_dims):
     """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
@@ -336,15 +360,6 @@ def append_dims(x, target_dims):
 import safetensors.torch
 
 
-def load_torch_file(ckpt, safe_load=False, device=None):
-    if device is None:
-        device = torch.device("cpu")
-    if ckpt.lower().endswith(".safetensors"):
-        sd = safetensors.torch.load_file(ckpt, device=device.type)
-    else:
-        sd = torch.load(ckpt, map_location=device, weights_only=True)
-    return sd
-
 
 def calculate_parameters(sd, prefix=""):
     params = 0
@@ -352,21 +367,6 @@ def calculate_parameters(sd, prefix=""):
         if k.startswith(prefix):
             params += sd[k].nelement()
     return params
-
-
-def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
-    out = {}
-    for rp in replace_prefix:
-        replace = list(
-            map(
-                lambda a: (a, "{}{}".format(replace_prefix[rp], a[len(rp) :])),
-                filter(lambda a: a.startswith(rp), state_dict.keys()),
-            )
-        )
-        for x in replace:
-            w = state_dict.pop(x[0])
-            out[x[1]] = w
-    return out
 
 
 UNET_MAP_ATTENTIONS = {
@@ -662,8 +662,27 @@ def bislerp(samples, width, height):
 
 
 def common_upscale(samples, width, height, upscale_method, crop):
-    s = samples
-    return bislerp(s, width, height)
+        if crop == "center":
+            old_width = samples.shape[3]
+            old_height = samples.shape[2]
+            old_aspect = old_width / old_height
+            new_aspect = width / height
+            x = 0
+            y = 0
+            if old_aspect > new_aspect:
+                x = round((old_width - old_width * (new_aspect / old_aspect)) / 2)
+            elif old_aspect < new_aspect:
+                y = round((old_height - old_height * (old_aspect / new_aspect)) / 2)
+            s = samples[:,:,y:old_height-y,x:old_width-x]
+        else:
+            s = samples
+
+        if upscale_method == "bislerp":
+            return bislerp(s, width, height)
+        elif upscale_method == "lanczos":
+            return lanczos(s, width, height)
+        else:
+            return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
 
 
 PROGRESS_BAR_ENABLED = True
@@ -786,8 +805,32 @@ class CONDRegular:
     def process_cond(self, batch_size, device, **kwargs):
         return self._copy_with(repeat_to_batch_size(self.cond, batch_size).to(device))
 
+    def can_concat(self, other):
+        if self.cond.shape != other.cond.shape:
+            return False
+        return True
+
+    def concat(self, others):
+        conds = [self.cond]
+        for x in others:
+            conds.append(x.cond)
+        return torch.cat(conds)
+
 
 class CONDCrossAttn(CONDRegular):
+    def can_concat(self, other):
+        s1 = self.cond.shape
+        s2 = other.cond.shape
+        if s1 != s2:
+            if s1[0] != s2[0] or s1[2] != s2[2]: #these 2 cases should not happen
+                return False
+
+            mult_min = lcm(s1[1], s2[1])
+            diff = mult_min // min(s1[1], s2[1])
+            if diff > 4: #arbitrary limit on the padding because it's probably going to impact performance negatively if it's too much
+                return False
+        return True
+
     def concat(self, others):
         conds = [self.cond]
         crossattn_max_len = self.cond.shape[1]
@@ -799,35 +842,9 @@ class CONDCrossAttn(CONDRegular):
         out = []
         for c in conds:
             if c.shape[1] < crossattn_max_len:
-                c = c.repeat(
-                    1, crossattn_max_len // c.shape[1], 1
-                )  # padding with repeat doesn't change result, but avoids an error on tensor shape
+                c = c.repeat(1, crossattn_max_len // c.shape[1], 1) #padding with repeat doesn't change result
             out.append(c)
         return torch.cat(out)
-
-
-import argparse
-import enum
-
-
-class EnumAction(argparse.Action):
-    def __init__(self, **kwargs):
-        # Pop off the type value
-        enum_type = kwargs.pop("type", None)
-
-        # Generate choices from the Enum
-        choices = tuple(e.value for e in enum_type)
-        kwargs.setdefault("choices", choices)
-        kwargs.setdefault("metavar", f"[{','.join(list(choices))}]")
-
-        super(EnumAction, self).__init__(**kwargs)
-
-
-class LatentPreviewMethod(enum.Enum):
-    NoPreviews = "none"
-    Auto = "auto"
-    Latent2RGB = "latent2rgb"
-    TAESD = "taesd"
 
 
 import logging
@@ -854,14 +871,25 @@ def checkpoint(func, inputs, params, flag):
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period)
-        * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device)
-        / half
-    )
-    args = timesteps[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    """
+    Create sinusoidal timestep embeddings.
+    :param timesteps: a 1-D Tensor of N indices, one per batch element.
+                      These may be fractional.
+    :param dim: the dimension of the output.
+    :param max_period: controls the minimum frequency of the embeddings.
+    :return: an [N x dim] Tensor of positional embeddings.
+    """
+    if not repeat_only:
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device) / half
+        )
+        args = timesteps[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    else:
+        embedding = repeat(timesteps, 'b -> b d', d=dim)
     return embedding
 
 
@@ -1300,22 +1328,13 @@ def sample_dpmpp_2m_sde(
         h_last = h
     return x
 
-
-class TimestepBlock1(nn.Module):
-    pass
-
-
-class TimestepEmbedSequential1(nn.Sequential, TimestepBlock1):
-    pass
-
-
 import torch
 
 
 class EPS:
     def calculate_input(self, sigma, noise):
         sigma = sigma.view(sigma.shape[:1] + (1,) * (noise.ndim - 1))
-        return noise / (sigma**2 + self.sigma_data**2) ** 0.5
+        return noise / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
 
     def calculate_denoised(self, sigma, model_output, model_input):
         sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
@@ -1323,7 +1342,7 @@ class EPS:
 
     def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
         if max_denoise:
-            noise = noise * torch.sqrt(1.0 + sigma**2.0)
+            noise = noise * torch.sqrt(1.0 + sigma ** 2.0)
         else:
             noise = noise * sigma
 
@@ -1334,53 +1353,48 @@ class EPS:
         return latent
 
 
+
 class ModelSamplingDiscrete(torch.nn.Module):
     def __init__(self, model_config=None):
         super().__init__()
-        sampling_settings = model_config.sampling_settings
+
+        if model_config is not None:
+            sampling_settings = model_config.sampling_settings
+        else:
+            sampling_settings = {}
+
         beta_schedule = sampling_settings.get("beta_schedule", "linear")
         linear_start = sampling_settings.get("linear_start", 0.00085)
         linear_end = sampling_settings.get("linear_end", 0.012)
+        timesteps = sampling_settings.get("timesteps", 1000)
 
-        self._register_schedule(
-            given_betas=None,
-            beta_schedule=beta_schedule,
-            timesteps=1000,
-            linear_start=linear_start,
-            linear_end=linear_end,
-            cosine_s=8e-3,
-        )
+        self._register_schedule(given_betas=None, beta_schedule=beta_schedule, timesteps=timesteps, linear_start=linear_start, linear_end=linear_end, cosine_s=8e-3)
         self.sigma_data = 1.0
 
-    def _register_schedule(
-        self,
-        given_betas=None,
-        beta_schedule="linear",
-        timesteps=1000,
-        linear_start=1e-4,
-        linear_end=2e-2,
-        cosine_s=8e-3,
-    ):
-        betas = make_beta_schedule(
-            beta_schedule,
-            timesteps,
-            linear_start=linear_start,
-            linear_end=linear_end,
-            cosine_s=cosine_s,
-        )
-        alphas = 1.0 - betas
+    def _register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
+                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
+        if given_betas is not None:
+            betas = given_betas
+        else:
+            betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
+        alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-        (timesteps,) = betas.shape
+        timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
         self.linear_start = linear_start
         self.linear_end = linear_end
+
+        # self.register_buffer('betas', torch.tensor(betas, dtype=torch.float32))
+        # self.register_buffer('alphas_cumprod', torch.tensor(alphas_cumprod, dtype=torch.float32))
+        # self.register_buffer('alphas_cumprod_prev', torch.tensor(alphas_cumprod_prev, dtype=torch.float32))
+
         sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
         self.set_sigmas(sigmas)
 
     def set_sigmas(self, sigmas):
-        self.register_buffer("sigmas", sigmas.float())
-        self.register_buffer("log_sigmas", sigmas.log().float())
+        self.register_buffer('sigmas', sigmas.float())
+        self.register_buffer('log_sigmas', sigmas.log().float())
 
     @property
     def sigma_min(self):
@@ -1396,16 +1410,20 @@ class ModelSamplingDiscrete(torch.nn.Module):
         return dists.abs().argmin(dim=0).view(sigma.shape).to(sigma.device)
 
     def sigma(self, timestep):
-        t = torch.clamp(
-            timestep.float().to(self.log_sigmas.device),
-            min=0,
-            max=(len(self.sigmas) - 1),
-        )
+        t = torch.clamp(timestep.float().to(self.log_sigmas.device), min=0, max=(len(self.sigmas) - 1))
         low_idx = t.floor().long()
         high_idx = t.ceil().long()
         w = t.frac()
         log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
         return log_sigma.exp().to(timestep.device)
+
+    def percent_to_sigma(self, percent):
+        if percent <= 0.0:
+            return 999999999.9
+        if percent >= 1.0:
+            return 0.0
+        percent = 1.0 - percent
+        return self.sigma(torch.tensor(percent * 999.0)).item()
 
 
 import logging
@@ -1414,25 +1432,6 @@ from enum import Enum
 
 import psutil
 import torch
-
-
-"""
-    This file is part of ComfyUI.
-    Copyright (C) 2024 Comfy
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
 
 import psutil
 import logging
@@ -2109,10 +2108,7 @@ def unet_manual_cast(weight_dtype, inference_device, supported_dtypes=[torch.flo
     return torch.float32
 
 def text_encoder_offload_device():
-    if args.gpu_only:
-        return get_torch_device()
-    else:
-        return torch.device("cpu")
+    return torch.device("cpu")
 
 def text_encoder_device():
     if args.gpu_only:
@@ -2545,6 +2541,9 @@ import torch
 
 def get_models_from_cond(cond, model_type):
     models = []
+    for c in cond:
+        if model_type in c:
+            models += [c[model_type]]
     return models
 
 
@@ -2554,7 +2553,7 @@ def convert_cond(cond):
         temp = c[1].copy()
         model_conds = temp.get("model_conds", {})
         if c[0] is not None:
-            model_conds["c_crossattn"] = CONDCrossAttn(c[0])
+            model_conds["c_crossattn"] = CONDCrossAttn(c[0]) #TODO: remove
             temp["cross_attn"] = c[0]
         temp["model_conds"] = model_conds
         out.append(temp)
@@ -2587,20 +2586,22 @@ def prepare_sampling(model, noise_shape, conds):
     device = model.load_device
     real_model = None
     models, inference_memory = get_additional_models(conds, model.model_dtype())
-    load_models_gpu(
-        [model] + models,
-        model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:]))
-        + inference_memory,
-    )
+    memory_required = model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:])) + inference_memory
+    minimum_memory_required = model.memory_required([noise_shape[0]] + list(noise_shape[1:])) + inference_memory
+    load_models_gpu([model] + models, memory_required=memory_required, minimum_memory_required=minimum_memory_required)
     real_model = model.model
 
     return real_model, conds, models
 
 
 def cleanup_models(conds, models):
+    cleanup_additional_models(models)
+
     control_cleanup = []
     for k in conds:
         control_cleanup += get_models_from_cond(conds[k], "control")
+
+    cleanup_additional_models(set(control_cleanup))
 
 def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False):
     if device is None or weight.device == device:
@@ -2657,7 +2658,35 @@ class disable_weight_init:
             else:
                 return super().forward(*args, **kwargs)
 
+    class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
+        def reset_parameters(self):
+            return None
+
+        def forward_comfy_cast_weights(self, input):
+            weight, bias = cast_bias_weight(self, input)
+            return self._conv_forward(input, weight, bias)
+
+        def forward(self, *args, **kwargs):
+            if self.comfy_cast_weights:
+                return self.forward_comfy_cast_weights(*args, **kwargs)
+            else:
+                return super().forward(*args, **kwargs)
+
     class Conv2d(torch.nn.Conv2d, CastWeightBiasOp):
+        def reset_parameters(self):
+            return None
+
+        def forward_comfy_cast_weights(self, input):
+            weight, bias = cast_bias_weight(self, input)
+            return self._conv_forward(input, weight, bias)
+
+        def forward(self, *args, **kwargs):
+            if self.comfy_cast_weights:
+                return self.forward_comfy_cast_weights(*args, **kwargs)
+            else:
+                return super().forward(*args, **kwargs)
+
+    class Conv3d(torch.nn.Conv3d, CastWeightBiasOp):
         def reset_parameters(self):
             return None
 
@@ -2675,8 +2704,17 @@ class disable_weight_init:
         def reset_parameters(self):
             return None
 
+        def forward_comfy_cast_weights(self, input):
+            weight, bias = cast_bias_weight(self, input)
+            return torch.nn.functional.group_norm(
+                input, self.num_groups, weight, bias, self.eps
+            )
+
         def forward(self, *args, **kwargs):
-            return super().forward(*args, **kwargs)
+            if self.comfy_cast_weights:
+                return self.forward_comfy_cast_weights(*args, **kwargs)
+            else:
+                return super().forward(*args, **kwargs)
 
     class LayerNorm(torch.nn.LayerNorm, CastWeightBiasOp):
         def reset_parameters(self):
@@ -2688,14 +2726,84 @@ class disable_weight_init:
             else:
                 weight = None
                 bias = None
-            return torch.nn.functional.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
+            return torch.nn.functional.layer_norm(
+                input, self.normalized_shape, weight, bias, self.eps
+            )
 
         def forward(self, *args, **kwargs):
             if self.comfy_cast_weights:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
                 return super().forward(*args, **kwargs)
-    
+
+    class ConvTranspose2d(torch.nn.ConvTranspose2d, CastWeightBiasOp):
+        def reset_parameters(self):
+            return None
+
+        def forward_comfy_cast_weights(self, input, output_size=None):
+            num_spatial_dims = 2
+            output_padding = self._output_padding(
+                input,
+                output_size,
+                self.stride,
+                self.padding,
+                self.kernel_size,
+                num_spatial_dims,
+                self.dilation,
+            )
+
+            weight, bias = cast_bias_weight(self, input)
+            return torch.nn.functional.conv_transpose2d(
+                input,
+                weight,
+                bias,
+                self.stride,
+                self.padding,
+                output_padding,
+                self.groups,
+                self.dilation,
+            )
+
+        def forward(self, *args, **kwargs):
+            if self.comfy_cast_weights:
+                return self.forward_comfy_cast_weights(*args, **kwargs)
+            else:
+                return super().forward(*args, **kwargs)
+
+    class ConvTranspose1d(torch.nn.ConvTranspose1d, CastWeightBiasOp):
+        def reset_parameters(self):
+            return None
+
+        def forward_comfy_cast_weights(self, input, output_size=None):
+            num_spatial_dims = 1
+            output_padding = self._output_padding(
+                input,
+                output_size,
+                self.stride,
+                self.padding,
+                self.kernel_size,
+                num_spatial_dims,
+                self.dilation,
+            )
+
+            weight, bias = cast_bias_weight(self, input)
+            return torch.nn.functional.conv_transpose1d(
+                input,
+                weight,
+                bias,
+                self.stride,
+                self.padding,
+                output_padding,
+                self.groups,
+                self.dilation,
+            )
+
+        def forward(self, *args, **kwargs):
+            if self.comfy_cast_weights:
+                return self.forward_comfy_cast_weights(*args, **kwargs)
+            else:
+                return super().forward(*args, **kwargs)
+
     class Embedding(torch.nn.Embedding, CastWeightBiasOp):
         def reset_parameters(self):
             self.bias = None
@@ -2703,10 +2811,21 @@ class disable_weight_init:
 
         def forward_comfy_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype
-            if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
+            if (
+                self.weight.dtype == torch.float16
+                or self.weight.dtype == torch.bfloat16
+            ):
                 out_dtype = None
             weight, bias = cast_bias_weight(self, device=input.device, dtype=out_dtype)
-            return torch.nn.functional.embedding(input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse).to(dtype=output_dtype)
+            return torch.nn.functional.embedding(
+                input,
+                weight,
+                self.padding_idx,
+                self.max_norm,
+                self.norm_type,
+                self.scale_grad_by_freq,
+                self.sparse,
+            ).to(dtype=output_dtype)
 
         def forward(self, *args, **kwargs):
             if self.comfy_cast_weights:
@@ -2718,14 +2837,25 @@ class disable_weight_init:
 
     @classmethod
     def conv_nd(s, dims, *args, **kwargs):
-        return s.Conv2d(*args, **kwargs)
+        if dims == 2:
+            return s.Conv2d(*args, **kwargs)
+        elif dims == 3:
+            return s.Conv3d(*args, **kwargs)
+        else:
+            raise ValueError(f"unsupported dimensions: {dims}")
 
 
 class manual_cast(disable_weight_init):
     class Linear(disable_weight_init.Linear):
         comfy_cast_weights = True
 
+    class Conv1d(disable_weight_init.Conv1d):
+        comfy_cast_weights = True
+
     class Conv2d(disable_weight_init.Conv2d):
+        comfy_cast_weights = True
+
+    class Conv3d(disable_weight_init.Conv3d):
         comfy_cast_weights = True
 
     class GroupNorm(disable_weight_init.GroupNorm):
@@ -2733,7 +2863,13 @@ class manual_cast(disable_weight_init):
 
     class LayerNorm(disable_weight_init.LayerNorm):
         comfy_cast_weights = True
-    
+
+    class ConvTranspose2d(disable_weight_init.ConvTranspose2d):
+        comfy_cast_weights = True
+
+    class ConvTranspose1d(disable_weight_init.ConvTranspose1d):
+        comfy_cast_weights = True
+
     class Embedding(disable_weight_init.Embedding):
         comfy_cast_weights = True
 
@@ -2742,38 +2878,113 @@ import collections
 
 
 def get_area_and_mult(conds, x_in, timestep_in):
-    area = (x_in.shape[2], x_in.shape[3], 0, 0)
+    dims = tuple(x_in.shape[2:])
+    area = None
     strength = 1.0
 
-    input_x = x_in[:, :, area[2] : area[0] + area[2], area[3] : area[1] + area[3]]
-    mask = torch.ones_like(input_x)
+    if 'timestep_start' in conds:
+        timestep_start = conds['timestep_start']
+        if timestep_in[0] > timestep_start:
+            return None
+    if 'timestep_end' in conds:
+        timestep_end = conds['timestep_end']
+        if timestep_in[0] < timestep_end:
+            return None
+    if 'area' in conds:
+        area = list(conds['area'])
+    if 'strength' in conds:
+        strength = conds['strength']
+
+    input_x = x_in
+    if area is not None:
+        for i in range(len(dims)):
+            area[i] = min(input_x.shape[i + 2] - area[len(dims) + i], area[i])
+            input_x = input_x.narrow(i + 2, area[len(dims) + i], area[i])
+
+    if 'mask' in conds:
+        # Scale the mask to the size of the input
+        # The mask should have been resized as we began the sampling process
+        mask_strength = 1.0
+        if "mask_strength" in conds:
+            mask_strength = conds["mask_strength"]
+        mask = conds['mask']
+        assert(mask.shape[1:] == x_in.shape[2:])
+
+        mask = mask[:input_x.shape[0]]
+        if area is not None:
+            for i in range(len(dims)):
+                mask = mask.narrow(i + 1, area[len(dims) + i], area[i])
+
+        mask = mask * mask_strength
+        mask = mask.unsqueeze(1).repeat(input_x.shape[0] // mask.shape[0], input_x.shape[1], 1, 1)
+    else:
+        mask = torch.ones_like(input_x)
     mult = mask * strength
 
-    if "mask" not in conds:
+    if 'mask' not in conds and area is not None:
         rr = 8
+        for i in range(len(dims)):
+            if area[len(dims) + i] != 0:
+                for t in range(rr):
+                    m = mult.narrow(i + 2, t, 1)
+                    m *= ((1.0/rr) * (t + 1))
+            if (area[i] + area[len(dims) + i]) < x_in.shape[i + 2]:
+                for t in range(rr):
+                    m = mult.narrow(i + 2, area[i] - 1 - t, 1)
+                    m *= ((1.0/rr) * (t + 1))
 
     conditioning = {}
     model_conds = conds["model_conds"]
     for c in model_conds:
-        conditioning[c] = model_conds[c].process_cond(
-            batch_size=x_in.shape[0], device=x_in.device, area=area
-        )
+        conditioning[c] = model_conds[c].process_cond(batch_size=x_in.shape[0], device=x_in.device, area=area)
 
-    control = conds.get("control", None)
+    control = conds.get('control', None)
+
     patches = None
-    cond_obj = collections.namedtuple(
-        "cond_obj", ["input_x", "mult", "conditioning", "area", "control", "patches"]
-    )
-    return cond_obj(input_x, mult, conditioning, area, control, patches)
+    if 'gligen' in conds:
+        gligen = conds['gligen']
+        patches = {}
+        gligen_type = gligen[0]
+        gligen_model = gligen[1]
+        if gligen_type == "position":
+            gligen_patch = gligen_model.model.set_position(input_x.shape, gligen[2], input_x.device)
+        else:
+            gligen_patch = gligen_model.model.set_empty(input_x.shape, input_x.device)
 
+        patches['middle_patch'] = [gligen_patch]
+
+    cond_obj = collections.namedtuple('cond_obj', ['input_x', 'mult', 'conditioning', 'area', 'control', 'patches'])
+    return cond_obj(input_x, mult, conditioning, area, control, patches)
 
 def cond_equal_size(c1, c2):
     if c1 is c2:
         return True
+    if c1.keys() != c2.keys():
+        return False
+    for k in c1:
+        if not c1[k].can_concat(c2[k]):
+            return False
     return True
 
 
 def can_concat_cond(c1, c2):
+    if c1.input_x.shape != c2.input_x.shape:
+        return False
+
+    def objects_concatable(obj1, obj2):
+        if (obj1 is None) != (obj2 is None):
+            return False
+        if obj1 is not None:
+            if obj1 is not obj2:
+                return False
+        return True
+
+    if not objects_concatable(c1.control, c2.control):
+        return False
+
+    if not objects_concatable(c1.patches, c2.patches):
+        return False
+
     return cond_equal_size(c1.conditioning, c2.conditioning)
 
 
@@ -2811,6 +3022,9 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
         if cond is not None:
             for x in cond:
                 p = get_area_and_mult(x, x_in, timestep)
+                if p is None:
+                    continue
+
                 to_run += [(p, i)]
 
     while len(to_run) > 0:
@@ -2826,9 +3040,9 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
 
         free_memory = get_free_memory(x_in.device)
         for i in range(1, len(to_batch_temp) + 1):
-            batch_amount = to_batch_temp[: len(to_batch_temp) // i]
+            batch_amount = to_batch_temp[:len(to_batch_temp)//i]
             input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
-            if model.memory_required(input_shape) < free_memory:
+            if model.memory_required(input_shape) * 1.5 < free_memory:
                 to_batch = batch_amount
                 break
 
@@ -2855,84 +3069,86 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
         c = cond_cat(c)
         timestep_ = torch.cat([timestep] * batch_chunks)
 
+        if control is not None:
+            c['control'] = control.get_control(input_x, timestep_, c, len(cond_or_uncond))
+
         transformer_options = {}
-        if "transformer_options" in model_options:
-            transformer_options = model_options["transformer_options"].copy()
+        if 'transformer_options' in model_options:
+            transformer_options = model_options['transformer_options'].copy()
+
+        if patches is not None:
+            if "patches" in transformer_options:
+                cur_patches = transformer_options["patches"].copy()
+                for p in patches:
+                    if p in cur_patches:
+                        cur_patches[p] = cur_patches[p] + patches[p]
+                    else:
+                        cur_patches[p] = patches[p]
+                transformer_options["patches"] = cur_patches
+            else:
+                transformer_options["patches"] = patches
 
         transformer_options["cond_or_uncond"] = cond_or_uncond[:]
         transformer_options["sigmas"] = timestep
 
-        c["transformer_options"] = transformer_options
+        c['transformer_options'] = transformer_options
 
-        if "model_function_wrapper" in model_options:
-            output = model_options["model_function_wrapper"](
-                model.apply_model,
-                {
-                    "input": input_x,
-                    "timestep": timestep_,
-                    "c": c,
-                    "cond_or_uncond": cond_or_uncond,
-                },
-            ).chunk(batch_chunks)
+        if 'model_function_wrapper' in model_options:
+            output = model_options['model_function_wrapper'](model.apply_model, {"input": input_x, "timestep": timestep_, "c": c, "cond_or_uncond": cond_or_uncond}).chunk(batch_chunks)
         else:
             output = model.apply_model(input_x, timestep_, **c).chunk(batch_chunks)
 
         for o in range(batch_chunks):
             cond_index = cond_or_uncond[o]
-            out_conds[cond_index][
-                :,
-                :,
-                area[o][2] : area[o][0] + area[o][2],
-                area[o][3] : area[o][1] + area[o][3],
-            ] += (
-                output[o] * mult[o]
-            )
-            out_counts[cond_index][
-                :,
-                :,
-                area[o][2] : area[o][0] + area[o][2],
-                area[o][3] : area[o][1] + area[o][3],
-            ] += mult[o]
+            a = area[o]
+            if a is None:
+                out_conds[cond_index] += output[o] * mult[o]
+                out_counts[cond_index] += mult[o]
+            else:
+                out_c = out_conds[cond_index]
+                out_cts = out_counts[cond_index]
+                dims = len(a) // 2
+                for i in range(dims):
+                    out_c = out_c.narrow(i + 2, a[i + dims], a[i])
+                    out_cts = out_cts.narrow(i + 2, a[i + dims], a[i])
+                out_c += output[o] * mult[o]
+                out_cts += mult[o]
 
     for i in range(len(out_conds)):
         out_conds[i] /= out_counts[i]
 
     return out_conds
 
+def cfg_function(model, cond_pred, uncond_pred, cond_scale, x, timestep, model_options={}, cond=None, uncond=None):
+    if "sampler_cfg_function" in model_options:
+        args = {"cond": x - cond_pred, "uncond": x - uncond_pred, "cond_scale": cond_scale, "timestep": timestep, "input": x, "sigma": timestep,
+                "cond_denoised": cond_pred, "uncond_denoised": uncond_pred, "model": model, "model_options": model_options}
+        cfg_result = x - model_options["sampler_cfg_function"](args)
+    else:
+        cfg_result = uncond_pred + (cond_pred - uncond_pred) * cond_scale
 
-def cfg_function(
-    model,
-    cond_pred,
-    uncond_pred,
-    cond_scale,
-    x,
-    timestep,
-    model_options={},
-    cond=None,
-    uncond=None,
-):
-    cfg_result = uncond_pred + (cond_pred - uncond_pred) * cond_scale
+    for fn in model_options.get("sampler_post_cfg_function", []):
+        args = {"denoised": cfg_result, "cond": cond, "uncond": uncond, "model": model, "uncond_denoised": uncond_pred, "cond_denoised": cond_pred,
+                "sigma": timestep, "model_options": model_options, "input": x}
+        cfg_result = fn(args)
+
     return cfg_result
 
-
-def sampling_function(
-    model, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None
-):
-    uncond_ = uncond
+def sampling_function(model, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None):
+    if math.isclose(cond_scale, 1.0) and model_options.get("disable_cfg1_optimization", False) == False:
+        uncond_ = None
+    else:
+        uncond_ = uncond
 
     conds = [cond, uncond_]
     out = calc_cond_batch(model, conds, x, timestep, model_options)
-    return cfg_function(
-        model,
-        out[0],
-        out[1],
-        cond_scale,
-        x,
-        timestep,
-        model_options=model_options,
-        cond=cond,
-        uncond=uncond_,
-    )
+
+    for fn in model_options.get("sampler_pre_cfg_function", []):
+        args = {"conds":conds, "conds_out": out, "cond_scale": cond_scale, "timestep": timestep,
+                "input": x, "sigma": timestep, "model": model, "model_options": model_options}
+        out  = fn(args)
+
+    return cfg_function(model, out[0], out[1], cond_scale, x, timestep, model_options=model_options, cond=cond, uncond=uncond_)
 
 
 class KSamplerX0Inpaint:
@@ -2986,19 +3202,62 @@ def simple_scheduler(model_sampling, steps):
 
 
 def resolve_areas_and_cond_masks(conditions, h, w, device):
-    for i in range(len(conditions)):
-        c = conditions[i]
+    logging.warning("WARNING: The comfy.samplers.resolve_areas_and_cond_masks function is deprecated please use the resolve_areas_and_cond_masks_multidim one instead.")
+    return resolve_areas_and_cond_masks_multidim(conditions, [h, w], device)
 
 
-def create_cond_with_same_area_if_none(conds, c):
-    if "area" not in c:
+def create_cond_with_same_area_if_none(conds, c): #TODO: handle dim != 2
+    if 'area' not in c:
         return
+
+    c_area = c['area']
+    smallest = None
+    for x in conds:
+        if 'area' in x:
+            a = x['area']
+            if c_area[2] >= a[2] and c_area[3] >= a[3]:
+                if a[0] + a[2] >= c_area[0] + c_area[2]:
+                    if a[1] + a[3] >= c_area[1] + c_area[3]:
+                        if smallest is None:
+                            smallest = x
+                        elif 'area' not in smallest:
+                            smallest = x
+                        else:
+                            if smallest['area'][0] * smallest['area'][1] > a[0] * a[1]:
+                                smallest = x
+        else:
+            if smallest is None:
+                smallest = x
+    if smallest is None:
+        return
+    if 'area' in smallest:
+        if smallest['area'] == c_area:
+            return
+
+    out = c.copy()
+    out['model_conds'] = smallest['model_conds'].copy() #TODO: which fields should be copied?
+    conds += [out]
 
 
 def calculate_start_end_timesteps(model, conds):
     s = model.model_sampling
     for t in range(len(conds)):
         x = conds[t]
+
+        timestep_start = None
+        timestep_end = None
+        if 'start_percent' in x:
+            timestep_start = s.percent_to_sigma(x['start_percent'])
+        if 'end_percent' in x:
+            timestep_end = s.percent_to_sigma(x['end_percent'])
+
+        if (timestep_start is not None) or (timestep_end is not None):
+            n = x.copy()
+            if (timestep_start is not None):
+                n['timestep_start'] = timestep_start
+            if (timestep_end is not None):
+                n['timestep_end'] = timestep_end
+            conds[t] = n
 
 
 def pre_run_control(model, conds):
@@ -3009,6 +3268,8 @@ def pre_run_control(model, conds):
         timestep_start = None
         timestep_end = None
         percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
+        if 'control' in x:
+            x['control'].pre_run(model, percent_to_timestep_function)
 
 
 def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
@@ -3018,12 +3279,33 @@ def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
     uncond_other = []
     for t in range(len(conds)):
         x = conds[t]
-        if "area" not in x:
-            cond_other.append((x, t))
+        if 'area' not in x:
+            if name in x and x[name] is not None:
+                cond_cnets.append(x[name])
+            else:
+                cond_other.append((x, t))
     for t in range(len(uncond)):
         x = uncond[t]
-        if "area" not in x:
-            uncond_other.append((x, t))
+        if 'area' not in x:
+            if name in x and x[name] is not None:
+                uncond_cnets.append(x[name])
+            else:
+                uncond_other.append((x, t))
+
+    if len(uncond_cnets) > 0:
+        return
+
+    for x in range(len(cond_cnets)):
+        temp = uncond_other[x % len(uncond_other)]
+        o = temp[0]
+        if name in o and o[name] is not None:
+            n = o.copy()
+            n[name] = uncond_fill_func(cond_cnets, x)
+            uncond += [n]
+        else:
+            n = o.copy()
+            n[name] = uncond_fill_func(cond_cnets, x)
+            uncond[temp[1]] = n
 
 
 def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwargs):
@@ -3032,7 +3314,10 @@ def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwar
         params = x.copy()
         params["device"] = device
         params["noise"] = noise
-        params["width"] = params.get("width", noise.shape[3] * 8)
+        default_width = None
+        if len(noise.shape) >= 4: #TODO: 8 multiple should be set by the model
+            default_width = noise.shape[3] * 8
+        params["width"] = params.get("width", default_width)
         params["height"] = params.get("height", noise.shape[2] * 8)
         params["prompt_type"] = params.get("prompt_type", prompt_type)
         for k in kwargs:
@@ -3041,10 +3326,10 @@ def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwar
 
         out = model_function(**params)
         x = x.copy()
-        model_conds = x["model_conds"].copy()
+        model_conds = x['model_conds'].copy()
         for k in out:
             model_conds[k] = out[k]
-        x["model_conds"] = model_conds
+        x['model_conds'] = model_conds
         conds[t] = x
     return conds
 
@@ -3170,30 +3455,19 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
     return KSAMPLER(sampler_function, extra_options, inpaint_options)
 
 
-def process_conds(
-    model, noise, conds, device, latent_image=None, denoise_mask=None, seed=None
-):
+def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=None, seed=None):
     for k in conds:
         conds[k] = conds[k][:]
-        resolve_areas_and_cond_masks(conds[k], noise.shape[2], noise.shape[3], device)
+        resolve_areas_and_cond_masks_multidim(conds[k], noise.shape[2:], device)
 
     for k in conds:
         calculate_start_end_timesteps(model, conds[k])
 
-    if hasattr(model, "extra_conds"):
+    if hasattr(model, 'extra_conds'):
         for k in conds:
-            conds[k] = encode_model_conds(
-                model.extra_conds,
-                conds[k],
-                noise,
-                device,
-                k,
-                latent_image=latent_image,
-                denoise_mask=denoise_mask,
-                seed=seed,
-            )
+            conds[k] = encode_model_conds(model.extra_conds, conds[k], noise, device, k, latent_image=latent_image, denoise_mask=denoise_mask, seed=seed)
 
-    # make sure each cond area has an opposite one with the same area
+    #make sure each cond area has an opposite one with the same area
     for k in conds:
         for c in conds[k]:
             for kk in conds:
@@ -3207,20 +3481,8 @@ def process_conds(
         positive = conds["positive"]
         for k in conds:
             if k != "positive":
-                apply_empty_x_to_equal_area(
-                    list(
-                        filter(
-                            lambda c: c.get("control_apply_to_uncond", False) == True,
-                            positive,
-                        )
-                    ),
-                    conds[k],
-                    "control",
-                    lambda cond_cnets, x: cond_cnets[x],
-                )
-                apply_empty_x_to_equal_area(
-                    positive, conds[k], "gligen", lambda cond_cnets, x: cond_cnets[x]
-                )
+                apply_empty_x_to_equal_area(list(filter(lambda c: c.get('control_apply_to_uncond', False) == True, positive)), conds[k], 'control', lambda cond_cnets, x: cond_cnets[x])
+                apply_empty_x_to_equal_area(positive, conds[k], 'gligen', lambda cond_cnets, x: cond_cnets[x])
 
     return conds
 
@@ -3382,95 +3644,28 @@ def sample1(model, noise, positive, negative, cfg, device, sampler, sigmas, mode
     cfg_guider.set_cfg(cfg)
     return cfg_guider.sample(noise, latent_image, sampler, sigmas, denoise_mask, callback, disable_pbar, seed)
 
-class KSampler1:
-    SCHEDULERS = SCHEDULER_NAMES
-    SAMPLERS = SAMPLER_NAMES
-    DISCARD_PENULTIMATE_SIGMA_SAMPLERS = set(
-        ("dpm_2", "dpm_2_ancestral", "uni_pc", "uni_pc_bh2")
-    )
-
-    def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
-        self.model = model
-        self.device = device
-        if scheduler not in self.SCHEDULERS:
-            scheduler = self.SCHEDULERS[0]
-        if sampler not in self.SAMPLERS:
-            sampler = self.SAMPLERS[0]
-        self.scheduler = scheduler
-        self.sampler = sampler
-        self.set_steps(steps, denoise)
-        self.denoise = denoise
-        self.model_options = model_options
-
-    def calculate_sigmas(self, steps):
-        sigmas = None
-
-        discard_penultimate_sigma = False
-        if self.sampler in self.DISCARD_PENULTIMATE_SIGMA_SAMPLERS:
-            steps += 1
-            discard_penultimate_sigma = True
-
-        sigmas = calculate_sigmas(self.model.get_model_object("model_sampling"), self.scheduler, steps)
-
-        if discard_penultimate_sigma:
-            sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
-        return sigmas
-
-    def set_steps(self, steps, denoise=None):
-        self.steps = steps
-        if denoise is None or denoise > 0.9999:
-            self.sigmas = self.calculate_sigmas(steps).to(self.device)
-        else:
-            if denoise <= 0.0:
-                self.sigmas = torch.FloatTensor([])
-            else:
-                new_steps = int(steps/denoise)
-                sigmas = self.calculate_sigmas(new_steps).to(self.device)
-                self.sigmas = sigmas[-(steps + 1):]
-
-    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
-        if sigmas is None:
-            sigmas = self.sigmas
-
-        if last_step is not None and last_step < (len(sigmas) - 1):
-            sigmas = sigmas[:last_step + 1]
-            if force_full_denoise:
-                sigmas[-1] = 0
-
-        if start_step is not None:
-            if start_step < (len(sigmas) - 1):
-                sigmas = sigmas[start_step:]
-            else:
-                if latent_image is not None:
-                    return latent_image
-                else:
-                    return torch.zeros_like(noise)
-
-        sampler = sampler_object(self.sampler)
-
-        return sample1(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
-
-
 
 def prepare_noise(latent_image, seed, noise_inds=None):
+    """
+    creates random noise given a latent image and a seed.
+    optional arg skip can be used to skip and discard x number of noise generations for a given seed
+    """
     generator = torch.manual_seed(seed)
-    return torch.randn(
-        latent_image.size(),
-        dtype=latent_image.dtype,
-        layout=latent_image.layout,
-        generator=generator,
-        device="cpu",
-    )
-
+    if noise_inds is None:
+        return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
+    
+    unique_inds, inverse = np.unique(noise_inds, return_inverse=True)
+    noises = []
+    for i in range(unique_inds[-1]+1):
+        noise = torch.randn([1] + list(latent_image.size())[1:], dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
+        if i in unique_inds:
+            noises.append(noise)
+    noises = [noises[i] for i in inverse]
+    noises = torch.cat(noises, axis=0)
+    return noises
 
 
 import uuid
-
-
-
-
-
-
 import torch.nn as nn
 
 ops = disable_weight_init
@@ -3486,36 +3681,80 @@ def nonlinearity(x):
 
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            self.conv = ops.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=1, padding=1
-            )
+    """
+    An upsampling layer with an optional convolution.
+    :param channels: channels in the inputs and outputs.
+    :param use_conv: a bool determining if a convolution is applied.
+    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
+                 upsampling occurs in the inner-two dimensions.
+    """
 
-    def forward(self, x):
-        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
-        if self.with_conv:
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=ops):
+        super().__init__()
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.dims = dims
+        if use_conv:
+            self.conv = operations.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, dtype=dtype, device=device)
+
+    def forward(self, x, output_shape=None):
+        assert x.shape[1] == self.channels
+        if self.dims == 3:
+            shape = [x.shape[2], x.shape[3] * 2, x.shape[4] * 2]
+            if output_shape is not None:
+                shape[1] = output_shape[3]
+                shape[2] = output_shape[4]
+        else:
+            shape = [x.shape[2] * 2, x.shape[3] * 2]
+            if output_shape is not None:
+                shape[0] = output_shape[2]
+                shape[1] = output_shape[3]
+
+        x = F.interpolate(x, size=shape, mode="nearest")
+        if self.use_conv:
             x = self.conv(x)
         return x
-
+    
+def avg_pool_nd(dims, *args, **kwargs):
+    """
+    Create a 1D, 2D, or 3D average pooling module.
+    """
+    if dims == 1:
+        return nn.AvgPool1d(*args, **kwargs)
+    elif dims == 2:
+        return nn.AvgPool2d(*args, **kwargs)
+    elif dims == 3:
+        return nn.AvgPool3d(*args, **kwargs)
+    raise ValueError(f"unsupported dimensions: {dims}")
 
 class Downsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
+    """
+    A downsampling layer with an optional convolution.
+    :param channels: channels in the inputs and outputs.
+    :param use_conv: a bool determining if a convolution is applied.
+    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
+                 downsampling occurs in the inner-two dimensions.
+    """
+
+    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=ops):
         super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = ops.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=2, padding=0
+        self.channels = channels
+        self.out_channels = out_channels or channels
+        self.use_conv = use_conv
+        self.dims = dims
+        stride = 2 if dims != 3 else (1, 2, 2)
+        if use_conv:
+            self.op = operations.conv_nd(
+                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, dtype=dtype, device=device
             )
+        else:
+            assert self.channels == self.out_channels
+            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
 
     def forward(self, x):
-        pad = (0, 1, 0, 1)
-        x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
-        x = self.conv(x)
-        return x
+        assert x.shape[1] == self.channels
+        return self.op(x)
 
 
 class ResnetBlock(nn.Module):
@@ -3886,37 +4125,23 @@ _ATTN_PRECISION = "fp32"
 
 
 class FeedForward(nn.Module):
-    def __init__(
-        self,
-        dim,
-        dim_out=None,
-        mult=4,
-        glu=False,
-        dropout=0.0,
-        dtype=None,
-        device=None,
-        operations=ops,
-    ):
+    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., dtype=None, device=None, operations=ops):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = default(dim_out, dim)
-        project_in = (
-            nn.Sequential(
-                operations.Linear(dim, inner_dim, dtype=dtype, device=device), nn.GELU()
-            )
-            if not glu
-            else GEGLU(dim, inner_dim)
-        )
+        project_in = nn.Sequential(
+            operations.Linear(dim, inner_dim, dtype=dtype, device=device),
+            nn.GELU()
+        ) if not glu else GEGLU(dim, inner_dim, dtype=dtype, device=device, operations=operations)
 
         self.net = nn.Sequential(
             project_in,
             nn.Dropout(dropout),
-            operations.Linear(inner_dim, dim_out, dtype=dtype, device=device),
+            operations.Linear(inner_dim, dim_out, dtype=dtype, device=device)
         )
 
     def forward(self, x):
         return self.net(x)
-
 
 def Normalize(in_channels, dtype=None, device=None):
     return torch.nn.GroupNorm(
@@ -4021,68 +4246,41 @@ def optimized_attention_for_device(device, mask=False, small_input=False):
 
 
 class CrossAttention(nn.Module):
-    def __init__(
-        self,
-        query_dim,
-        context_dim=None,
-        heads=8,
-        dim_head=64,
-        dropout=0.0,
-        dtype=None,
-        device=None,
-        operations=ops,
-    ):
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., attn_precision=None, dtype=None, device=None, operations=ops):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
+        self.attn_precision = attn_precision
 
         self.heads = heads
         self.dim_head = dim_head
 
-        self.to_q = operations.Linear(
-            query_dim, inner_dim, bias=False, dtype=dtype, device=device
-        )
-        self.to_k = operations.Linear(
-            context_dim, inner_dim, bias=False, dtype=dtype, device=device
-        )
-        self.to_v = operations.Linear(
-            context_dim, inner_dim, bias=False, dtype=dtype, device=device
-        )
+        self.to_q = operations.Linear(query_dim, inner_dim, bias=False, dtype=dtype, device=device)
+        self.to_k = operations.Linear(context_dim, inner_dim, bias=False, dtype=dtype, device=device)
+        self.to_v = operations.Linear(context_dim, inner_dim, bias=False, dtype=dtype, device=device)
 
-        self.to_out = nn.Sequential(
-            operations.Linear(inner_dim, query_dim, dtype=dtype, device=device),
-            nn.Dropout(dropout),
-        )
+        self.to_out = nn.Sequential(operations.Linear(inner_dim, query_dim, dtype=dtype, device=device), nn.Dropout(dropout))
 
     def forward(self, x, context=None, value=None, mask=None):
         q = self.to_q(x)
         context = default(context, x)
         k = self.to_k(context)
-        v = self.to_v(context)
+        if value is not None:
+            v = self.to_v(value)
+            del value
+        else:
+            v = self.to_v(context)
 
-        out = optimized_attention(q, k, v, self.heads)
+        if mask is None:
+            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision)
+        else:
+            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision)
         return self.to_out(out)
 
 
 class BasicTransformerBlock(nn.Module):
-    def __init__(
-        self,
-        dim,
-        n_heads,
-        d_head,
-        dropout=0.0,
-        context_dim=None,
-        gated_ff=True,
-        checkpoint=True,
-        ff_in=False,
-        inner_dim=None,
-        disable_self_attn=False,
-        disable_temporal_crossattention=False,
-        switch_temporal_ca_to_sa=False,
-        dtype=None,
-        device=None,
-        operations=ops,
-    ):
+    def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True, ff_in=False, inner_dim=None,
+                 disable_self_attn=False, disable_temporal_crossattention=False, switch_temporal_ca_to_sa=False, attn_precision=None, dtype=None, device=None, operations=ops):
         super().__init__()
 
         self.ff_in = ff_in or inner_dim is not None
@@ -4090,59 +4288,38 @@ class BasicTransformerBlock(nn.Module):
             inner_dim = dim
 
         self.is_res = inner_dim == dim
+        self.attn_precision = attn_precision
+
+        if self.ff_in:
+            self.norm_in = operations.LayerNorm(dim, dtype=dtype, device=device)
+            self.ff_in = FeedForward(dim, dim_out=inner_dim, dropout=dropout, glu=gated_ff, dtype=dtype, device=device, operations=operations)
+
         self.disable_self_attn = disable_self_attn
-        self.attn1 = CrossAttention(
-            query_dim=inner_dim,
-            heads=n_heads,
-            dim_head=d_head,
-            dropout=dropout,
-            context_dim=context_dim if self.disable_self_attn else None,
-            dtype=dtype,
-            device=device,
-            operations=operations,
-        )  # is a self-attention if not self.disable_self_attn
-        self.ff = FeedForward(
-            inner_dim,
-            dim_out=dim,
-            dropout=dropout,
-            glu=gated_ff,
-            dtype=dtype,
-            device=device,
-            operations=operations,
-        )
+        self.attn1 = CrossAttention(query_dim=inner_dim, heads=n_heads, dim_head=d_head, dropout=dropout,
+                              context_dim=context_dim if self.disable_self_attn else None, attn_precision=self.attn_precision, dtype=dtype, device=device, operations=operations)  # is a self-attention if not self.disable_self_attn
+        self.ff = FeedForward(inner_dim, dim_out=dim, dropout=dropout, glu=gated_ff, dtype=dtype, device=device, operations=operations)
 
-        context_dim_attn2 = None
-        if not switch_temporal_ca_to_sa:
-            context_dim_attn2 = context_dim
+        if disable_temporal_crossattention:
+            if switch_temporal_ca_to_sa:
+                raise ValueError
+            else:
+                self.attn2 = None
+        else:
+            context_dim_attn2 = None
+            if not switch_temporal_ca_to_sa:
+                context_dim_attn2 = context_dim
 
-        self.attn2 = CrossAttention(
-            query_dim=inner_dim,
-            context_dim=context_dim_attn2,
-            heads=n_heads,
-            dim_head=d_head,
-            dropout=dropout,
-            dtype=dtype,
-            device=device,
-            operations=operations,
-        )  # is self-attn if context is none
-        self.norm2 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
+            self.attn2 = CrossAttention(query_dim=inner_dim, context_dim=context_dim_attn2,
+                                heads=n_heads, dim_head=d_head, dropout=dropout, attn_precision=self.attn_precision, dtype=dtype, device=device, operations=operations)  # is self-attn if context is none
+            self.norm2 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
 
         self.norm1 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
         self.norm3 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
-        self.checkpoint = checkpoint
         self.n_heads = n_heads
         self.d_head = d_head
         self.switch_temporal_ca_to_sa = switch_temporal_ca_to_sa
 
     def forward(self, x, context=None, transformer_options={}):
-        return checkpoint(
-            self._forward,
-            (x, context, transformer_options),
-            self.parameters(),
-            self.checkpoint,
-        )
-
-    def _forward(self, x, context=None, transformer_options={}):
         extra_options = {}
         block = transformer_options.get("block", None)
         block_index = transformer_options.get("block_index", 0)
@@ -4150,35 +4327,103 @@ class BasicTransformerBlock(nn.Module):
         transformer_patches_replace = {}
 
         for k in transformer_options:
-            extra_options[k] = transformer_options[k]
+            if k == "patches":
+                transformer_patches = transformer_options[k]
+            elif k == "patches_replace":
+                transformer_patches_replace = transformer_options[k]
+            else:
+                extra_options[k] = transformer_options[k]
 
         extra_options["n_heads"] = self.n_heads
         extra_options["dim_head"] = self.d_head
+        extra_options["attn_precision"] = self.attn_precision
+
+        if self.ff_in:
+            x_skip = x
+            x = self.ff_in(self.norm_in(x))
+            if self.is_res:
+                x += x_skip
 
         n = self.norm1(x)
-        context_attn1 = None
+        if self.disable_self_attn:
+            context_attn1 = context
+        else:
+            context_attn1 = None
         value_attn1 = None
 
-        transformer_block = (block[0], block[1], block_index)
+        if "attn1_patch" in transformer_patches:
+            patch = transformer_patches["attn1_patch"]
+            if context_attn1 is None:
+                context_attn1 = n
+            value_attn1 = context_attn1
+            for p in patch:
+                n, context_attn1, value_attn1 = p(n, context_attn1, value_attn1, extra_options)
+
+        if block is not None:
+            transformer_block = (block[0], block[1], block_index)
+        else:
+            transformer_block = None
         attn1_replace_patch = transformer_patches_replace.get("attn1", {})
         block_attn1 = transformer_block
         if block_attn1 not in attn1_replace_patch:
             block_attn1 = block
 
-        n = self.attn1(n, context=context_attn1, value=value_attn1)
+        if block_attn1 in attn1_replace_patch:
+            if context_attn1 is None:
+                context_attn1 = n
+                value_attn1 = n
+            n = self.attn1.to_q(n)
+            context_attn1 = self.attn1.to_k(context_attn1)
+            value_attn1 = self.attn1.to_v(value_attn1)
+            n = attn1_replace_patch[block_attn1](n, context_attn1, value_attn1, extra_options)
+            n = self.attn1.to_out(n)
+        else:
+            n = self.attn1(n, context=context_attn1, value=value_attn1)
+
+        if "attn1_output_patch" in transformer_patches:
+            patch = transformer_patches["attn1_output_patch"]
+            for p in patch:
+                n = p(n, extra_options)
 
         x += n
+        if "middle_patch" in transformer_patches:
+            patch = transformer_patches["middle_patch"]
+            for p in patch:
+                x = p(x, extra_options)
 
         if self.attn2 is not None:
             n = self.norm2(x)
-            context_attn2 = context
+            if self.switch_temporal_ca_to_sa:
+                context_attn2 = n
+            else:
+                context_attn2 = context
             value_attn2 = None
+            if "attn2_patch" in transformer_patches:
+                patch = transformer_patches["attn2_patch"]
+                value_attn2 = context_attn2
+                for p in patch:
+                    n, context_attn2, value_attn2 = p(n, context_attn2, value_attn2, extra_options)
 
             attn2_replace_patch = transformer_patches_replace.get("attn2", {})
             block_attn2 = transformer_block
             if block_attn2 not in attn2_replace_patch:
                 block_attn2 = block
-            n = self.attn2(n, context=context_attn2, value=value_attn2)
+
+            if block_attn2 in attn2_replace_patch:
+                if value_attn2 is None:
+                    value_attn2 = context_attn2
+                n = self.attn2.to_q(n)
+                context_attn2 = self.attn2.to_k(context_attn2)
+                value_attn2 = self.attn2.to_v(value_attn2)
+                n = attn2_replace_patch[block_attn2](n, context_attn2, value_attn2, extra_options)
+                n = self.attn2.to_out(n)
+            else:
+                n = self.attn2(n, context=context_attn2, value=value_attn2)
+
+        if "attn2_output_patch" in transformer_patches:
+            patch = transformer_patches["attn2_output_patch"]
+            for p in patch:
+                n = p(n, extra_options)
 
         x += n
         if self.is_res:
@@ -4191,80 +4436,45 @@ class BasicTransformerBlock(nn.Module):
 
 
 class SpatialTransformer(nn.Module):
-    def __init__(
-        self,
-        in_channels,
-        n_heads,
-        d_head,
-        depth=1,
-        dropout=0.0,
-        context_dim=None,
-        disable_self_attn=False,
-        use_linear=False,
-        use_checkpoint=True,
-        dtype=None,
-        device=None,
-        operations=ops,
-    ):
+    """
+    Transformer block for image-like data.
+    First, project the input (aka embedding)
+    and reshape to b, t, d.
+    Then apply standard transformer action.
+    Finally, reshape to image
+    NEW: use_linear for more efficiency instead of the 1x1 convs
+    """
+    def __init__(self, in_channels, n_heads, d_head,
+                 depth=1, dropout=0., context_dim=None,
+                 disable_self_attn=False, use_linear=False,
+                 use_checkpoint=True, attn_precision=None, dtype=None, device=None, operations=ops):
         super().__init__()
         if exists(context_dim) and not isinstance(context_dim, list):
             context_dim = [context_dim] * depth
         self.in_channels = in_channels
         inner_dim = n_heads * d_head
-        self.norm = operations.GroupNorm(
-            num_groups=32,
-            num_channels=in_channels,
-            eps=1e-6,
-            affine=True,
-            dtype=dtype,
-            device=device,
-        )
+        self.norm = operations.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True, dtype=dtype, device=device)
         if not use_linear:
-            self.proj_in = operations.Conv2d(
-                in_channels,
-                inner_dim,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                dtype=dtype,
-                device=device,
-            )
+            self.proj_in = operations.Conv2d(in_channels,
+                                     inner_dim,
+                                     kernel_size=1,
+                                     stride=1,
+                                     padding=0, dtype=dtype, device=device)
         else:
-            self.proj_in = operations.Linear(
-                in_channels, inner_dim, dtype=dtype, device=device
-            )
+            self.proj_in = operations.Linear(in_channels, inner_dim, dtype=dtype, device=device)
 
         self.transformer_blocks = nn.ModuleList(
-            [
-                BasicTransformerBlock(
-                    inner_dim,
-                    n_heads,
-                    d_head,
-                    dropout=dropout,
-                    context_dim=context_dim[d],
-                    disable_self_attn=disable_self_attn,
-                    checkpoint=use_checkpoint,
-                    dtype=dtype,
-                    device=device,
-                    operations=operations,
-                )
-                for d in range(depth)
-            ]
+            [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
+                                   disable_self_attn=disable_self_attn, checkpoint=use_checkpoint, attn_precision=attn_precision, dtype=dtype, device=device, operations=operations)
+                for d in range(depth)]
         )
         if not use_linear:
-            self.proj_out = operations.Conv2d(
-                inner_dim,
-                in_channels,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                dtype=dtype,
-                device=device,
-            )
+            self.proj_out = operations.Conv2d(inner_dim,in_channels,
+                                                  kernel_size=1,
+                                                  stride=1,
+                                                  padding=0, dtype=dtype, device=device)
         else:
-            self.proj_out = operations.Linear(
-                in_channels, inner_dim, dtype=dtype, device=device
-            )
+            self.proj_out = operations.Linear(in_channels, inner_dim, dtype=dtype, device=device)
         self.use_linear = use_linear
 
     def forward(self, x, context=None, transformer_options={}):
@@ -4276,7 +4486,7 @@ class SpatialTransformer(nn.Module):
         x = self.norm(x)
         if not self.use_linear:
             x = self.proj_in(x)
-        x = rearrange(x, "b c h w -> b (h w) c").contiguous()
+        x = x.movedim(1, 3).flatten(1, 2).contiguous()
         if self.use_linear:
             x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
@@ -4284,7 +4494,7 @@ class SpatialTransformer(nn.Module):
             x = block(x, context=context[i], transformer_options=transformer_options)
         if self.use_linear:
             x = self.proj_out(x)
-        x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
+        x = x.reshape(x.shape[0], h, w, x.shape[-1]).movedim(3, 1).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
         return x + x_in
@@ -4508,13 +4718,13 @@ def default(val, d):
 
 # feedforward
 class GEGLU(nn.Module):
-    def __init__(self, dim_in, dim_out):
+    def __init__(self, dim_in, dim_out, dtype=None, device=None, operations=ops):
         super().__init__()
-        self.proj = ops.Linear(dim_in, dim_out * 2)
+        self.proj = operations.Linear(dim_in, dim_out * 2, dtype=dtype, device=device)
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim=-1)
-        return x * torch.nn.functional.gelu(gate)
+        return x * F.gelu(gate)
 
 
 import json
@@ -5123,86 +5333,12 @@ def forward_timestep_embed1(
             x = layer(x, context, transformer_options)
             if "transformer_index" in transformer_options:
                 transformer_options["transformer_index"] += 1
-        elif isinstance(layer, Upsample1):
+        elif isinstance(layer, Upsample):
             x = layer(x, output_shape=output_shape)
         else:
             x = layer(x)
     return x
 
-
-class Upsample1(nn.Module):
-    def __init__(
-        self,
-        channels,
-        use_conv,
-        dims=2,
-        out_channels=None,
-        padding=1,
-        dtype=None,
-        device=None,
-        operations=oai_ops,
-    ):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.dims = dims
-        if use_conv:
-            self.conv = operations.conv_nd(
-                dims,
-                self.channels,
-                self.out_channels,
-                3,
-                padding=padding,
-                dtype=dtype,
-                device=device,
-            )
-
-    def forward(self, x, output_shape=None):
-        assert x.shape[1] == self.channels
-        shape = [x.shape[2] * 2, x.shape[3] * 2]
-        if output_shape is not None:
-            shape[0] = output_shape[2]
-            shape[1] = output_shape[3]
-
-        x = F.interpolate(x, size=shape, mode="nearest")
-        if self.use_conv:
-            x = self.conv(x)
-        return x
-
-
-class Downsample1(nn.Module):
-    def __init__(
-        self,
-        channels,
-        use_conv,
-        dims=2,
-        out_channels=None,
-        padding=1,
-        dtype=None,
-        device=None,
-        operations=oai_ops,
-    ):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.dims = dims
-        stride = 2 if dims != 3 else (1, 2, 2)
-        self.op = operations.conv_nd(
-            dims,
-            self.channels,
-            self.out_channels,
-            3,
-            stride=stride,
-            padding=padding,
-            dtype=dtype,
-            device=device,
-        )
-
-    def forward(self, x):
-        assert x.shape[1] == self.channels
-        return self.op(x)
 
 
 class ResBlock1(TimestepBlock1):
@@ -5310,7 +5446,32 @@ def apply_control1(h, control, name):
     return h
 
 
-class UNetModel1(nn.Module):
+class UNetModel(nn.Module):
+    """
+    The full UNet model with attention and timestep embedding.
+    :param in_channels: channels in the input Tensor.
+    :param model_channels: base channel count for the model.
+    :param out_channels: channels in the output Tensor.
+    :param num_res_blocks: number of residual blocks per downsample.
+    :param dropout: the dropout probability.
+    :param channel_mult: channel multiplier for each level of the UNet.
+    :param conv_resample: if True, use learned convolutions for upsampling and
+        downsampling.
+    :param dims: determines if the signal is 1D, 2D, or 3D.
+    :param num_classes: if specified (as an int), then this model will be
+        class-conditional with `num_classes` classes.
+    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
+    :param num_heads: the number of attention heads in each attention layer.
+    :param num_heads_channels: if specified, ignore num_heads and instead use
+                               a fixed channel width per attention head.
+    :param num_heads_upsample: works with num_heads to set a different number
+                               of heads for upsampling. Deprecated.
+    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
+    :param resblock_updown: use residual blocks for up/downsampling.
+    :param use_new_attention_order: use a different attention pattern for potentially
+                                    increased efficiency.
+    """
+
     def __init__(
         self,
         image_size,
@@ -5331,10 +5492,10 @@ class UNetModel1(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
-        use_spatial_transformer=False,  # custom transformer support
-        transformer_depth=1,  # custom transformer support
-        context_dim=None,  # custom transformer support
-        n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
+        use_spatial_transformer=False,    # custom transformer support
+        transformer_depth=1,              # custom transformer support
+        context_dim=None,                 # custom transformer support
+        n_embed=None,                     # custom support for prediction of discrete ids into codebook of first stage vq model
         legacy=True,
         disable_self_attentions=None,
         num_attention_blocks=None,
@@ -5353,30 +5514,44 @@ class UNetModel1(nn.Module):
         video_kernel_size=None,
         disable_temporal_crossattention=False,
         max_ddpm_temb_period=10000,
+        attn_precision=None,
         device=None,
-        operations=oai_ops,
+        operations=ops,
     ):
         super().__init__()
 
         if context_dim is not None:
-            assert (
-                use_spatial_transformer
-            ), "Fool!! You forgot to use the spatial transformer for your cross-attention conditioning..."
+            assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
             # from omegaconf.listconfig import ListConfig
             # if type(context_dim) == ListConfig:
             #     context_dim = list(context_dim)
 
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
+
+        if num_heads == -1:
+            assert num_head_channels != -1, 'Either num_heads or num_head_channels has to be set'
+
         if num_head_channels == -1:
-            assert (
-                num_heads != -1
-            ), "Either num_heads or num_head_channels has to be set"
+            assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
 
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
-        self.num_res_blocks = num_res_blocks
+
+        if isinstance(num_res_blocks, int):
+            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
+        else:
+            if len(num_res_blocks) != len(channel_mult):
+                raise ValueError("provide num_res_blocks either as an int (globally constant) or "
+                                 "as a list/tuple (per-level) with the same length as channel_mult")
+            self.num_res_blocks = num_res_blocks
+
+        if disable_self_attentions is not None:
+            # should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
+            assert len(disable_self_attentions) == len(channel_mult)
+        if num_attention_blocks is not None:
+            assert len(num_attention_blocks) == len(self.num_res_blocks)
 
         transformer_depth = transformer_depth[:]
         transformer_depth_output = transformer_depth_output[:]
@@ -5397,27 +5572,33 @@ class UNetModel1(nn.Module):
 
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
-            operations.Linear(
-                model_channels, time_embed_dim, dtype=self.dtype, device=device
-            ),
+            operations.Linear(model_channels, time_embed_dim, dtype=self.dtype, device=device),
             nn.SiLU(),
-            operations.Linear(
-                time_embed_dim, time_embed_dim, dtype=self.dtype, device=device
-            ),
+            operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
         )
+
+        if self.num_classes is not None:
+            if isinstance(self.num_classes, int):
+                self.label_emb = nn.Embedding(num_classes, time_embed_dim, dtype=self.dtype, device=device)
+            elif self.num_classes == "continuous":
+                logging.debug("setting up linear c_adm embedding layer")
+                self.label_emb = nn.Linear(1, time_embed_dim)
+            elif self.num_classes == "sequential":
+                assert adm_in_channels is not None
+                self.label_emb = nn.Sequential(
+                    nn.Sequential(
+                        operations.Linear(adm_in_channels, time_embed_dim, dtype=self.dtype, device=device),
+                        nn.SiLU(),
+                        operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
+                    )
+                )
+            else:
+                raise ValueError()
 
         self.input_blocks = nn.ModuleList(
             [
-                TimestepEmbedSequential1(
-                    operations.conv_nd(
-                        dims,
-                        in_channels,
-                        model_channels,
-                        3,
-                        padding=1,
-                        dtype=self.dtype,
-                        device=device,
-                    )
+                TimestepEmbedSequential(
+                    operations.conv_nd(dims, in_channels, model_channels, 3, padding=1, dtype=self.dtype, device=device)
                 )
             ]
         )
@@ -5436,18 +5617,10 @@ class UNetModel1(nn.Module):
             disable_self_attn=False,
         ):
             return SpatialTransformer(
-                ch,
-                num_heads,
-                dim_head,
-                depth=depth,
-                context_dim=context_dim,
-                disable_self_attn=disable_self_attn,
-                use_linear=use_linear_in_transformer,
-                use_checkpoint=use_checkpoint,
-                dtype=self.dtype,
-                device=device,
-                operations=operations,
-            )
+                            ch, num_heads, dim_head, depth=depth, context_dim=context_dim,
+                            disable_self_attn=disable_self_attn, use_linear=use_linear_in_transformer,
+                            use_checkpoint=use_checkpoint, attn_precision=attn_precision, dtype=self.dtype, device=device, operations=operations
+                        )
 
         def get_resblock(
             merge_factor,
@@ -5464,22 +5637,41 @@ class UNetModel1(nn.Module):
             up=False,
             dtype=None,
             device=None,
-            operations=oai_ops,
+            operations=ops
         ):
-            return ResBlock1(
-                channels=ch,
-                emb_channels=time_embed_dim,
-                dropout=dropout,
-                out_channels=out_channels,
-                use_checkpoint=use_checkpoint,
-                dims=dims,
-                use_scale_shift_norm=use_scale_shift_norm,
-                down=down,
-                up=up,
-                dtype=dtype,
-                device=device,
-                operations=operations,
-            )
+            if self.use_temporal_resblocks:
+                return VideoResBlock(
+                    merge_factor=merge_factor,
+                    merge_strategy=merge_strategy,
+                    video_kernel_size=video_kernel_size,
+                    channels=ch,
+                    emb_channels=time_embed_dim,
+                    dropout=dropout,
+                    out_channels=out_channels,
+                    dims=dims,
+                    use_checkpoint=use_checkpoint,
+                    use_scale_shift_norm=use_scale_shift_norm,
+                    down=down,
+                    up=up,
+                    dtype=dtype,
+                    device=device,
+                    operations=operations
+                )
+            else:
+                return ResBlock(
+                    channels=ch,
+                    emb_channels=time_embed_dim,
+                    dropout=dropout,
+                    out_channels=out_channels,
+                    use_checkpoint=use_checkpoint,
+                    dims=dims,
+                    use_scale_shift_norm=use_scale_shift_norm,
+                    down=down,
+                    up=up,
+                    dtype=dtype,
+                    device=device,
+                    operations=operations
+                )
 
         for level, mult in enumerate(channel_mult):
             for nr in range(self.num_res_blocks[level]):
@@ -5503,31 +5695,31 @@ class UNetModel1(nn.Module):
                 ch = mult * model_channels
                 num_transformers = transformer_depth.pop(0)
                 if num_transformers > 0:
-                    dim_head = ch // num_heads
-                    disabled_sa = False
+                    if num_head_channels == -1:
+                        dim_head = ch // num_heads
+                    else:
+                        num_heads = ch // num_head_channels
+                        dim_head = num_head_channels
+                    if legacy:
+                        #num_heads = 1
+                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+                    if exists(disable_self_attentions):
+                        disabled_sa = disable_self_attentions[level]
+                    else:
+                        disabled_sa = False
 
-                    if (
-                        not exists(num_attention_blocks)
-                        or nr < num_attention_blocks[level]
-                    ):
-                        layers.append(
-                            get_attention_layer(
-                                ch,
-                                num_heads,
-                                dim_head,
-                                depth=num_transformers,
-                                context_dim=context_dim,
-                                disable_self_attn=disabled_sa,
-                                use_checkpoint=use_checkpoint,
-                            )
+                    if not exists(num_attention_blocks) or nr < num_attention_blocks[level]:
+                        layers.append(get_attention_layer(
+                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
+                                disable_self_attn=disabled_sa, use_checkpoint=use_checkpoint)
                         )
-                self.input_blocks.append(TimestepEmbedSequential1(*layers))
+                self.input_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
                 input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
-                    TimestepEmbedSequential1(
+                    TimestepEmbedSequential(
                         get_resblock(
                             merge_factor=merge_factor,
                             merge_strategy=merge_strategy,
@@ -5542,17 +5734,11 @@ class UNetModel1(nn.Module):
                             down=True,
                             dtype=self.dtype,
                             device=device,
-                            operations=operations,
+                            operations=operations
                         )
                         if resblock_updown
-                        else Downsample1(
-                            ch,
-                            conv_resample,
-                            dims=dims,
-                            out_channels=out_ch,
-                            dtype=self.dtype,
-                            device=device,
-                            operations=operations,
+                        else Downsample(
+                            ch, conv_resample, dims=dims, out_channels=out_ch, dtype=self.dtype, device=device, operations=operations
                         )
                     )
                 )
@@ -5561,7 +5747,14 @@ class UNetModel1(nn.Module):
                 ds *= 2
                 self._feature_size += ch
 
-        dim_head = ch // num_heads
+        if num_head_channels == -1:
+            dim_head = ch // num_heads
+        else:
+            num_heads = ch // num_head_channels
+            dim_head = num_head_channels
+        if legacy:
+            #num_heads = 1
+            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
         mid_block = [
             get_resblock(
                 merge_factor=merge_factor,
@@ -5576,40 +5769,32 @@ class UNetModel1(nn.Module):
                 use_scale_shift_norm=use_scale_shift_norm,
                 dtype=self.dtype,
                 device=device,
-                operations=operations,
-            )
-        ]
+                operations=operations
+            )]
 
         self.middle_block = None
         if transformer_depth_middle >= -1:
             if transformer_depth_middle >= 0:
-                mid_block += [
-                    get_attention_layer(  # always uses a self-attn
-                        ch,
-                        num_heads,
-                        dim_head,
-                        depth=transformer_depth_middle,
-                        context_dim=context_dim,
-                        disable_self_attn=disable_middle_self_attn,
-                        use_checkpoint=use_checkpoint,
-                    ),
-                    get_resblock(
-                        merge_factor=merge_factor,
-                        merge_strategy=merge_strategy,
-                        video_kernel_size=video_kernel_size,
-                        ch=ch,
-                        time_embed_dim=time_embed_dim,
-                        dropout=dropout,
-                        out_channels=None,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                        dtype=self.dtype,
-                        device=device,
-                        operations=operations,
-                    ),
-                ]
-            self.middle_block = TimestepEmbedSequential1(*mid_block)
+                mid_block += [get_attention_layer(  # always uses a self-attn
+                                ch, num_heads, dim_head, depth=transformer_depth_middle, context_dim=context_dim,
+                                disable_self_attn=disable_middle_self_attn, use_checkpoint=use_checkpoint
+                            ),
+                get_resblock(
+                    merge_factor=merge_factor,
+                    merge_strategy=merge_strategy,
+                    video_kernel_size=video_kernel_size,
+                    ch=ch,
+                    time_embed_dim=time_embed_dim,
+                    dropout=dropout,
+                    out_channels=None,
+                    dims=dims,
+                    use_checkpoint=use_checkpoint,
+                    use_scale_shift_norm=use_scale_shift_norm,
+                    dtype=self.dtype,
+                    device=device,
+                    operations=operations
+                )]
+            self.middle_block = TimestepEmbedSequential(*mid_block)
         self._feature_size += ch
 
         self.output_blocks = nn.ModuleList([])
@@ -5630,28 +5815,30 @@ class UNetModel1(nn.Module):
                         use_scale_shift_norm=use_scale_shift_norm,
                         dtype=self.dtype,
                         device=device,
-                        operations=operations,
+                        operations=operations
                     )
                 ]
                 ch = model_channels * mult
                 num_transformers = transformer_depth_output.pop()
                 if num_transformers > 0:
-                    dim_head = ch // num_heads
-                    disabled_sa = False
+                    if num_head_channels == -1:
+                        dim_head = ch // num_heads
+                    else:
+                        num_heads = ch // num_head_channels
+                        dim_head = num_head_channels
+                    if legacy:
+                        #num_heads = 1
+                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
+                    if exists(disable_self_attentions):
+                        disabled_sa = disable_self_attentions[level]
+                    else:
+                        disabled_sa = False
 
-                    if (
-                        not exists(num_attention_blocks)
-                        or i < num_attention_blocks[level]
-                    ):
+                    if not exists(num_attention_blocks) or i < num_attention_blocks[level]:
                         layers.append(
                             get_attention_layer(
-                                ch,
-                                num_heads,
-                                dim_head,
-                                depth=num_transformers,
-                                context_dim=context_dim,
-                                disable_self_attn=disabled_sa,
-                                use_checkpoint=use_checkpoint,
+                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
+                                disable_self_attn=disabled_sa, use_checkpoint=use_checkpoint
                             )
                         )
                 if level and i == self.num_res_blocks[level]:
@@ -5671,49 +5858,36 @@ class UNetModel1(nn.Module):
                             up=True,
                             dtype=self.dtype,
                             device=device,
-                            operations=operations,
+                            operations=operations
                         )
                         if resblock_updown
-                        else Upsample1(
-                            ch,
-                            conv_resample,
-                            dims=dims,
-                            out_channels=out_ch,
-                            dtype=self.dtype,
-                            device=device,
-                            operations=operations,
-                        )
+                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch, dtype=self.dtype, device=device, operations=operations)
                     )
                     ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential1(*layers))
+                self.output_blocks.append(TimestepEmbedSequential(*layers))
                 self._feature_size += ch
 
         self.out = nn.Sequential(
             operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
             nn.SiLU(),
-            zero_module(
-                operations.conv_nd(
-                    dims,
-                    model_channels,
-                    out_channels,
-                    3,
-                    padding=1,
-                    dtype=self.dtype,
-                    device=device,
-                )
-            ),
+            operations.conv_nd(dims, model_channels, out_channels, 3, padding=1, dtype=self.dtype, device=device),
+        )
+        if self.predict_codebook_ids:
+            self.id_predictor = nn.Sequential(
+            operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
+            operations.conv_nd(dims, model_channels, n_embed, 1, dtype=self.dtype, device=device),
+            #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
         )
 
-    def forward(
-        self,
-        x,
-        timesteps=None,
-        context=None,
-        y=None,
-        control=None,
-        transformer_options={},
-        **kwargs,
-    ):
+    def forward(self, x, timesteps=None, context=None, y=None, control=None, transformer_options={}, **kwargs):
+        """
+        Apply the model to an input batch.
+        :param x: an [N x C x ...] Tensor of inputs.
+        :param timesteps: a 1-D batch of timesteps.
+        :param context: conditioning plugged in via crossattn
+        :param y: an [N] Tensor of labels, if class-conditional.
+        :return: an [N x C x ...] Tensor of outputs.
+        """
         transformer_options["original_shape"] = list(x.shape)
         transformer_options["transformer_index"] = 0
         transformer_patches = transformer_options.get("patches", {})
@@ -5726,44 +5900,49 @@ class UNetModel1(nn.Module):
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
         hs = []
-        t_emb = timestep_embedding(
-            timesteps, self.model_channels, repeat_only=False
-        ).to(x.dtype)
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(x.dtype)
         emb = self.time_embed(t_emb)
+
+        if "emb_patch" in transformer_patches:
+            patch = transformer_patches["emb_patch"]
+            for p in patch:
+                emb = p(emb, self.model_channels, transformer_options)
+
+        if self.num_classes is not None:
+            assert y.shape[0] == x.shape[0]
+            emb = emb + self.label_emb(y)
+
         h = x
         for id, module in enumerate(self.input_blocks):
             transformer_options["block"] = ("input", id)
-            h = forward_timestep_embed1(
-                module,
-                h,
-                emb,
-                context,
-                transformer_options,
-                time_context=time_context,
-                num_video_frames=num_video_frames,
-                image_only_indicator=image_only_indicator,
-            )
-            h = apply_control1(h, control, "input")
+            h = forward_timestep_embed(module, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
+            h = apply_control(h, control, 'input')
+            if "input_block_patch" in transformer_patches:
+                patch = transformer_patches["input_block_patch"]
+                for p in patch:
+                    h = p(h, transformer_options)
+
             hs.append(h)
+            if "input_block_patch_after_skip" in transformer_patches:
+                patch = transformer_patches["input_block_patch_after_skip"]
+                for p in patch:
+                    h = p(h, transformer_options)
 
         transformer_options["block"] = ("middle", 0)
         if self.middle_block is not None:
-            h = forward_timestep_embed1(
-                self.middle_block,
-                h,
-                emb,
-                context,
-                transformer_options,
-                time_context=time_context,
-                num_video_frames=num_video_frames,
-                image_only_indicator=image_only_indicator,
-            )
-        h = apply_control1(h, control, "middle")
+            h = forward_timestep_embed(self.middle_block, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
+        h = apply_control(h, control, 'middle')
+
 
         for id, module in enumerate(self.output_blocks):
             transformer_options["block"] = ("output", id)
             hsp = hs.pop()
-            hsp = apply_control1(hsp, control, "output")
+            hsp = apply_control(hsp, control, 'output')
+
+            if "output_block_patch" in transformer_patches:
+                patch = transformer_patches["output_block_patch"]
+                for p in patch:
+                    h, hsp = p(h, hsp, transformer_options)
 
             h = th.cat([h, hsp], dim=1)
             del hsp
@@ -5771,19 +5950,12 @@ class UNetModel1(nn.Module):
                 output_shape = hs[-1].shape
             else:
                 output_shape = None
-            h = forward_timestep_embed1(
-                module,
-                h,
-                emb,
-                context,
-                transformer_options,
-                output_shape,
-                time_context=time_context,
-                num_video_frames=num_video_frames,
-                image_only_indicator=image_only_indicator,
-            )
+            h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
         h = h.type(x.dtype)
-        return self.out(h)
+        if self.predict_codebook_ids:
+            return self.id_predictor(h)
+        else:
+            return self.out(h)
 
 
 from typing import Union
@@ -5801,12 +5973,36 @@ class ModelType(Enum):
     V_PREDICTION_EDM = 3
     STABLE_CASCADE = 4
     EDM = 5
+    FLOW = 6
+    V_PREDICTION_CONTINUOUS = 7
+    FLUX = 8
 
 
 def model_sampling(model_config, model_type):
     s = ModelSamplingDiscrete
+
     if model_type == ModelType.EPS:
         c = EPS
+    elif model_type == ModelType.V_PREDICTION:
+        c = V_PREDICTION
+    elif model_type == ModelType.V_PREDICTION_EDM:
+        c = V_PREDICTION
+        s = ModelSamplingContinuousEDM
+    elif model_type == ModelType.FLOW:
+        c = CONST
+        s = ModelSamplingDiscreteFlow
+    elif model_type == ModelType.STABLE_CASCADE:
+        c = EPS
+        s = StableCascadeSampling
+    elif model_type == ModelType.EDM:
+        c = EDM
+        s = ModelSamplingContinuousEDM
+    elif model_type == ModelType.V_PREDICTION_CONTINUOUS:
+        c = V_PREDICTION
+        s = ModelSamplingContinuousV
+    elif model_type == ModelType.FLUX:
+        c = CONST
+        s = ModelSamplingFlux
 
     class ModelSampling(s, c):
         pass
@@ -5815,24 +6011,25 @@ def model_sampling(model_config, model_type):
 
 
 class BaseModel(torch.nn.Module):
-    def __init__(
-        self, model_config, model_type=ModelType.EPS, device=None, unet_model=UNetModel1
-    ):
+    def __init__(self, model_config, model_type=ModelType.EPS, device=None, unet_model=UNetModel):
         super().__init__()
 
         unet_config = model_config.unet_config
         self.latent_format = model_config.latent_format
         self.model_config = model_config
         self.manual_cast_dtype = model_config.manual_cast_dtype
+        self.device = device
 
         if not unet_config.get("disable_unet_model_creation", False):
-            if self.manual_cast_dtype is not None:
-                operations = manual_cast
+            if model_config.custom_operations is None:
+                operations = pick_operations(unet_config.get("dtype", None), self.manual_cast_dtype)
             else:
-                operations = disable_weight_init
-            self.diffusion_model = unet_model(
-                **unet_config, device=device, operations=operations
-            )
+                operations = model_config.custom_operations
+            self.diffusion_model = unet_model(**unet_config, device=device, operations=operations)
+            if force_channels_last():
+                self.diffusion_model.to(memory_format=torch.channels_last)
+                logging.debug("using channels last mode for diffusion model")
+            logging.info("model weight dtype {}, manual cast: {}".format(self.get_dtype(), self.manual_cast_dtype))
         self.model_type = model_type
         self.model_sampling = model_sampling(model_config, model_type)
 
@@ -5843,22 +6040,19 @@ class BaseModel(torch.nn.Module):
         self.concat_keys = ()
         logging.info("model_type {}".format(model_type.name))
         logging.debug("adm {}".format(self.adm_channels))
+        self.memory_usage_factor = model_config.memory_usage_factor
 
-    def apply_model(
-        self,
-        x,
-        t,
-        c_concat=None,
-        c_crossattn=None,
-        control=None,
-        transformer_options={},
-        **kwargs,
-    ):
+    def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
         sigma = t
         xc = self.model_sampling.calculate_input(sigma, x)
+        if c_concat is not None:
+            xc = torch.cat([xc] + [c_concat], dim=1)
 
         context = c_crossattn
         dtype = self.get_dtype()
+
+        if self.manual_cast_dtype is not None:
+            dtype = self.manual_cast_dtype
 
         xc = xc.to(dtype)
         t = self.model_sampling.timestep(t).float()
@@ -5866,28 +6060,81 @@ class BaseModel(torch.nn.Module):
         extra_conds = {}
         for o in kwargs:
             extra = kwargs[o]
+            if hasattr(extra, "dtype"):
+                if extra.dtype != torch.int and extra.dtype != torch.long:
+                    extra = extra.to(dtype)
             extra_conds[o] = extra
 
-        model_output = self.diffusion_model(
-            xc,
-            t,
-            context=context,
-            control=control,
-            transformer_options=transformer_options,
-            **extra_conds,
-        ).float()
+        model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds).float()
         return self.model_sampling.calculate_denoised(sigma, model_output, x)
 
     def get_dtype(self):
         return self.diffusion_model.dtype
+
+    def is_adm(self):
+        return self.adm_channels > 0
 
     def encode_adm(self, **kwargs):
         return None
 
     def extra_conds(self, **kwargs):
         out = {}
+        if len(self.concat_keys) > 0:
+            cond_concat = []
+            denoise_mask = kwargs.get("concat_mask", kwargs.get("denoise_mask", None))
+            concat_latent_image = kwargs.get("concat_latent_image", None)
+            if concat_latent_image is None:
+                concat_latent_image = kwargs.get("latent_image", None)
+            else:
+                concat_latent_image = self.process_latent_in(concat_latent_image)
+
+            noise = kwargs.get("noise", None)
+            device = kwargs["device"]
+
+            if concat_latent_image.shape[1:] != noise.shape[1:]:
+                concat_latent_image = common_upscale(concat_latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
+
+            concat_latent_image = resize_to_batch_size(concat_latent_image, noise.shape[0])
+
+            if denoise_mask is not None:
+                if len(denoise_mask.shape) == len(noise.shape):
+                    denoise_mask = denoise_mask[:,:1]
+
+                denoise_mask = denoise_mask.reshape((-1, 1, denoise_mask.shape[-2], denoise_mask.shape[-1]))
+                if denoise_mask.shape[-2:] != noise.shape[-2:]:
+                    denoise_mask = common_upscale(denoise_mask, noise.shape[-1], noise.shape[-2], "bilinear", "center")
+                denoise_mask = resize_to_batch_size(denoise_mask.round(), noise.shape[0])
+
+            for ck in self.concat_keys:
+                if denoise_mask is not None:
+                    if ck == "mask":
+                        cond_concat.append(denoise_mask.to(device))
+                    elif ck == "masked_image":
+                        cond_concat.append(concat_latent_image.to(device)) #NOTE: the latent_image should be masked by the mask in pixel space
+                else:
+                    if ck == "mask":
+                        cond_concat.append(torch.ones_like(noise)[:,:1])
+                    elif ck == "masked_image":
+                        cond_concat.append(self.blank_inpaint_image_like(noise))
+            data = torch.cat(cond_concat, dim=1)
+            out['c_concat'] = CONDNoiseShape(data)
+
+        adm = self.encode_adm(**kwargs)
+        if adm is not None:
+            out['y'] = CONDRegular(adm)
+
         cross_attn = kwargs.get("cross_attn", None)
-        out["c_crossattn"] = CONDCrossAttn(cross_attn)
+        if cross_attn is not None:
+            out['c_crossattn'] = CONDCrossAttn(cross_attn)
+
+        cross_attn_cnet = kwargs.get("cross_attn_controlnet", None)
+        if cross_attn_cnet is not None:
+            out['crossattn_controlnet'] = CONDCrossAttn(cross_attn_cnet)
+
+        c_concat = kwargs.get("noise_concat", None)
+        if c_concat is not None:
+            out['c_concat'] = CONDNoiseShape(c_concat)
+
         return out
 
     def load_model_weights(self, sd, unet_prefix=""):
@@ -5895,10 +6142,15 @@ class BaseModel(torch.nn.Module):
         keys = list(sd.keys())
         for k in keys:
             if k.startswith(unet_prefix):
-                to_load[k[len(unet_prefix) :]] = sd.pop(k)
+                to_load[k[len(unet_prefix):]] = sd.pop(k)
 
         to_load = self.model_config.process_unet_state_dict(to_load)
         m, u = self.diffusion_model.load_state_dict(to_load, strict=False)
+        if len(m) > 0:
+            logging.warning("unet missing: {}".format(m))
+
+        if len(u) > 0:
+            logging.warning("unet unexpected: {}".format(u))
         del to_load
         return self
 
@@ -5908,12 +6160,50 @@ class BaseModel(torch.nn.Module):
     def process_latent_out(self, latent):
         return self.latent_format.process_out(latent)
 
+    def state_dict_for_saving(self, clip_state_dict=None, vae_state_dict=None, clip_vision_state_dict=None):
+        extra_sds = []
+        if clip_state_dict is not None:
+            extra_sds.append(self.model_config.process_clip_state_dict_for_saving(clip_state_dict))
+        if vae_state_dict is not None:
+            extra_sds.append(self.model_config.process_vae_state_dict_for_saving(vae_state_dict))
+        if clip_vision_state_dict is not None:
+            extra_sds.append(self.model_config.process_clip_vision_state_dict_for_saving(clip_vision_state_dict))
+
+        unet_state_dict = self.diffusion_model.state_dict()
+        unet_state_dict = self.model_config.process_unet_state_dict_for_saving(unet_state_dict)
+
+        if self.model_type == ModelType.V_PREDICTION:
+            unet_state_dict["v_pred"] = torch.tensor([])
+
+        for sd in extra_sds:
+            unet_state_dict.update(sd)
+
+        return unet_state_dict
+
+    def set_inpaint(self):
+        self.concat_keys = ("mask", "masked_image")
+        def blank_inpaint_image_like(latent_image):
+            blank_image = torch.ones_like(latent_image)
+            # these are the values for "zero" in pixel space translated to latent space
+            blank_image[:,0] *= 0.8223
+            blank_image[:,1] *= -0.6876
+            blank_image[:,2] *= 0.6364
+            blank_image[:,3] *= 0.1380
+            return blank_image
+        self.blank_inpaint_image_like = blank_inpaint_image_like
+
     def memory_required(self, input_shape):
-        dtype = self.get_dtype()
-        if self.manual_cast_dtype is not None:
-            dtype = self.manual_cast_dtype
-        area = input_shape[0] * input_shape[2] * input_shape[3]
-        return (area * dtype_size(dtype) / 50) * (1024 * 1024)
+        if xformers_enabled() or pytorch_attention_flash_attention():
+            dtype = self.get_dtype()
+            if self.manual_cast_dtype is not None:
+                dtype = self.manual_cast_dtype
+            #TODO: this needs to be tweaked
+            area = input_shape[0] * math.prod(input_shape[2:])
+            return (area * dtype_size(dtype) * 0.01 * self.memory_usage_factor) * (1024 * 1024)
+        else:
+            #TODO: this formula might be too aggressive since I tweaked the sub-quad and split algorithms to use less memory.
+            area = input_shape[0] * math.prod(input_shape[2:])
+            return (area * 0.15 * self.memory_usage_factor) * (1024 * 1024)
 
 
 class ClipTarget:
@@ -5921,7 +6211,6 @@ class ClipTarget:
         self.clip = clip
         self.tokenizer = tokenizer
         self.params = {}
-
 
 class BASE:
     unet_config = {}
@@ -5941,13 +6230,20 @@ class BASE:
     text_encoder_key_prefix = ["cond_stage_model."]
     supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
 
+    memory_usage_factor = 2.0
+
     manual_cast_dtype = None
+    custom_operations = None
 
     @classmethod
     def matches(s, unet_config, state_dict=None):
         for k in s.unet_config:
             if k not in unet_config or s.unet_config[k] != unet_config[k]:
                 return False
+        if state_dict is not None:
+            for k in s.required_keys:
+                if k not in state_dict:
+                    return False
         return True
 
     def model_type(self, state_dict, prefix=""):
@@ -5964,16 +6260,50 @@ class BASE:
             self.unet_config[x] = self.unet_extra_config[x]
 
     def get_model(self, state_dict, prefix="", device=None):
-        out = BaseModel(
-            self, model_type=self.model_type(state_dict, prefix), device=device
-        )
+        if self.noise_aug_config is not None:
+            out = SD21UNCLIP(
+                self,
+                self.noise_aug_config,
+                model_type=self.model_type(state_dict, prefix),
+                device=device,
+            )
+        else:
+            out = BaseModel(
+                self, model_type=self.model_type(state_dict, prefix), device=device
+            )
+        if self.inpaint_model():
+            out.set_inpaint()
         return out
+
+    def process_clip_state_dict(self, state_dict):
+        state_dict = state_dict_prefix_replace(
+            state_dict, {k: "" for k in self.text_encoder_key_prefix}, filter_keys=True
+        )
+        return state_dict
 
     def process_unet_state_dict(self, state_dict):
         return state_dict
 
     def process_vae_state_dict(self, state_dict):
         return state_dict
+
+    def process_clip_state_dict_for_saving(self, state_dict):
+        replace_prefix = {"": self.text_encoder_key_prefix[0]}
+        return state_dict_prefix_replace(state_dict, replace_prefix)
+
+    def process_clip_vision_state_dict_for_saving(self, state_dict):
+        replace_prefix = {}
+        if self.clip_vision_prefix is not None:
+            replace_prefix[""] = self.clip_vision_prefix
+        return state_dict_prefix_replace(state_dict, replace_prefix)
+
+    def process_unet_state_dict_for_saving(self, state_dict):
+        replace_prefix = {"": "model.diffusion_model."}
+        return state_dict_prefix_replace(state_dict, replace_prefix)
+
+    def process_vae_state_dict_for_saving(self, state_dict):
+        replace_prefix = {"": self.vae_key_prefix[0]}
+        return state_dict_prefix_replace(state_dict, replace_prefix)
 
     def set_inference_dtype(self, dtype, manual_cast_dtype):
         self.unet_config["dtype"] = dtype
@@ -6072,17 +6402,176 @@ def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
             "{}1.time_stack.0.attn1.to_q.weight".format(prefix) in state_dict
             or "{}1.time_mix_blocks.0.attn1.to_q.weight".format(prefix) in state_dict
         )
+        time_stack_cross = (
+            "{}1.time_stack.0.attn2.to_q.weight".format(prefix) in state_dict
+            or "{}1.time_mix_blocks.0.attn2.to_q.weight".format(prefix) in state_dict
+        )
         return (
             last_transformer_depth,
             context_dim,
             use_linear_in_transformer,
             time_stack,
+            time_stack_cross,
         )
     return None
 
 
 def detect_unet_config(state_dict, key_prefix):
     state_dict_keys = list(state_dict.keys())
+
+    if (
+        "{}joint_blocks.0.context_block.attn.qkv.weight".format(key_prefix)
+        in state_dict_keys
+    ):  # mmdit model
+        unet_config = {}
+        unet_config["in_channels"] = state_dict[
+            "{}x_embedder.proj.weight".format(key_prefix)
+        ].shape[1]
+        patch_size = state_dict["{}x_embedder.proj.weight".format(key_prefix)].shape[2]
+        unet_config["patch_size"] = patch_size
+        final_layer = "{}final_layer.linear.weight".format(key_prefix)
+        if final_layer in state_dict:
+            unet_config["out_channels"] = state_dict[final_layer].shape[0] // (
+                patch_size * patch_size
+            )
+
+        unet_config["depth"] = (
+            state_dict["{}x_embedder.proj.weight".format(key_prefix)].shape[0] // 64
+        )
+        unet_config["input_size"] = None
+        y_key = "{}y_embedder.mlp.0.weight".format(key_prefix)
+        if y_key in state_dict_keys:
+            unet_config["adm_in_channels"] = state_dict[y_key].shape[1]
+
+        context_key = "{}context_embedder.weight".format(key_prefix)
+        if context_key in state_dict_keys:
+            in_features = state_dict[context_key].shape[1]
+            out_features = state_dict[context_key].shape[0]
+            unet_config["context_embedder_config"] = {
+                "target": "torch.nn.Linear",
+                "params": {"in_features": in_features, "out_features": out_features},
+            }
+        num_patches_key = "{}pos_embed".format(key_prefix)
+        if num_patches_key in state_dict_keys:
+            num_patches = state_dict[num_patches_key].shape[1]
+            unet_config["num_patches"] = num_patches
+            unet_config["pos_embed_max_size"] = round(math.sqrt(num_patches))
+
+        rms_qk = "{}joint_blocks.0.context_block.attn.ln_q.weight".format(key_prefix)
+        if rms_qk in state_dict_keys:
+            unet_config["qk_norm"] = "rms"
+
+        unet_config["pos_embed_scaling_factor"] = None  # unused for inference
+        context_processor = "{}context_processor.layers.0.attn.qkv.weight".format(
+            key_prefix
+        )
+        if context_processor in state_dict_keys:
+            unet_config["context_processor_layers"] = count_blocks(
+                state_dict_keys,
+                "{}context_processor.layers.".format(key_prefix) + "{}.",
+            )
+        return unet_config
+
+    if "{}clf.1.weight".format(key_prefix) in state_dict_keys:  # stable cascade
+        unet_config = {}
+        text_mapper_name = "{}clip_txt_mapper.weight".format(key_prefix)
+        if text_mapper_name in state_dict_keys:
+            unet_config["stable_cascade_stage"] = "c"
+            w = state_dict[text_mapper_name]
+            if w.shape[0] == 1536:  # stage c lite
+                unet_config["c_cond"] = 1536
+                unet_config["c_hidden"] = [1536, 1536]
+                unet_config["nhead"] = [24, 24]
+                unet_config["blocks"] = [[4, 12], [12, 4]]
+            elif w.shape[0] == 2048:  # stage c full
+                unet_config["c_cond"] = 2048
+        elif "{}clip_mapper.weight".format(key_prefix) in state_dict_keys:
+            unet_config["stable_cascade_stage"] = "b"
+            w = state_dict["{}down_blocks.1.0.channelwise.0.weight".format(key_prefix)]
+            if w.shape[-1] == 640:
+                unet_config["c_hidden"] = [320, 640, 1280, 1280]
+                unet_config["nhead"] = [-1, -1, 20, 20]
+                unet_config["blocks"] = [[2, 6, 28, 6], [6, 28, 6, 2]]
+                unet_config["block_repeat"] = [[1, 1, 1, 1], [3, 3, 2, 2]]
+            elif w.shape[-1] == 576:  # stage b lite
+                unet_config["c_hidden"] = [320, 576, 1152, 1152]
+                unet_config["nhead"] = [-1, 9, 18, 18]
+                unet_config["blocks"] = [[2, 4, 14, 4], [4, 14, 4, 2]]
+                unet_config["block_repeat"] = [[1, 1, 1, 1], [2, 2, 2, 2]]
+        return unet_config
+
+    if (
+        "{}transformer.rotary_pos_emb.inv_freq".format(key_prefix) in state_dict_keys
+    ):  # stable audio dit
+        unet_config = {}
+        unet_config["audio_model"] = "dit1.0"
+        return unet_config
+
+    if (
+        "{}double_layers.0.attn.w1q.weight".format(key_prefix) in state_dict_keys
+    ):  # aura flow dit
+        unet_config = {}
+        unet_config["max_seq"] = state_dict[
+            "{}positional_encoding".format(key_prefix)
+        ].shape[1]
+        unet_config["cond_seq_dim"] = state_dict[
+            "{}cond_seq_linear.weight".format(key_prefix)
+        ].shape[1]
+        double_layers = count_blocks(
+            state_dict_keys, "{}double_layers.".format(key_prefix) + "{}."
+        )
+        single_layers = count_blocks(
+            state_dict_keys, "{}single_layers.".format(key_prefix) + "{}."
+        )
+        unet_config["n_double_layers"] = double_layers
+        unet_config["n_layers"] = double_layers + single_layers
+        return unet_config
+
+    if "{}mlp_t5.0.weight".format(key_prefix) in state_dict_keys:  # Hunyuan DiT
+        unet_config = {}
+        unet_config["image_model"] = "hydit"
+        unet_config["depth"] = count_blocks(
+            state_dict_keys, "{}blocks.".format(key_prefix) + "{}."
+        )
+        unet_config["hidden_size"] = state_dict[
+            "{}x_embedder.proj.weight".format(key_prefix)
+        ].shape[0]
+        if unet_config["hidden_size"] == 1408 and unet_config["depth"] == 40:  # DiT-g/2
+            unet_config["mlp_ratio"] = 4.3637
+        if state_dict["{}extra_embedder.0.weight".format(key_prefix)].shape[1] == 3968:
+            unet_config["size_cond"] = True
+            unet_config["use_style_cond"] = True
+            unet_config["image_model"] = "hydit1"
+        return unet_config
+
+    if (
+        "{}double_blocks.0.img_attn.norm.key_norm.scale".format(key_prefix)
+        in state_dict_keys
+    ):  # Flux
+        dit_config = {}
+        dit_config["image_model"] = "flux"
+        dit_config["in_channels"] = 16
+        dit_config["vec_in_dim"] = 768
+        dit_config["context_in_dim"] = 4096
+        dit_config["hidden_size"] = 3072
+        dit_config["mlp_ratio"] = 4.0
+        dit_config["num_heads"] = 24
+        dit_config["depth"] = count_blocks(
+            state_dict_keys, "{}double_blocks.".format(key_prefix) + "{}."
+        )
+        dit_config["depth_single_blocks"] = count_blocks(
+            state_dict_keys, "{}single_blocks.".format(key_prefix) + "{}."
+        )
+        dit_config["axes_dim"] = [16, 56, 56]
+        dit_config["theta"] = 10000
+        dit_config["qkv_bias"] = True
+        dit_config["guidance_embed"] = (
+            "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
+        )
+        return dit_config
+
+    if "{}input_blocks.0.0.weight".format(key_prefix) not in state_dict_keys:
+        return None
 
     unet_config = {
         "use_checkpoint": False,
@@ -6092,13 +6581,20 @@ def detect_unet_config(state_dict, key_prefix):
     }
 
     y_input = "{}label_emb.0.0.weight".format(key_prefix)
-    unet_config["adm_in_channels"] = None
+    if y_input in state_dict_keys:
+        unet_config["num_classes"] = "sequential"
+        unet_config["adm_in_channels"] = state_dict[y_input].shape[1]
+    else:
+        unet_config["adm_in_channels"] = None
 
     model_channels = state_dict["{}input_blocks.0.0.weight".format(key_prefix)].shape[0]
     in_channels = state_dict["{}input_blocks.0.0.weight".format(key_prefix)].shape[1]
 
     out_key = "{}out.2.weight".format(key_prefix)
-    out_channels = state_dict[out_key].shape[0]
+    if out_key in state_dict:
+        out_channels = state_dict[out_key].shape[0]
+    else:
+        out_channels = 4
 
     num_res_blocks = []
     channel_mult = []
@@ -6109,6 +6605,7 @@ def detect_unet_config(state_dict, key_prefix):
     use_linear_in_transformer = False
 
     video_model = False
+    video_model_cross = False
 
     current_res = 1
     count = 0
@@ -6128,6 +6625,8 @@ def detect_unet_config(state_dict, key_prefix):
         block_keys = sorted(
             list(filter(lambda a: a.startswith(prefix), state_dict_keys))
         )
+        if len(block_keys) == 0:
+            break
 
         block_keys_output = sorted(
             list(filter(lambda a: a.startswith(prefix_output), state_dict_keys))
@@ -6163,6 +6662,7 @@ def detect_unet_config(state_dict, key_prefix):
                         context_dim = out[1]
                         use_linear_in_transformer = out[2]
                         video_model = out[3]
+                        video_model_cross = out[4]
                 else:
                     transformer_depth.append(0)
 
@@ -6183,6 +6683,10 @@ def detect_unet_config(state_dict, key_prefix):
             state_dict_keys,
             "{}middle_block.1.transformer_blocks.".format(key_prefix) + "{}",
         )
+    elif "{}middle_block.0.in_layers.0.weight".format(key_prefix) in state_dict_keys:
+        transformer_depth_middle = -1
+    else:
+        transformer_depth_middle = -2
 
     unet_config["in_channels"] = in_channels
     unet_config["out_channels"] = out_channels
@@ -6195,8 +6699,18 @@ def detect_unet_config(state_dict, key_prefix):
     unet_config["use_linear_in_transformer"] = use_linear_in_transformer
     unet_config["context_dim"] = context_dim
 
-    unet_config["use_temporal_resblock"] = False
-    unet_config["use_temporal_attention"] = False
+    if video_model:
+        unet_config["extra_ff_mix_layer"] = True
+        unet_config["use_spatial_context"] = True
+        unet_config["merge_strategy"] = "learned_with_images"
+        unet_config["merge_factor"] = 0.0
+        unet_config["video_kernel_size"] = [3, 1, 1]
+        unet_config["use_temporal_resblock"] = True
+        unet_config["use_temporal_attention"] = True
+        unet_config["disable_temporal_crossattention"] = not video_model_cross
+    else:
+        unet_config["use_temporal_resblock"] = False
+        unet_config["use_temporal_attention"] = False
 
     return unet_config
 
@@ -6206,9 +6720,14 @@ def model_config_from_unet_config(unet_config, state_dict=None):
         if model_config.matches(unet_config, state_dict):
             return model_config(unet_config)
 
+    logging.error("no match {}".format(unet_config))
+    return None
+
 
 def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=False):
     unet_config = detect_unet_config(state_dict, unet_key_prefix)
+    if unet_config is None:
+        return None
     model_config = model_config_from_unet_config(unet_config, state_dict)
     return model_config
 
@@ -6237,40 +6756,16 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip):
 
     return (new_modelpatcher, new_clip)
 
-
-def text_encoder_initial_device(load_device, offload_device, model_size=0):
-    if load_device == offload_device or model_size <= 1024 * 1024 * 1024:
-        return offload_device
-
-    if is_device_mps(load_device):
-        return offload_device
-
-    mem_l = get_free_memory(load_device)
-    mem_o = get_free_memory(offload_device)
-    if mem_l > (mem_o * 0.5) and model_size * 1.2 < mem_l:
-        return load_device
-    else:
-        return offload_device
-
-def supports_cast(device, dtype): #TODO
-    if dtype == torch.float32:
-        return True
-    if dtype == torch.float16:
-        return True
-    if directml_enabled: #TODO: test this
-        return False
-    if dtype == torch.bfloat16:
-        return True
-    if is_device_mps(device):
-        return False
-    if dtype == torch.float8_e4m3fn:
-        return True
-    if dtype == torch.float8_e5m2:
-        return True
-    return False
-
 class CLIP:
-    def __init__(self, target=None, embedding_directory=None, no_init=False, tokenizer_data={}, parameters=0, model_options={}):
+    def __init__(
+        self,
+        target=None,
+        embedding_directory=None,
+        no_init=False,
+        tokenizer_data={},
+        parameters=0,
+        model_options={},
+    ):
         if no_init:
             return
         params = target.params.copy()
@@ -6278,30 +6773,47 @@ class CLIP:
         tokenizer = target.tokenizer
 
         load_device = model_options.get("load_device", text_encoder_device())
-        offload_device = model_options.get("offload_device", text_encoder_offload_device())
+        offload_device = model_options.get(
+            "offload_device", text_encoder_offload_device()
+        )
         dtype = model_options.get("dtype", None)
         if dtype is None:
             dtype = text_encoder_dtype(load_device)
 
-        params['dtype'] = dtype
-        params['device'] = model_options.get("initial_device", text_encoder_initial_device(load_device, offload_device, parameters * dtype_size(dtype)))
-        params['model_options'] = model_options
+        params["dtype"] = dtype
+        params["device"] = model_options.get(
+            "initial_device",
+            text_encoder_initial_device(
+                load_device, offload_device, parameters * dtype_size(dtype)
+            ),
+        )
+        params["model_options"] = model_options
 
         self.cond_stage_model = clip(**(params))
 
         for dt in self.cond_stage_model.dtypes:
             if not supports_cast(load_device, dt):
                 load_device = offload_device
-                if params['device'] != offload_device:
+                if params["device"] != offload_device:
                     self.cond_stage_model.to(offload_device)
                     logging.warning("Had to shift TE back.")
 
-        self.tokenizer = tokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
-        self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
-        if params['device'] == load_device:
+        self.tokenizer = tokenizer(
+            embedding_directory=embedding_directory, tokenizer_data=tokenizer_data
+        )
+        self.patcher = ModelPatcher(
+            self.cond_stage_model,
+            load_device=load_device,
+            offload_device=offload_device,
+        )
+        if params["device"] == load_device:
             load_models_gpu([self.patcher], force_full_load=True)
         self.layer_idx = None
-        logging.debug("CLIP model load device: {}, offload device: {}, current: {}".format(load_device, offload_device, params['device']))
+        logging.debug(
+            "CLIP model load device: {}, offload device: {}, current: {}".format(
+                load_device, offload_device, params["device"]
+            )
+        )
 
     def clone(self):
         n = CLIP(no_init=True)
@@ -6370,6 +6882,11 @@ class CLIP:
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None):
+        if (
+            "decoder.up_blocks.0.resnets.0.norm1.weight" in sd.keys()
+        ):  # diffusers format
+            sd = convert_vae_state_dict(sd)
+
         self.memory_used_encode = lambda shape, dtype: (
             1767 * shape[2] * shape[3]
         ) * dtype_size(
@@ -6381,13 +6898,17 @@ class VAE:
         self.downscale_ratio = 8
         self.upscale_ratio = 8
         self.latent_channels = 4
+        self.output_channels = 3
         self.process_input = lambda image: image * 2.0 - 1.0
         self.process_output = lambda image: torch.clamp(
             (image + 1.0) / 2.0, min=0.0, max=1.0
         )
+        self.working_dtypes = [torch.bfloat16, torch.float32]
+
         if config is None:
-            config = {
-                "encoder": {
+            if "decoder.conv_in.weight" in sd:
+                # default SD1.x/SD2.x VAE parameters
+                ddconfig = {
                     "double_z": True,
                     "z_channels": 4,
                     "resolution": 256,
@@ -6398,36 +6919,58 @@ class VAE:
                     "num_res_blocks": 2,
                     "attn_resolutions": [],
                     "dropout": 0.0,
-                },
-                "decoder": {
-                    "double_z": True,
-                    "z_channels": 4,
-                    "resolution": 256,
-                    "in_channels": 3,
-                    "out_ch": 3,
-                    "ch": 128,
-                    "ch_mult": [1, 2, 4, 4],
-                    "num_res_blocks": 2,
-                    "attn_resolutions": [],
-                    "dropout": 0.0,
-                },
-                "regularizer": {"sample": True},
-            }
-            self.first_stage_model = AutoencodingEngine(
-                Encoder(**config["encoder"]),
-                Decoder(**config["decoder"]),
-                DiagonalGaussianRegularizer(**config["regularizer"]),
-            )
+                }
+
+                if (
+                    "encoder.down.2.downsample.conv.weight" not in sd
+                    and "decoder.up.3.upsample.conv.weight" not in sd
+                ):  # Stable diffusion x4 upscaler VAE
+                    ddconfig["ch_mult"] = [1, 2, 4]
+                    self.downscale_ratio = 4
+                    self.upscale_ratio = 4
+
+                self.latent_channels = ddconfig["z_channels"] = sd[
+                    "decoder.conv_in.weight"
+                ].shape[1]
+                if "quant_conv.weight" in sd:
+                    self.first_stage_model = AutoencoderKL(
+                        ddconfig=ddconfig, embed_dim=4
+                    )
+                else:
+                    self.first_stage_model = AutoencodingEngine(
+                        regularizer_config={
+                            "target": "flux.DiagonalGaussianRegularizer"
+                        },
+                        encoder_config={
+                            "target": "flux.Encoder",
+                            "params": ddconfig,
+                        },
+                        decoder_config={
+                            "target": "flux.Decoder",
+                            "params": ddconfig,
+                        },
+                    )
+            else:
+                logging.warning("WARNING: No VAE weights detected, VAE not initalized.")
+                self.first_stage_model = None
+                return
+        else:
+            self.first_stage_model = AutoencoderKL(**(config["params"]))
         self.first_stage_model = self.first_stage_model.eval()
 
-        self.first_stage_model.load_state_dict(sd, strict=False)
+        m, u = self.first_stage_model.load_state_dict(sd, strict=False)
+        if len(m) > 0:
+            logging.warning("Missing VAE keys {}".format(m))
+
+        if len(u) > 0:
+            logging.debug("Leftover VAE keys {}".format(u))
 
         if device is None:
             device = vae_device()
         self.device = device
         offload_device = vae_offload_device()
         if dtype is None:
-            dtype = vae_dtype()
+            dtype = vae_dtype(self.device, self.working_dtypes)
         self.vae_dtype = dtype
         self.first_stage_model.to(self.vae_dtype)
         self.output_device = intermediate_device()
@@ -6437,71 +6980,258 @@ class VAE:
             load_device=self.device,
             offload_device=offload_device,
         )
+        logging.debug(
+            "VAE load device: {}, offload device: {}, dtype: {}".format(
+                self.device, offload_device, self.vae_dtype
+            )
+        )
 
     def vae_encode_crop_pixels(self, pixels):
-        x = (pixels.shape[1] // self.downscale_ratio) * self.downscale_ratio
-        y = (pixels.shape[2] // self.downscale_ratio) * self.downscale_ratio
+        dims = pixels.shape[1:-1]
+        for d in range(len(dims)):
+            x = (dims[d] // self.downscale_ratio) * self.downscale_ratio
+            x_offset = (dims[d] % self.downscale_ratio) // 2
+            if x != dims[d]:
+                pixels = pixels.narrow(d + 1, x_offset, x)
         return pixels
 
-    def decode(self, samples_in):
-        memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-        load_models_gpu([self.patcher], memory_required=memory_used)
-        free_memory = get_free_memory(self.device)
-        batch_number = int(free_memory / memory_used)
-        batch_number = max(1, batch_number)
-
-        pixel_samples = torch.empty(
-            (
-                samples_in.shape[0],
-                3,
-                round(samples_in.shape[2] * self.upscale_ratio),
-                round(samples_in.shape[3] * self.upscale_ratio),
-            ),
-            device=self.output_device,
+    def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap=16):
+        steps = samples.shape[0] * get_tiled_scale_steps(
+            samples.shape[3], samples.shape[2], tile_x, tile_y, overlap
         )
-        for x in range(0, samples_in.shape[0], batch_number):
-            samples = (
-                samples_in[x : x + batch_number].to(self.vae_dtype).to(self.device)
+        steps += samples.shape[0] * get_tiled_scale_steps(
+            samples.shape[3], samples.shape[2], tile_x // 2, tile_y * 2, overlap
+        )
+        steps += samples.shape[0] * get_tiled_scale_steps(
+            samples.shape[3], samples.shape[2], tile_x * 2, tile_y // 2, overlap
+        )
+        pbar = ProgressBar(steps)
+
+        decode_fn = lambda a: self.first_stage_model.decode(
+            a.to(self.vae_dtype).to(self.device)
+        ).float()
+        output = self.process_output(
+            (
+                tiled_scale(
+                    samples,
+                    decode_fn,
+                    tile_x // 2,
+                    tile_y * 2,
+                    overlap,
+                    upscale_amount=self.upscale_ratio,
+                    output_device=self.output_device,
+                    pbar=pbar,
+                )
+                + tiled_scale(
+                    samples,
+                    decode_fn,
+                    tile_x * 2,
+                    tile_y // 2,
+                    overlap,
+                    upscale_amount=self.upscale_ratio,
+                    output_device=self.output_device,
+                    pbar=pbar,
+                )
+                + tiled_scale(
+                    samples,
+                    decode_fn,
+                    tile_x,
+                    tile_y,
+                    overlap,
+                    upscale_amount=self.upscale_ratio,
+                    output_device=self.output_device,
+                    pbar=pbar,
+                )
             )
-            pixel_samples[x : x + batch_number] = self.process_output(
-                self.first_stage_model.decode(samples).to(self.output_device).float()
+            / 3.0
+        )
+        return output
+
+    def decode_tiled_1d(self, samples, tile_x=128, overlap=32):
+        decode_fn = lambda a: self.first_stage_model.decode(
+            a.to(self.vae_dtype).to(self.device)
+        ).float()
+        return tiled_scale_multidim(
+            samples,
+            decode_fn,
+            tile=(tile_x,),
+            overlap=overlap,
+            upscale_amount=self.upscale_ratio,
+            out_channels=self.output_channels,
+            output_device=self.output_device,
+        )
+
+    def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
+        steps = pixel_samples.shape[0] * get_tiled_scale_steps(
+            pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap
+        )
+        steps += pixel_samples.shape[0] * get_tiled_scale_steps(
+            pixel_samples.shape[3],
+            pixel_samples.shape[2],
+            tile_x // 2,
+            tile_y * 2,
+            overlap,
+        )
+        steps += pixel_samples.shape[0] * get_tiled_scale_steps(
+            pixel_samples.shape[3],
+            pixel_samples.shape[2],
+            tile_x * 2,
+            tile_y // 2,
+            overlap,
+        )
+        pbar = ProgressBar(steps)
+
+        encode_fn = lambda a: self.first_stage_model.encode(
+            (self.process_input(a)).to(self.vae_dtype).to(self.device)
+        ).float()
+        samples = tiled_scale(
+            pixel_samples,
+            encode_fn,
+            tile_x,
+            tile_y,
+            overlap,
+            upscale_amount=(1 / self.downscale_ratio),
+            out_channels=self.latent_channels,
+            output_device=self.output_device,
+            pbar=pbar,
+        )
+        samples += tiled_scale(
+            pixel_samples,
+            encode_fn,
+            tile_x * 2,
+            tile_y // 2,
+            overlap,
+            upscale_amount=(1 / self.downscale_ratio),
+            out_channels=self.latent_channels,
+            output_device=self.output_device,
+            pbar=pbar,
+        )
+        samples += tiled_scale(
+            pixel_samples,
+            encode_fn,
+            tile_x // 2,
+            tile_y * 2,
+            overlap,
+            upscale_amount=(1 / self.downscale_ratio),
+            out_channels=self.latent_channels,
+            output_device=self.output_device,
+            pbar=pbar,
+        )
+        samples /= 3.0
+        return samples
+
+    def encode_tiled_1d(self, samples, tile_x=128 * 2048, overlap=32 * 2048):
+        encode_fn = lambda a: self.first_stage_model.encode(
+            (self.process_input(a)).to(self.vae_dtype).to(self.device)
+        ).float()
+        return tiled_scale_multidim(
+            samples,
+            encode_fn,
+            tile=(tile_x,),
+            overlap=overlap,
+            upscale_amount=(1 / self.downscale_ratio),
+            out_channels=self.latent_channels,
+            output_device=self.output_device,
+        )
+
+    def decode(self, samples_in):
+        try:
+            memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
+            load_models_gpu([self.patcher], memory_required=memory_used)
+            free_memory = get_free_memory(self.device)
+            batch_number = int(free_memory / memory_used)
+            batch_number = max(1, batch_number)
+
+            pixel_samples = torch.empty(
+                (samples_in.shape[0], self.output_channels)
+                + tuple(map(lambda a: a * self.upscale_ratio, samples_in.shape[2:])),
+                device=self.output_device,
             )
+            for x in range(0, samples_in.shape[0], batch_number):
+                samples = (
+                    samples_in[x : x + batch_number].to(self.vae_dtype).to(self.device)
+                )
+                pixel_samples[x : x + batch_number] = self.process_output(
+                    self.first_stage_model.decode(samples)
+                    .to(self.output_device)
+                    .float()
+                )
+        except OOM_EXCEPTION as e:
+            logging.warning(
+                "Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding."
+            )
+            if len(samples_in.shape) == 3:
+                pixel_samples = self.decode_tiled_1d(samples_in)
+            else:
+                pixel_samples = self.decode_tiled_(samples_in)
+
         pixel_samples = pixel_samples.to(self.output_device).movedim(1, -1)
         return pixel_samples
+
+    def decode_tiled(self, samples, tile_x=64, tile_y=64, overlap=16):
+        load_model_gpu(self.patcher)
+        output = self.decode_tiled_(samples, tile_x, tile_y, overlap)
+        return output.movedim(1, -1)
 
     def encode(self, pixel_samples):
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         pixel_samples = pixel_samples.movedim(-1, 1)
-        memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
-        load_models_gpu([self.patcher], memory_required=memory_used)
-        free_memory = get_free_memory(self.device)
-        batch_number = int(free_memory / memory_used)
-        batch_number = max(1, batch_number)
-        samples = torch.empty(
-            (
-                pixel_samples.shape[0],
-                self.latent_channels,
-                round(pixel_samples.shape[2] // self.downscale_ratio),
-                round(pixel_samples.shape[3] // self.downscale_ratio),
-            ),
-            device=self.output_device,
-        )
-        for x in range(0, pixel_samples.shape[0], batch_number):
-            pixels_in = (
-                self.process_input(pixel_samples[x : x + batch_number])
-                .to(self.vae_dtype)
-                .to(self.device)
+        try:
+            memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
+            load_models_gpu([self.patcher], memory_required=memory_used)
+            free_memory = get_free_memory(self.device)
+            batch_number = int(free_memory / memory_used)
+            batch_number = max(1, batch_number)
+            samples = torch.empty(
+                (pixel_samples.shape[0], self.latent_channels)
+                + tuple(
+                    map(lambda a: a // self.downscale_ratio, pixel_samples.shape[2:])
+                ),
+                device=self.output_device,
             )
-            samples[x : x + batch_number] = (
-                self.first_stage_model.encode(pixels_in).to(self.output_device).float()
+            for x in range(0, pixel_samples.shape[0], batch_number):
+                pixels_in = (
+                    self.process_input(pixel_samples[x : x + batch_number])
+                    .to(self.vae_dtype)
+                    .to(self.device)
+                )
+                samples[x : x + batch_number] = (
+                    self.first_stage_model.encode(pixels_in)
+                    .to(self.output_device)
+                    .float()
+                )
+
+        except OOM_EXCEPTION as e:
+            logging.warning(
+                "Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding."
             )
+            if len(pixel_samples.shape) == 3:
+                samples = self.encode_tiled_1d(pixel_samples)
+            else:
+                samples = self.encode_tiled_(pixel_samples)
 
         return samples
+
+    def encode_tiled(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
+        pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
+        load_model_gpu(self.patcher)
+        pixel_samples = pixel_samples.movedim(-1, 1)
+        samples = self.encode_tiled_(
+            pixel_samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap
+        )
+        return samples
+
+    def get_sd(self):
+        return self.first_stage_model.state_dict()
 
 
 class CLIPType(Enum):
     STABLE_DIFFUSION = 1
     STABLE_CASCADE = 2
+    SD3 = 3
+    STABLE_AUDIO = 4
+    HUNYUAN_DIT = 5
+    FLUX = 6
 
 
 def unet_dtype1(
@@ -6762,11 +7492,9 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
     noise_mask = None
     if "noise_mask" in latent:
         noise_mask = latent["noise_mask"]
-
-    disable_pbar = not PROGRESS_BAR_ENABLED
     samples = sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
                                   denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
-                                  force_full_denoise=force_full_denoise, noise_mask=noise_mask, disable_pbar=disable_pbar, seed=seed)
+                                  force_full_denoise=force_full_denoise, noise_mask=noise_mask, seed=seed)
     out = latent.copy()
     out["samples"] = samples
     return (out, )
@@ -7574,10 +8302,6 @@ def flatten(img, bgcolor):
     )
 
 
-class Script:
-    pass
-
-
 class Options:
     img2img_background_color = "#ffffff"  # Set to white for now
 
@@ -8202,6 +8926,10 @@ class USDUSeamsFix:
 
     def start(self, p, image, rows, cols):
         return self.half_tile_process(p, image, rows, cols)
+
+
+class Script:
+    pass
 
 
 class Script(Script):
@@ -10277,48 +11005,21 @@ if glob.glob(".\\_internal\\embeddings\\*.pt") == None :
     from huggingface_hub import hf_hub_download
     hf_hub_download(repo_id="EvilEngine/badhandv4", filename="badhandv4.pt")
     hf_hub_download(repo_id="gsdf/EasyNegative", filename="EasyNegative.pt")
-
-
-"""
-    This file is part of ComfyUI.
-    Copyright (C) 2024 Comfy
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-"""
-
-
-
-
-def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False):
-    if device is None or weight.device == device:
-        if not copy:
-            if dtype is None or weight.dtype == dtype:
-                return weight
-        return weight.to(dtype=dtype, copy=copy)
-
-    r = torch.empty_like(weight, dtype=dtype, device=device)
-    r.copy_(weight, non_blocking=non_blocking)
-    return r
+if glob.glob(".\\_internal\\unet\\*.gguf") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="city96/FLUX.1-dev-gguf", filename="flux1-dev-Q8_0.gguf")
+if glob.glob(".\\_internal\\clip\\*.gguf") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="city96/t5-v1_1-xxl-encoder-gguf", filename="t5-v1_1-xxl-encoder-Q8_0.gguf")
+    hf_hub_download(repo_id="comfyanonymous/flux_text_encoders", filename="clip_l.safetensors")
+if glob.glob(".\\_internal\\vae\\*.safetensors") == None :
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id="black-forest-labs/FLUX.1-schnell", filename="ae.safetensors")
 
 
 import pickle
 
 load = pickle.load
-
-
-class Empty:
-    pass
 
 
 class Unpickler(pickle.Unpickler):
@@ -10352,58 +11053,6 @@ def load_torch_file(ckpt, safe_load=False, device=None):
         else:
             sd = pl_sd
     return sd
-
-
-def set_attr(obj, attr, value):
-    attrs = attr.split(".")
-    for name in attrs[:-1]:
-        obj = getattr(obj, name)
-    prev = getattr(obj, attrs[-1])
-    setattr(obj, attrs[-1], value)
-    return prev
-
-
-def set_attr_param(obj, attr, value):
-    return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
-
-
-def copy_to_param(obj, attr, value):
-    # inplace update tensor instead of replacing it
-    attrs = attr.split(".")
-    for name in attrs[:-1]:
-        obj = getattr(obj, name)
-    prev = getattr(obj, attrs[-1])
-    prev.data.copy_(value)
-
-
-def device_should_use_non_blocking(device):
-    return False
-    # return True #TODO: figure out why this causes memory issues on Nvidia and possibly others
-
-
-def cast_to_device(tensor, device, dtype, copy=False):
-    device_supports_cast = False
-    if tensor.dtype == torch.float32 or tensor.dtype == torch.float16:
-        device_supports_cast = True
-    elif tensor.dtype == torch.bfloat16:
-        if hasattr(device, "type") and device.type.startswith("cuda"):
-            device_supports_cast = True
-
-    non_blocking = device_should_use_non_blocking(device)
-
-    if device_supports_cast:
-        if copy:
-            if tensor.device == device:
-                return tensor.to(dtype, copy=copy, non_blocking=non_blocking)
-            return tensor.to(device, copy=copy, non_blocking=non_blocking).to(
-                dtype, non_blocking=non_blocking
-            )
-        else:
-            return tensor.to(device, non_blocking=non_blocking).to(
-                dtype, non_blocking=non_blocking
-            )
-    else:
-        return tensor.to(device, dtype, copy=copy, non_blocking=non_blocking)
 
 
 def string_to_seed(data):
@@ -10526,13 +11175,6 @@ class UnetParams(TypedDict):
 
 
 UnetWrapperFunction = Callable[[UnetApplyFunction, UnetParams], torch.Tensor]
-
-
-def get_attr(obj, attr):
-    attrs = attr.split(".")
-    for name in attrs:
-        obj = getattr(obj, name)
-    return obj
 
 
 def weight_decompose(
@@ -11445,42 +12087,221 @@ from typing import Dict, Tuple
 import torch
 
 
+
 class DiagonalGaussianRegularizer(torch.nn.Module):
     def __init__(self, sample: bool = True):
         super().__init__()
         self.sample = sample
 
+    def get_trainable_parameters(self) -> Any:
+        yield from ()
+
     def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict]:
         log = dict()
         posterior = DiagonalGaussianDistribution(z)
-        z = posterior.sample()
+        if self.sample:
+            z = posterior.sample()
+        else:
+            z = posterior.mode()
         kl_loss = posterior.kl()
         kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
         log["kl_loss"] = kl_loss
         return z, log
 
 
-class AutoencodingEngine(nn.Module):
-    def __init__(self, encoder, decoder, regularizer):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-        self.regularization = regularizer
-        self.post_quant_conv = disable_weight_init.Conv2d(4, 4, 1)
-        self.quant_conv = disable_weight_init.Conv2d(8, 8, 1)
+class AbstractAutoencoder(torch.nn.Module):
+    """
+    This is the base class for all autoencoders, including image autoencoders, image autoencoders with discriminators,
+    unCLIP models, etc. Hence, it is fairly general, and specific features
+    (e.g. discriminator training, encoding, decoding) must be implemented in subclasses.
+    """
 
-    def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
-        dec = self.post_quant_conv(z)
-        dec = self.decoder(dec, **decoder_kwargs)
-        return dec
+    def __init__(
+        self,
+        ema_decay: Union[None, float] = None,
+        monitor: Union[None, str] = None,
+        input_key: str = "jpg",
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.input_key = input_key
+        self.use_ema = ema_decay is not None
+        if monitor is not None:
+            self.monitor = monitor
+
+        if self.use_ema:
+            self.model_ema = LitEma(self, decay=ema_decay)
+            logpy.info(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
+
+    def get_input(self, batch) -> Any:
+        raise NotImplementedError()
+
+    def on_train_batch_end(self, *args, **kwargs):
+        # for EMA computation
+        if self.use_ema:
+            self.model_ema(self)
+
+    @contextmanager
+    def ema_scope(self, context=None):
+        if self.use_ema:
+            self.model_ema.store(self.parameters())
+            self.model_ema.copy_to(self)
+            if context is not None:
+                logpy.info(f"{context}: Switched to EMA weights")
+        try:
+            yield None
+        finally:
+            if self.use_ema:
+                self.model_ema.restore(self.parameters())
+                if context is not None:
+                    logpy.info(f"{context}: Restored training weights")
+
+    def encode(self, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError("encode()-method of abstract base class called")
+
+    def decode(self, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError("decode()-method of abstract base class called")
+
+    def instantiate_optimizer_from_config(self, params, lr, cfg):
+        logpy.info(f"loading >>> {cfg['target']} <<< optimizer from config")
+        return get_obj_from_str(cfg["target"])(
+            params, lr=lr, **cfg.get("params", dict())
+        )
+
+    def configure_optimizers(self) -> Any:
+        raise NotImplementedError()
+
+
+class AutoencodingEngine(AbstractAutoencoder):
+    """
+    Base class for all image autoencoders that we train, like VQGAN or AutoencoderKL
+    (we also restore them explicitly as special cases for legacy reasons).
+    Regularizations such as KL or VQ are moved to the regularizer class.
+    """
+
+    def __init__(
+        self,
+        *args,
+        encoder_config: Dict,
+        decoder_config: Dict,
+        regularizer_config: Dict,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.encoder: torch.nn.Module = instantiate_from_config(encoder_config)
+        self.decoder: torch.nn.Module = instantiate_from_config(decoder_config)
+        self.regularization: AbstractRegularizer = instantiate_from_config(
+            regularizer_config
+        )
+
+    def get_last_layer(self):
+        return self.decoder.get_last_layer()
+
+    def encode(
+        self,
+        x: torch.Tensor,
+        return_reg_log: bool = False,
+        unregularized: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
+        z = self.encoder(x)
+        if unregularized:
+            return z, dict()
+        z, reg_log = self.regularization(z)
+        if return_reg_log:
+            return z, reg_log
+        return z
+
+    def decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
+        x = self.decoder(z, **kwargs)
+        return x
+
+    def forward(
+        self, x: torch.Tensor, **additional_decode_kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+        z, reg_log = self.encode(x, return_reg_log=True)
+        dec = self.decode(z, **additional_decode_kwargs)
+        return z, dec, reg_log
+
+
+class AutoencodingEngineLegacy(AutoencodingEngine):
+    def __init__(self, embed_dim: int, **kwargs):
+        self.max_batch_size = kwargs.pop("max_batch_size", None)
+        ddconfig = kwargs.pop("ddconfig")
+        super().__init__(
+            encoder_config={
+                "target": "flux.Encoder",
+                "params": ddconfig,
+            },
+            decoder_config={
+                "target": "flux.Decoder",
+                "params": ddconfig,
+            },
+            **kwargs,
+        )
+        self.quant_conv = disable_weight_init.Conv2d(
+            (1 + ddconfig["double_z"]) * ddconfig["z_channels"],
+            (1 + ddconfig["double_z"]) * embed_dim,
+            1,
+        )
+        self.post_quant_conv = disable_weight_init.Conv2d(
+            embed_dim, ddconfig["z_channels"], 1
+        )
+        self.embed_dim = embed_dim
+
+    def get_autoencoder_params(self) -> list:
+        params = super().get_autoencoder_params()
+        return params
 
     def encode(
         self, x: torch.Tensor, return_reg_log: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        z = self.encoder(x)
-        z = self.quant_conv(z)
+        if self.max_batch_size is None:
+            z = self.encoder(x)
+            z = self.quant_conv(z)
+        else:
+            N = x.shape[0]
+            bs = self.max_batch_size
+            n_batches = int(math.ceil(N / bs))
+            z = list()
+            for i_batch in range(n_batches):
+                z_batch = self.encoder(x[i_batch * bs : (i_batch + 1) * bs])
+                z_batch = self.quant_conv(z_batch)
+                z.append(z_batch)
+            z = torch.cat(z, 0)
+
         z, reg_log = self.regularization(z)
+        if return_reg_log:
+            return z, reg_log
         return z
+
+    def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
+        if self.max_batch_size is None:
+            dec = self.post_quant_conv(z)
+            dec = self.decoder(dec, **decoder_kwargs)
+        else:
+            N = z.shape[0]
+            bs = self.max_batch_size
+            n_batches = int(math.ceil(N / bs))
+            dec = list()
+            for i_batch in range(n_batches):
+                dec_batch = self.post_quant_conv(z[i_batch * bs : (i_batch + 1) * bs])
+                dec_batch = self.decoder(dec_batch, **decoder_kwargs)
+                dec.append(dec_batch)
+            dec = torch.cat(dec, 0)
+
+        return dec
+
+
+class AutoencoderKL(AutoencodingEngineLegacy):
+    def __init__(self, **kwargs):
+        if "lossconfig" in kwargs:
+            kwargs["loss_config"] = kwargs.pop("lossconfig")
+        super().__init__(
+            regularizer_config={"target": ("flux.DiagonalGaussianRegularizer")},
+            **kwargs,
+        )
 
 def unet_prefix_from_state_dict(state_dict):
     candidates = [
@@ -11499,20 +12320,6 @@ def unet_prefix_from_state_dict(state_dict):
         return top
     else:
         return "model."  # aura flow and others
-
-
-def count_blocks(state_dict_keys, prefix_string):
-    count = 0
-    while True:
-        c = False
-        for k in state_dict_keys:
-            if k.startswith(prefix_string.format(count)):
-                c = True
-                break
-        if c == False:
-            break
-        count += 1
-    return count
 
 
 def swap_scale_shift(weight):
@@ -12227,17 +13034,6 @@ def unet_config_from_diffusers_unet(state_dict, dtype=None):
     return None
 
 
-class ModelType(Enum):
-    EPS = 1
-    V_PREDICTION = 2
-    V_PREDICTION_EDM = 3
-    STABLE_CASCADE = 4
-    EDM = 5
-    FLOW = 6
-    V_PREDICTION_CONTINUOUS = 7
-    FLUX = 8
-
-
 def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
     if filter_keys:
         out = {}
@@ -12254,27 +13050,6 @@ def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
             w = state_dict.pop(x[0])
             out[x[1]] = w
     return out
-
-
-class ClipTarget:
-    def __init__(self, tokenizer, clip):
-        self.clip = clip
-        self.tokenizer = tokenizer
-        self.params = {}
-
-
-class LatentFormat:
-    scale_factor = 1.0
-    latent_channels = 4
-    latent_rgb_factors = None
-    taesd_decoder_name = None
-
-    def process_in(self, latent):
-        return latent * self.scale_factor
-
-    def process_out(self, latent):
-        return latent / self.scale_factor
-
 
 class SD3(LatentFormat):
     latent_channels = 16
@@ -12346,27 +13121,6 @@ def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_
         return disable_weight_init
     return manual_cast
 
-class EPS:
-    def calculate_input(self, sigma, noise):
-        sigma = sigma.view(sigma.shape[:1] + (1,) * (noise.ndim - 1))
-        return noise / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
-
-    def calculate_denoised(self, sigma, model_output, model_input):
-        sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
-        return model_input - model_output * sigma
-
-    def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
-        if max_denoise:
-            noise = noise * torch.sqrt(1.0 + sigma ** 2.0)
-        else:
-            noise = noise * sigma
-
-        noise += latent_image
-        return noise
-
-    def inverse_noise_scaling(self, sigma, latent):
-        return latent
-
 class V_PREDICTION(EPS):
     def calculate_denoised(self, sigma, model_output, model_input):
         sigma = sigma.view(sigma.shape[:1] + (1,) * (model_output.ndim - 1))
@@ -12390,77 +13144,6 @@ class CONST:
 
     def inverse_noise_scaling(self, sigma, latent):
         return latent / (1.0 - sigma)
-
-class ModelSamplingDiscrete(torch.nn.Module):
-    def __init__(self, model_config=None):
-        super().__init__()
-
-        if model_config is not None:
-            sampling_settings = model_config.sampling_settings
-        else:
-            sampling_settings = {}
-
-        beta_schedule = sampling_settings.get("beta_schedule", "linear")
-        linear_start = sampling_settings.get("linear_start", 0.00085)
-        linear_end = sampling_settings.get("linear_end", 0.012)
-        timesteps = sampling_settings.get("timesteps", 1000)
-
-        self._register_schedule(given_betas=None, beta_schedule=beta_schedule, timesteps=timesteps, linear_start=linear_start, linear_end=linear_end, cosine_s=8e-3)
-        self.sigma_data = 1.0
-
-    def _register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
-                          linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
-        if given_betas is not None:
-            betas = given_betas
-        else:
-            betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
-        alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-        self.linear_start = linear_start
-        self.linear_end = linear_end
-
-        # self.register_buffer('betas', torch.tensor(betas, dtype=torch.float32))
-        # self.register_buffer('alphas_cumprod', torch.tensor(alphas_cumprod, dtype=torch.float32))
-        # self.register_buffer('alphas_cumprod_prev', torch.tensor(alphas_cumprod_prev, dtype=torch.float32))
-
-        sigmas = ((1 - alphas_cumprod) / alphas_cumprod) ** 0.5
-        self.set_sigmas(sigmas)
-
-    def set_sigmas(self, sigmas):
-        self.register_buffer('sigmas', sigmas.float())
-        self.register_buffer('log_sigmas', sigmas.log().float())
-
-    @property
-    def sigma_min(self):
-        return self.sigmas[0]
-
-    @property
-    def sigma_max(self):
-        return self.sigmas[-1]
-
-    def timestep(self, sigma):
-        log_sigma = sigma.log()
-        dists = log_sigma.to(self.log_sigmas.device) - self.log_sigmas[:, None]
-        return dists.abs().argmin(dim=0).view(sigma.shape).to(sigma.device)
-
-    def sigma(self, timestep):
-        t = torch.clamp(timestep.float().to(self.log_sigmas.device), min=0, max=(len(self.sigmas) - 1))
-        low_idx = t.floor().long()
-        high_idx = t.ceil().long()
-        w = t.frac()
-        log_sigma = (1 - w) * self.log_sigmas[low_idx] + w * self.log_sigmas[high_idx]
-        return log_sigma.exp().to(timestep.device)
-
-    def percent_to_sigma(self, percent):
-        if percent <= 0.0:
-            return 999999999.9
-        if percent >= 1.0:
-            return 0.0
-        percent = 1.0 - percent
-        return self.sigma(torch.tensor(percent * 999.0)).item()
 
 class ModelSamplingDiscreteEDM(ModelSamplingDiscrete):
     def timestep(self, sigma):
@@ -12657,115 +13340,8 @@ class ModelSamplingFlux(torch.nn.Module):
             return 0.0
         return 1.0 - percent
 
-
-def model_sampling(model_config, model_type):
-    s = ModelSamplingDiscrete
-
-    if model_type == ModelType.EPS:
-        c = EPS
-    elif model_type == ModelType.V_PREDICTION:
-        c = V_PREDICTION
-    elif model_type == ModelType.V_PREDICTION_EDM:
-        c = V_PREDICTION
-        s = ModelSamplingContinuousEDM
-    elif model_type == ModelType.FLOW:
-        c = CONST
-        s = ModelSamplingDiscreteFlow
-    elif model_type == ModelType.STABLE_CASCADE:
-        c = EPS
-        s = StableCascadeSampling
-    elif model_type == ModelType.EDM:
-        c = EDM
-        s = ModelSamplingContinuousEDM
-    elif model_type == ModelType.V_PREDICTION_CONTINUOUS:
-        c = V_PREDICTION
-        s = ModelSamplingContinuousV
-    elif model_type == ModelType.FLUX:
-        c = CONST
-        s = ModelSamplingFlux
-
-    class ModelSampling(s, c):
-        pass
-
-    return ModelSampling(model_config)
-
 from PIL import Image
 
-def bislerp(samples, width, height):
-    def slerp(b1, b2, r):
-        '''slerps batches b1, b2 according to ratio r, batches should be flat e.g. NxC'''
-        
-        c = b1.shape[-1]
-
-        #norms
-        b1_norms = torch.norm(b1, dim=-1, keepdim=True)
-        b2_norms = torch.norm(b2, dim=-1, keepdim=True)
-
-        #normalize
-        b1_normalized = b1 / b1_norms
-        b2_normalized = b2 / b2_norms
-
-        #zero when norms are zero
-        b1_normalized[b1_norms.expand(-1,c) == 0.0] = 0.0
-        b2_normalized[b2_norms.expand(-1,c) == 0.0] = 0.0
-
-        #slerp
-        dot = (b1_normalized*b2_normalized).sum(1)
-        omega = torch.acos(dot)
-        so = torch.sin(omega)
-
-        #technically not mathematically correct, but more pleasing?
-        res = (torch.sin((1.0-r.squeeze(1))*omega)/so).unsqueeze(1)*b1_normalized + (torch.sin(r.squeeze(1)*omega)/so).unsqueeze(1) * b2_normalized
-        res *= (b1_norms * (1.0-r) + b2_norms * r).expand(-1,c)
-
-        #edge cases for same or polar opposites
-        res[dot > 1 - 1e-5] = b1[dot > 1 - 1e-5] 
-        res[dot < 1e-5 - 1] = (b1 * (1.0-r) + b2 * r)[dot < 1e-5 - 1]
-        return res
-    
-    def generate_bilinear_data(length_old, length_new, device):
-        coords_1 = torch.arange(length_old, dtype=torch.float32, device=device).reshape((1,1,1,-1))
-        coords_1 = torch.nn.functional.interpolate(coords_1, size=(1, length_new), mode="bilinear")
-        ratios = coords_1 - coords_1.floor()
-        coords_1 = coords_1.to(torch.int64)
-        
-        coords_2 = torch.arange(length_old, dtype=torch.float32, device=device).reshape((1,1,1,-1)) + 1
-        coords_2[:,:,:,-1] -= 1
-        coords_2 = torch.nn.functional.interpolate(coords_2, size=(1, length_new), mode="bilinear")
-        coords_2 = coords_2.to(torch.int64)
-        return ratios, coords_1, coords_2
-
-    orig_dtype = samples.dtype
-    samples = samples.float()
-    n,c,h,w = samples.shape
-    h_new, w_new = (height, width)
-    
-    #linear w
-    ratios, coords_1, coords_2 = generate_bilinear_data(w, w_new, samples.device)
-    coords_1 = coords_1.expand((n, c, h, -1))
-    coords_2 = coords_2.expand((n, c, h, -1))
-    ratios = ratios.expand((n, 1, h, -1))
-
-    pass_1 = samples.gather(-1,coords_1).movedim(1, -1).reshape((-1,c))
-    pass_2 = samples.gather(-1,coords_2).movedim(1, -1).reshape((-1,c))
-    ratios = ratios.movedim(1, -1).reshape((-1,1))
-
-    result = slerp(pass_1, pass_2, ratios)
-    result = result.reshape(n, h, w_new, c).movedim(-1, 1)
-
-    #linear h
-    ratios, coords_1, coords_2 = generate_bilinear_data(h, h_new, samples.device)
-    coords_1 = coords_1.reshape((1,1,-1,1)).expand((n, c, -1, w_new))
-    coords_2 = coords_2.reshape((1,1,-1,1)).expand((n, c, -1, w_new))
-    ratios = ratios.reshape((1,1,-1,1)).expand((n, 1, -1, w_new))
-
-    pass_1 = result.gather(-2,coords_1).movedim(1, -1).reshape((-1,c))
-    pass_2 = result.gather(-2,coords_2).movedim(1, -1).reshape((-1,c))
-    ratios = ratios.movedim(1, -1).reshape((-1,1))
-
-    result = slerp(pass_1, pass_2, ratios)
-    result = result.reshape(n, h_new, w_new, c).movedim(-1, 1)
-    return result.to(orig_dtype)
 
 def lanczos(samples, width, height):
     images = [Image.fromarray(np.clip(255. * image.movedim(0, -1).cpu().numpy(), 0, 255).astype(np.uint8)) for image in samples]
@@ -12773,29 +13349,6 @@ def lanczos(samples, width, height):
     images = [torch.from_numpy(np.array(image).astype(np.float32) / 255.0).movedim(-1, 0) for image in images]
     result = torch.stack(images)
     return result.to(samples.device, samples.dtype)
-
-def common_upscale(samples, width, height, upscale_method, crop):
-        if crop == "center":
-            old_width = samples.shape[3]
-            old_height = samples.shape[2]
-            old_aspect = old_width / old_height
-            new_aspect = width / height
-            x = 0
-            y = 0
-            if old_aspect > new_aspect:
-                x = round((old_width - old_width * (new_aspect / old_aspect)) / 2)
-            elif old_aspect < new_aspect:
-                y = round((old_height - old_height * (old_aspect / new_aspect)) / 2)
-            s = samples[:,:,y:old_height-y,x:old_width-x]
-        else:
-            s = samples
-
-        if upscale_method == "bislerp":
-            return bislerp(s, width, height)
-        elif upscale_method == "lanczos":
-            return lanczos(s, width, height)
-        else:
-            return torch.nn.functional.interpolate(s, size=(height, width), mode=upscale_method)
 
 def resize_to_batch_size(tensor, batch_size):
     in_batch_size = tensor.shape[0]
@@ -12817,36 +13370,6 @@ def resize_to_batch_size(tensor, batch_size):
 
     return output
 
-def repeat_to_batch_size(tensor, batch_size, dim=0):
-    if tensor.shape[dim] > batch_size:
-        return tensor.narrow(dim, 0, batch_size)
-    elif tensor.shape[dim] < batch_size:
-        return tensor.repeat(dim * [1] + [math.ceil(batch_size / tensor.shape[dim])] + [1] * (len(tensor.shape) - 1 - dim)).narrow(dim, 0, batch_size)
-    return tensor
-
-def lcm(a, b): #TODO: eventually replace by math.lcm (added in python3.9)
-    return abs(a*b) // math.gcd(a, b)
-
-class CONDRegular:
-    def __init__(self, cond):
-        self.cond = cond
-
-    def _copy_with(self, cond):
-        return self.__class__(cond)
-
-    def process_cond(self, batch_size, device, **kwargs):
-        return self._copy_with(repeat_to_batch_size(self.cond, batch_size).to(device))
-
-    def can_concat(self, other):
-        if self.cond.shape != other.cond.shape:
-            return False
-        return True
-
-    def concat(self, others):
-        conds = [self.cond]
-        for x in others:
-            conds.append(x.cond)
-        return torch.cat(conds)
 
 class CONDNoiseShape(CONDRegular):
     def process_cond(self, batch_size, device, area, **kwargs):
@@ -12857,242 +13380,6 @@ class CONDNoiseShape(CONDRegular):
                 data = data.narrow(i + 2, area[i + dims], area[i])
 
         return self._copy_with(repeat_to_batch_size(data, batch_size).to(device))
-
-
-class CONDCrossAttn(CONDRegular):
-    def can_concat(self, other):
-        s1 = self.cond.shape
-        s2 = other.cond.shape
-        if s1 != s2:
-            if s1[0] != s2[0] or s1[2] != s2[2]: #these 2 cases should not happen
-                return False
-
-            mult_min = lcm(s1[1], s2[1])
-            diff = mult_min // min(s1[1], s2[1])
-            if diff > 4: #arbitrary limit on the padding because it's probably going to impact performance negatively if it's too much
-                return False
-        return True
-
-    def concat(self, others):
-        conds = [self.cond]
-        crossattn_max_len = self.cond.shape[1]
-        for x in others:
-            c = x.cond
-            crossattn_max_len = lcm(crossattn_max_len, c.shape[1])
-            conds.append(c)
-
-        out = []
-        for c in conds:
-            if c.shape[1] < crossattn_max_len:
-                c = c.repeat(1, crossattn_max_len // c.shape[1], 1) #padding with repeat doesn't change result
-            out.append(c)
-        return torch.cat(out)
-    
-class CastWeightBiasOp:
-    comfy_cast_weights = False
-    weight_function = None
-    bias_function = None
-
-class disable_weight_init:
-    class Linear(torch.nn.Linear, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.linear(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return self._conv_forward(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Conv2d(torch.nn.Conv2d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return self._conv_forward(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Conv3d(torch.nn.Conv3d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return self._conv_forward(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class GroupNorm(torch.nn.GroupNorm, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.group_norm(
-                input, self.num_groups, weight, bias, self.eps
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class LayerNorm(torch.nn.LayerNorm, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            if self.weight is not None:
-                weight, bias = cast_bias_weight(self, input)
-            else:
-                weight = None
-                bias = None
-            return torch.nn.functional.layer_norm(
-                input, self.normalized_shape, weight, bias, self.eps
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class ConvTranspose2d(torch.nn.ConvTranspose2d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input, output_size=None):
-            num_spatial_dims = 2
-            output_padding = self._output_padding(
-                input,
-                output_size,
-                self.stride,
-                self.padding,
-                self.kernel_size,
-                num_spatial_dims,
-                self.dilation,
-            )
-
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.conv_transpose2d(
-                input,
-                weight,
-                bias,
-                self.stride,
-                self.padding,
-                output_padding,
-                self.groups,
-                self.dilation,
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class ConvTranspose1d(torch.nn.ConvTranspose1d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input, output_size=None):
-            num_spatial_dims = 1
-            output_padding = self._output_padding(
-                input,
-                output_size,
-                self.stride,
-                self.padding,
-                self.kernel_size,
-                num_spatial_dims,
-                self.dilation,
-            )
-
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.conv_transpose1d(
-                input,
-                weight,
-                bias,
-                self.stride,
-                self.padding,
-                output_padding,
-                self.groups,
-                self.dilation,
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Embedding(torch.nn.Embedding, CastWeightBiasOp):
-        def reset_parameters(self):
-            self.bias = None
-            return None
-
-        def forward_comfy_cast_weights(self, input, out_dtype=None):
-            output_dtype = out_dtype
-            if (
-                self.weight.dtype == torch.float16
-                or self.weight.dtype == torch.bfloat16
-            ):
-                out_dtype = None
-            weight, bias = cast_bias_weight(self, device=input.device, dtype=out_dtype)
-            return torch.nn.functional.embedding(
-                input,
-                weight,
-                self.padding_idx,
-                self.max_norm,
-                self.norm_type,
-                self.scale_grad_by_freq,
-                self.sparse,
-            ).to(dtype=output_dtype)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                if "out_dtype" in kwargs:
-                    kwargs.pop("out_dtype")
-                return super().forward(*args, **kwargs)
-
-    @classmethod
-    def conv_nd(s, dims, *args, **kwargs):
-        if dims == 2:
-            return s.Conv2d(*args, **kwargs)
-        elif dims == 3:
-            return s.Conv3d(*args, **kwargs)
-        else:
-            raise ValueError(f"unsupported dimensions: {dims}")
 
 from abc import abstractmethod
 
@@ -13139,82 +13426,6 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
 
     def forward(self, *args, **kwargs):
         return forward_timestep_embed(self, *args, **kwargs)
-
-class Upsample(nn.Module):
-    """
-    An upsampling layer with an optional convolution.
-    :param channels: channels in the inputs and outputs.
-    :param use_conv: a bool determining if a convolution is applied.
-    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
-                 upsampling occurs in the inner-two dimensions.
-    """
-
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=ops):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.dims = dims
-        if use_conv:
-            self.conv = operations.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, dtype=dtype, device=device)
-
-    def forward(self, x, output_shape=None):
-        assert x.shape[1] == self.channels
-        if self.dims == 3:
-            shape = [x.shape[2], x.shape[3] * 2, x.shape[4] * 2]
-            if output_shape is not None:
-                shape[1] = output_shape[3]
-                shape[2] = output_shape[4]
-        else:
-            shape = [x.shape[2] * 2, x.shape[3] * 2]
-            if output_shape is not None:
-                shape[0] = output_shape[2]
-                shape[1] = output_shape[3]
-
-        x = F.interpolate(x, size=shape, mode="nearest")
-        if self.use_conv:
-            x = self.conv(x)
-        return x
-    
-def avg_pool_nd(dims, *args, **kwargs):
-    """
-    Create a 1D, 2D, or 3D average pooling module.
-    """
-    if dims == 1:
-        return nn.AvgPool1d(*args, **kwargs)
-    elif dims == 2:
-        return nn.AvgPool2d(*args, **kwargs)
-    elif dims == 3:
-        return nn.AvgPool3d(*args, **kwargs)
-    raise ValueError(f"unsupported dimensions: {dims}")
-
-class Downsample(nn.Module):
-    """
-    A downsampling layer with an optional convolution.
-    :param channels: channels in the inputs and outputs.
-    :param use_conv: a bool determining if a convolution is applied.
-    :param dims: determines if the signal is 1D, 2D, or 3D. If 3D, then
-                 downsampling occurs in the inner-two dimensions.
-    """
-
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=ops):
-        super().__init__()
-        self.channels = channels
-        self.out_channels = out_channels or channels
-        self.use_conv = use_conv
-        self.dims = dims
-        stride = 2 if dims != 3 else (1, 2, 2)
-        if use_conv:
-            self.op = operations.conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, dtype=dtype, device=device
-            )
-        else:
-            assert self.channels == self.out_channels
-            self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)
-
-    def forward(self, x):
-        assert x.shape[1] == self.channels
-        return self.op(x)
 
 
 class ResBlock(TimestepBlock):
@@ -13355,11 +13566,6 @@ class ResBlock(TimestepBlock):
                 h = h + emb_out
             h = self.out_layers(h)
         return self.skip_connection(x) + h
-
-def default(val, d):
-    if exists(val):
-        return val
-    return d
 
 class AlphaBlender(nn.Module):
     strategies = ["learned", "fixed", "learned_with_images"]
@@ -13528,1038 +13734,8 @@ def apply_control(h, control, name):
                 logging.warning("warning control could not be applied {} {}".format(h.shape, ctrl.shape))
     return h
 
-class CrossAttention(nn.Module):
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., attn_precision=None, dtype=None, device=None, operations=ops):
-        super().__init__()
-        inner_dim = dim_head * heads
-        context_dim = default(context_dim, query_dim)
-        self.attn_precision = attn_precision
-
-        self.heads = heads
-        self.dim_head = dim_head
-
-        self.to_q = operations.Linear(query_dim, inner_dim, bias=False, dtype=dtype, device=device)
-        self.to_k = operations.Linear(context_dim, inner_dim, bias=False, dtype=dtype, device=device)
-        self.to_v = operations.Linear(context_dim, inner_dim, bias=False, dtype=dtype, device=device)
-
-        self.to_out = nn.Sequential(operations.Linear(inner_dim, query_dim, dtype=dtype, device=device), nn.Dropout(dropout))
-
-    def forward(self, x, context=None, value=None, mask=None):
-        q = self.to_q(x)
-        context = default(context, x)
-        k = self.to_k(context)
-        if value is not None:
-            v = self.to_v(value)
-            del value
-        else:
-            v = self.to_v(context)
-
-        if mask is None:
-            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision)
-        else:
-            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision)
-        return self.to_out(out)
-
-class GEGLU(nn.Module):
-    def __init__(self, dim_in, dim_out, dtype=None, device=None, operations=ops):
-        super().__init__()
-        self.proj = operations.Linear(dim_in, dim_out * 2, dtype=dtype, device=device)
-
-    def forward(self, x):
-        x, gate = self.proj(x).chunk(2, dim=-1)
-        return x * F.gelu(gate)
-
-class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0., dtype=None, device=None, operations=ops):
-        super().__init__()
-        inner_dim = int(dim * mult)
-        dim_out = default(dim_out, dim)
-        project_in = nn.Sequential(
-            operations.Linear(dim, inner_dim, dtype=dtype, device=device),
-            nn.GELU()
-        ) if not glu else GEGLU(dim, inner_dim, dtype=dtype, device=device, operations=operations)
-
-        self.net = nn.Sequential(
-            project_in,
-            nn.Dropout(dropout),
-            operations.Linear(inner_dim, dim_out, dtype=dtype, device=device)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-class BasicTransformerBlock(nn.Module):
-    def __init__(self, dim, n_heads, d_head, dropout=0., context_dim=None, gated_ff=True, checkpoint=True, ff_in=False, inner_dim=None,
-                 disable_self_attn=False, disable_temporal_crossattention=False, switch_temporal_ca_to_sa=False, attn_precision=None, dtype=None, device=None, operations=ops):
-        super().__init__()
-
-        self.ff_in = ff_in or inner_dim is not None
-        if inner_dim is None:
-            inner_dim = dim
-
-        self.is_res = inner_dim == dim
-        self.attn_precision = attn_precision
-
-        if self.ff_in:
-            self.norm_in = operations.LayerNorm(dim, dtype=dtype, device=device)
-            self.ff_in = FeedForward(dim, dim_out=inner_dim, dropout=dropout, glu=gated_ff, dtype=dtype, device=device, operations=operations)
-
-        self.disable_self_attn = disable_self_attn
-        self.attn1 = CrossAttention(query_dim=inner_dim, heads=n_heads, dim_head=d_head, dropout=dropout,
-                              context_dim=context_dim if self.disable_self_attn else None, attn_precision=self.attn_precision, dtype=dtype, device=device, operations=operations)  # is a self-attention if not self.disable_self_attn
-        self.ff = FeedForward(inner_dim, dim_out=dim, dropout=dropout, glu=gated_ff, dtype=dtype, device=device, operations=operations)
-
-        if disable_temporal_crossattention:
-            if switch_temporal_ca_to_sa:
-                raise ValueError
-            else:
-                self.attn2 = None
-        else:
-            context_dim_attn2 = None
-            if not switch_temporal_ca_to_sa:
-                context_dim_attn2 = context_dim
-
-            self.attn2 = CrossAttention(query_dim=inner_dim, context_dim=context_dim_attn2,
-                                heads=n_heads, dim_head=d_head, dropout=dropout, attn_precision=self.attn_precision, dtype=dtype, device=device, operations=operations)  # is self-attn if context is none
-            self.norm2 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
-
-        self.norm1 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
-        self.norm3 = operations.LayerNorm(inner_dim, dtype=dtype, device=device)
-        self.n_heads = n_heads
-        self.d_head = d_head
-        self.switch_temporal_ca_to_sa = switch_temporal_ca_to_sa
-
-    def forward(self, x, context=None, transformer_options={}):
-        extra_options = {}
-        block = transformer_options.get("block", None)
-        block_index = transformer_options.get("block_index", 0)
-        transformer_patches = {}
-        transformer_patches_replace = {}
-
-        for k in transformer_options:
-            if k == "patches":
-                transformer_patches = transformer_options[k]
-            elif k == "patches_replace":
-                transformer_patches_replace = transformer_options[k]
-            else:
-                extra_options[k] = transformer_options[k]
-
-        extra_options["n_heads"] = self.n_heads
-        extra_options["dim_head"] = self.d_head
-        extra_options["attn_precision"] = self.attn_precision
-
-        if self.ff_in:
-            x_skip = x
-            x = self.ff_in(self.norm_in(x))
-            if self.is_res:
-                x += x_skip
-
-        n = self.norm1(x)
-        if self.disable_self_attn:
-            context_attn1 = context
-        else:
-            context_attn1 = None
-        value_attn1 = None
-
-        if "attn1_patch" in transformer_patches:
-            patch = transformer_patches["attn1_patch"]
-            if context_attn1 is None:
-                context_attn1 = n
-            value_attn1 = context_attn1
-            for p in patch:
-                n, context_attn1, value_attn1 = p(n, context_attn1, value_attn1, extra_options)
-
-        if block is not None:
-            transformer_block = (block[0], block[1], block_index)
-        else:
-            transformer_block = None
-        attn1_replace_patch = transformer_patches_replace.get("attn1", {})
-        block_attn1 = transformer_block
-        if block_attn1 not in attn1_replace_patch:
-            block_attn1 = block
-
-        if block_attn1 in attn1_replace_patch:
-            if context_attn1 is None:
-                context_attn1 = n
-                value_attn1 = n
-            n = self.attn1.to_q(n)
-            context_attn1 = self.attn1.to_k(context_attn1)
-            value_attn1 = self.attn1.to_v(value_attn1)
-            n = attn1_replace_patch[block_attn1](n, context_attn1, value_attn1, extra_options)
-            n = self.attn1.to_out(n)
-        else:
-            n = self.attn1(n, context=context_attn1, value=value_attn1)
-
-        if "attn1_output_patch" in transformer_patches:
-            patch = transformer_patches["attn1_output_patch"]
-            for p in patch:
-                n = p(n, extra_options)
-
-        x += n
-        if "middle_patch" in transformer_patches:
-            patch = transformer_patches["middle_patch"]
-            for p in patch:
-                x = p(x, extra_options)
-
-        if self.attn2 is not None:
-            n = self.norm2(x)
-            if self.switch_temporal_ca_to_sa:
-                context_attn2 = n
-            else:
-                context_attn2 = context
-            value_attn2 = None
-            if "attn2_patch" in transformer_patches:
-                patch = transformer_patches["attn2_patch"]
-                value_attn2 = context_attn2
-                for p in patch:
-                    n, context_attn2, value_attn2 = p(n, context_attn2, value_attn2, extra_options)
-
-            attn2_replace_patch = transformer_patches_replace.get("attn2", {})
-            block_attn2 = transformer_block
-            if block_attn2 not in attn2_replace_patch:
-                block_attn2 = block
-
-            if block_attn2 in attn2_replace_patch:
-                if value_attn2 is None:
-                    value_attn2 = context_attn2
-                n = self.attn2.to_q(n)
-                context_attn2 = self.attn2.to_k(context_attn2)
-                value_attn2 = self.attn2.to_v(value_attn2)
-                n = attn2_replace_patch[block_attn2](n, context_attn2, value_attn2, extra_options)
-                n = self.attn2.to_out(n)
-            else:
-                n = self.attn2(n, context=context_attn2, value=value_attn2)
-
-        if "attn2_output_patch" in transformer_patches:
-            patch = transformer_patches["attn2_output_patch"]
-            for p in patch:
-                n = p(n, extra_options)
-
-        x += n
-        if self.is_res:
-            x_skip = x
-        x = self.ff(self.norm3(x))
-        if self.is_res:
-            x += x_skip
-
-        return x
-
-
-class SpatialTransformer(nn.Module):
-    """
-    Transformer block for image-like data.
-    First, project the input (aka embedding)
-    and reshape to b, t, d.
-    Then apply standard transformer action.
-    Finally, reshape to image
-    NEW: use_linear for more efficiency instead of the 1x1 convs
-    """
-    def __init__(self, in_channels, n_heads, d_head,
-                 depth=1, dropout=0., context_dim=None,
-                 disable_self_attn=False, use_linear=False,
-                 use_checkpoint=True, attn_precision=None, dtype=None, device=None, operations=ops):
-        super().__init__()
-        if exists(context_dim) and not isinstance(context_dim, list):
-            context_dim = [context_dim] * depth
-        self.in_channels = in_channels
-        inner_dim = n_heads * d_head
-        self.norm = operations.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True, dtype=dtype, device=device)
-        if not use_linear:
-            self.proj_in = operations.Conv2d(in_channels,
-                                     inner_dim,
-                                     kernel_size=1,
-                                     stride=1,
-                                     padding=0, dtype=dtype, device=device)
-        else:
-            self.proj_in = operations.Linear(in_channels, inner_dim, dtype=dtype, device=device)
-
-        self.transformer_blocks = nn.ModuleList(
-            [BasicTransformerBlock(inner_dim, n_heads, d_head, dropout=dropout, context_dim=context_dim[d],
-                                   disable_self_attn=disable_self_attn, checkpoint=use_checkpoint, attn_precision=attn_precision, dtype=dtype, device=device, operations=operations)
-                for d in range(depth)]
-        )
-        if not use_linear:
-            self.proj_out = operations.Conv2d(inner_dim,in_channels,
-                                                  kernel_size=1,
-                                                  stride=1,
-                                                  padding=0, dtype=dtype, device=device)
-        else:
-            self.proj_out = operations.Linear(in_channels, inner_dim, dtype=dtype, device=device)
-        self.use_linear = use_linear
-
-    def forward(self, x, context=None, transformer_options={}):
-        # note: if no context is given, cross-attention defaults to self-attention
-        if not isinstance(context, list):
-            context = [context] * len(self.transformer_blocks)
-        b, c, h, w = x.shape
-        x_in = x
-        x = self.norm(x)
-        if not self.use_linear:
-            x = self.proj_in(x)
-        x = x.movedim(1, 3).flatten(1, 2).contiguous()
-        if self.use_linear:
-            x = self.proj_in(x)
-        for i, block in enumerate(self.transformer_blocks):
-            transformer_options["block_index"] = i
-            x = block(x, context=context[i], transformer_options=transformer_options)
-        if self.use_linear:
-            x = self.proj_out(x)
-        x = x.reshape(x.shape[0], h, w, x.shape[-1]).movedim(3, 1).contiguous()
-        if not self.use_linear:
-            x = self.proj_out(x)
-        return x + x_in
-
-
-class UNetModel(nn.Module):
-    """
-    The full UNet model with attention and timestep embedding.
-    :param in_channels: channels in the input Tensor.
-    :param model_channels: base channel count for the model.
-    :param out_channels: channels in the output Tensor.
-    :param num_res_blocks: number of residual blocks per downsample.
-    :param dropout: the dropout probability.
-    :param channel_mult: channel multiplier for each level of the UNet.
-    :param conv_resample: if True, use learned convolutions for upsampling and
-        downsampling.
-    :param dims: determines if the signal is 1D, 2D, or 3D.
-    :param num_classes: if specified (as an int), then this model will be
-        class-conditional with `num_classes` classes.
-    :param use_checkpoint: use gradient checkpointing to reduce memory usage.
-    :param num_heads: the number of attention heads in each attention layer.
-    :param num_heads_channels: if specified, ignore num_heads and instead use
-                               a fixed channel width per attention head.
-    :param num_heads_upsample: works with num_heads to set a different number
-                               of heads for upsampling. Deprecated.
-    :param use_scale_shift_norm: use a FiLM-like conditioning mechanism.
-    :param resblock_updown: use residual blocks for up/downsampling.
-    :param use_new_attention_order: use a different attention pattern for potentially
-                                    increased efficiency.
-    """
-
-    def __init__(
-        self,
-        image_size,
-        in_channels,
-        model_channels,
-        out_channels,
-        num_res_blocks,
-        dropout=0,
-        channel_mult=(1, 2, 4, 8),
-        conv_resample=True,
-        dims=2,
-        num_classes=None,
-        use_checkpoint=False,
-        dtype=th.float32,
-        num_heads=-1,
-        num_head_channels=-1,
-        num_heads_upsample=-1,
-        use_scale_shift_norm=False,
-        resblock_updown=False,
-        use_new_attention_order=False,
-        use_spatial_transformer=False,    # custom transformer support
-        transformer_depth=1,              # custom transformer support
-        context_dim=None,                 # custom transformer support
-        n_embed=None,                     # custom support for prediction of discrete ids into codebook of first stage vq model
-        legacy=True,
-        disable_self_attentions=None,
-        num_attention_blocks=None,
-        disable_middle_self_attn=False,
-        use_linear_in_transformer=False,
-        adm_in_channels=None,
-        transformer_depth_middle=None,
-        transformer_depth_output=None,
-        use_temporal_resblock=False,
-        use_temporal_attention=False,
-        time_context_dim=None,
-        extra_ff_mix_layer=False,
-        use_spatial_context=False,
-        merge_strategy=None,
-        merge_factor=0.0,
-        video_kernel_size=None,
-        disable_temporal_crossattention=False,
-        max_ddpm_temb_period=10000,
-        attn_precision=None,
-        device=None,
-        operations=ops,
-    ):
-        super().__init__()
-
-        if context_dim is not None:
-            assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
-            # from omegaconf.listconfig import ListConfig
-            # if type(context_dim) == ListConfig:
-            #     context_dim = list(context_dim)
-
-        if num_heads_upsample == -1:
-            num_heads_upsample = num_heads
-
-        if num_heads == -1:
-            assert num_head_channels != -1, 'Either num_heads or num_head_channels has to be set'
-
-        if num_head_channels == -1:
-            assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
-
-        self.in_channels = in_channels
-        self.model_channels = model_channels
-        self.out_channels = out_channels
-
-        if isinstance(num_res_blocks, int):
-            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
-        else:
-            if len(num_res_blocks) != len(channel_mult):
-                raise ValueError("provide num_res_blocks either as an int (globally constant) or "
-                                 "as a list/tuple (per-level) with the same length as channel_mult")
-            self.num_res_blocks = num_res_blocks
-
-        if disable_self_attentions is not None:
-            # should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
-            assert len(disable_self_attentions) == len(channel_mult)
-        if num_attention_blocks is not None:
-            assert len(num_attention_blocks) == len(self.num_res_blocks)
-
-        transformer_depth = transformer_depth[:]
-        transformer_depth_output = transformer_depth_output[:]
-
-        self.dropout = dropout
-        self.channel_mult = channel_mult
-        self.conv_resample = conv_resample
-        self.num_classes = num_classes
-        self.use_checkpoint = use_checkpoint
-        self.dtype = dtype
-        self.num_heads = num_heads
-        self.num_head_channels = num_head_channels
-        self.num_heads_upsample = num_heads_upsample
-        self.use_temporal_resblocks = use_temporal_resblock
-        self.predict_codebook_ids = n_embed is not None
-
-        self.default_num_video_frames = None
-
-        time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            operations.Linear(model_channels, time_embed_dim, dtype=self.dtype, device=device),
-            nn.SiLU(),
-            operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-        )
-
-        if self.num_classes is not None:
-            if isinstance(self.num_classes, int):
-                self.label_emb = nn.Embedding(num_classes, time_embed_dim, dtype=self.dtype, device=device)
-            elif self.num_classes == "continuous":
-                logging.debug("setting up linear c_adm embedding layer")
-                self.label_emb = nn.Linear(1, time_embed_dim)
-            elif self.num_classes == "sequential":
-                assert adm_in_channels is not None
-                self.label_emb = nn.Sequential(
-                    nn.Sequential(
-                        operations.Linear(adm_in_channels, time_embed_dim, dtype=self.dtype, device=device),
-                        nn.SiLU(),
-                        operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-                    )
-                )
-            else:
-                raise ValueError()
-
-        self.input_blocks = nn.ModuleList(
-            [
-                TimestepEmbedSequential(
-                    operations.conv_nd(dims, in_channels, model_channels, 3, padding=1, dtype=self.dtype, device=device)
-                )
-            ]
-        )
-        self._feature_size = model_channels
-        input_block_chans = [model_channels]
-        ch = model_channels
-        ds = 1
-
-        def get_attention_layer(
-            ch,
-            num_heads,
-            dim_head,
-            depth=1,
-            context_dim=None,
-            use_checkpoint=False,
-            disable_self_attn=False,
-        ):
-            return SpatialTransformer(
-                            ch, num_heads, dim_head, depth=depth, context_dim=context_dim,
-                            disable_self_attn=disable_self_attn, use_linear=use_linear_in_transformer,
-                            use_checkpoint=use_checkpoint, attn_precision=attn_precision, dtype=self.dtype, device=device, operations=operations
-                        )
-
-        def get_resblock(
-            merge_factor,
-            merge_strategy,
-            video_kernel_size,
-            ch,
-            time_embed_dim,
-            dropout,
-            out_channels,
-            dims,
-            use_checkpoint,
-            use_scale_shift_norm,
-            down=False,
-            up=False,
-            dtype=None,
-            device=None,
-            operations=ops
-        ):
-            if self.use_temporal_resblocks:
-                return VideoResBlock(
-                    merge_factor=merge_factor,
-                    merge_strategy=merge_strategy,
-                    video_kernel_size=video_kernel_size,
-                    channels=ch,
-                    emb_channels=time_embed_dim,
-                    dropout=dropout,
-                    out_channels=out_channels,
-                    dims=dims,
-                    use_checkpoint=use_checkpoint,
-                    use_scale_shift_norm=use_scale_shift_norm,
-                    down=down,
-                    up=up,
-                    dtype=dtype,
-                    device=device,
-                    operations=operations
-                )
-            else:
-                return ResBlock(
-                    channels=ch,
-                    emb_channels=time_embed_dim,
-                    dropout=dropout,
-                    out_channels=out_channels,
-                    use_checkpoint=use_checkpoint,
-                    dims=dims,
-                    use_scale_shift_norm=use_scale_shift_norm,
-                    down=down,
-                    up=up,
-                    dtype=dtype,
-                    device=device,
-                    operations=operations
-                )
-
-        for level, mult in enumerate(channel_mult):
-            for nr in range(self.num_res_blocks[level]):
-                layers = [
-                    get_resblock(
-                        merge_factor=merge_factor,
-                        merge_strategy=merge_strategy,
-                        video_kernel_size=video_kernel_size,
-                        ch=ch,
-                        time_embed_dim=time_embed_dim,
-                        dropout=dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                        dtype=self.dtype,
-                        device=device,
-                        operations=operations,
-                    )
-                ]
-                ch = mult * model_channels
-                num_transformers = transformer_depth.pop(0)
-                if num_transformers > 0:
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
-                        disabled_sa = False
-
-                    if not exists(num_attention_blocks) or nr < num_attention_blocks[level]:
-                        layers.append(get_attention_layer(
-                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
-                                disable_self_attn=disabled_sa, use_checkpoint=use_checkpoint)
-                        )
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-                input_block_chans.append(ch)
-            if level != len(channel_mult) - 1:
-                out_ch = ch
-                self.input_blocks.append(
-                    TimestepEmbedSequential(
-                        get_resblock(
-                            merge_factor=merge_factor,
-                            merge_strategy=merge_strategy,
-                            video_kernel_size=video_kernel_size,
-                            ch=ch,
-                            time_embed_dim=time_embed_dim,
-                            dropout=dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                            dtype=self.dtype,
-                            device=device,
-                            operations=operations
-                        )
-                        if resblock_updown
-                        else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch, dtype=self.dtype, device=device, operations=operations
-                        )
-                    )
-                )
-                ch = out_ch
-                input_block_chans.append(ch)
-                ds *= 2
-                self._feature_size += ch
-
-        if num_head_channels == -1:
-            dim_head = ch // num_heads
-        else:
-            num_heads = ch // num_head_channels
-            dim_head = num_head_channels
-        if legacy:
-            #num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-        mid_block = [
-            get_resblock(
-                merge_factor=merge_factor,
-                merge_strategy=merge_strategy,
-                video_kernel_size=video_kernel_size,
-                ch=ch,
-                time_embed_dim=time_embed_dim,
-                dropout=dropout,
-                out_channels=None,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-                dtype=self.dtype,
-                device=device,
-                operations=operations
-            )]
-
-        self.middle_block = None
-        if transformer_depth_middle >= -1:
-            if transformer_depth_middle >= 0:
-                mid_block += [get_attention_layer(  # always uses a self-attn
-                                ch, num_heads, dim_head, depth=transformer_depth_middle, context_dim=context_dim,
-                                disable_self_attn=disable_middle_self_attn, use_checkpoint=use_checkpoint
-                            ),
-                get_resblock(
-                    merge_factor=merge_factor,
-                    merge_strategy=merge_strategy,
-                    video_kernel_size=video_kernel_size,
-                    ch=ch,
-                    time_embed_dim=time_embed_dim,
-                    dropout=dropout,
-                    out_channels=None,
-                    dims=dims,
-                    use_checkpoint=use_checkpoint,
-                    use_scale_shift_norm=use_scale_shift_norm,
-                    dtype=self.dtype,
-                    device=device,
-                    operations=operations
-                )]
-            self.middle_block = TimestepEmbedSequential(*mid_block)
-        self._feature_size += ch
-
-        self.output_blocks = nn.ModuleList([])
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(self.num_res_blocks[level] + 1):
-                ich = input_block_chans.pop()
-                layers = [
-                    get_resblock(
-                        merge_factor=merge_factor,
-                        merge_strategy=merge_strategy,
-                        video_kernel_size=video_kernel_size,
-                        ch=ch + ich,
-                        time_embed_dim=time_embed_dim,
-                        dropout=dropout,
-                        out_channels=model_channels * mult,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                        dtype=self.dtype,
-                        device=device,
-                        operations=operations
-                    )
-                ]
-                ch = model_channels * mult
-                num_transformers = transformer_depth_output.pop()
-                if num_transformers > 0:
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
-                        disabled_sa = False
-
-                    if not exists(num_attention_blocks) or i < num_attention_blocks[level]:
-                        layers.append(
-                            get_attention_layer(
-                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
-                                disable_self_attn=disabled_sa, use_checkpoint=use_checkpoint
-                            )
-                        )
-                if level and i == self.num_res_blocks[level]:
-                    out_ch = ch
-                    layers.append(
-                        get_resblock(
-                            merge_factor=merge_factor,
-                            merge_strategy=merge_strategy,
-                            video_kernel_size=video_kernel_size,
-                            ch=ch,
-                            time_embed_dim=time_embed_dim,
-                            dropout=dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
-                            dtype=self.dtype,
-                            device=device,
-                            operations=operations
-                        )
-                        if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch, dtype=self.dtype, device=device, operations=operations)
-                    )
-                    ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-
-        self.out = nn.Sequential(
-            operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
-            nn.SiLU(),
-            operations.conv_nd(dims, model_channels, out_channels, 3, padding=1, dtype=self.dtype, device=device),
-        )
-        if self.predict_codebook_ids:
-            self.id_predictor = nn.Sequential(
-            operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
-            operations.conv_nd(dims, model_channels, n_embed, 1, dtype=self.dtype, device=device),
-            #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
-        )
-
-    def forward(self, x, timesteps=None, context=None, y=None, control=None, transformer_options={}, **kwargs):
-        """
-        Apply the model to an input batch.
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param context: conditioning plugged in via crossattn
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
-        """
-        transformer_options["original_shape"] = list(x.shape)
-        transformer_options["transformer_index"] = 0
-        transformer_patches = transformer_options.get("patches", {})
-
-        num_video_frames = kwargs.get("num_video_frames", self.default_num_video_frames)
-        image_only_indicator = kwargs.get("image_only_indicator", None)
-        time_context = kwargs.get("time_context", None)
-
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-        hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(x.dtype)
-        emb = self.time_embed(t_emb)
-
-        if "emb_patch" in transformer_patches:
-            patch = transformer_patches["emb_patch"]
-            for p in patch:
-                emb = p(emb, self.model_channels, transformer_options)
-
-        if self.num_classes is not None:
-            assert y.shape[0] == x.shape[0]
-            emb = emb + self.label_emb(y)
-
-        h = x
-        for id, module in enumerate(self.input_blocks):
-            transformer_options["block"] = ("input", id)
-            h = forward_timestep_embed(module, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-            h = apply_control(h, control, 'input')
-            if "input_block_patch" in transformer_patches:
-                patch = transformer_patches["input_block_patch"]
-                for p in patch:
-                    h = p(h, transformer_options)
-
-            hs.append(h)
-            if "input_block_patch_after_skip" in transformer_patches:
-                patch = transformer_patches["input_block_patch_after_skip"]
-                for p in patch:
-                    h = p(h, transformer_options)
-
-        transformer_options["block"] = ("middle", 0)
-        if self.middle_block is not None:
-            h = forward_timestep_embed(self.middle_block, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-        h = apply_control(h, control, 'middle')
-
-
-        for id, module in enumerate(self.output_blocks):
-            transformer_options["block"] = ("output", id)
-            hsp = hs.pop()
-            hsp = apply_control(hsp, control, 'output')
-
-            if "output_block_patch" in transformer_patches:
-                patch = transformer_patches["output_block_patch"]
-                for p in patch:
-                    h, hsp = p(h, hsp, transformer_options)
-
-            h = th.cat([h, hsp], dim=1)
-            del hsp
-            if len(hs) > 0:
-                output_shape = hs[-1].shape
-            else:
-                output_shape = None
-            h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-        h = h.type(x.dtype)
-        if self.predict_codebook_ids:
-            return self.id_predictor(h)
-        else:
-            return self.out(h)
-
 
 from einops import repeat
-
-def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    """
-    Create sinusoidal timestep embeddings.
-    :param timesteps: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an [N x dim] Tensor of positional embeddings.
-    """
-    if not repeat_only:
-        half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=timesteps.device) / half
-        )
-        args = timesteps[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    else:
-        embedding = repeat(timesteps, 'b -> b d', d=dim)
-    return embedding
-
-class Timestep(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, t):
-        return timestep_embedding(t, self.dim)
-
-class BaseModel(torch.nn.Module):
-    def __init__(self, model_config, model_type=ModelType.EPS, device=None, unet_model=UNetModel):
-        super().__init__()
-
-        unet_config = model_config.unet_config
-        self.latent_format = model_config.latent_format
-        self.model_config = model_config
-        self.manual_cast_dtype = model_config.manual_cast_dtype
-        self.device = device
-
-        if not unet_config.get("disable_unet_model_creation", False):
-            if model_config.custom_operations is None:
-                operations = pick_operations(unet_config.get("dtype", None), self.manual_cast_dtype)
-            else:
-                operations = model_config.custom_operations
-            self.diffusion_model = unet_model(**unet_config, device=device, operations=operations)
-            if force_channels_last():
-                self.diffusion_model.to(memory_format=torch.channels_last)
-                logging.debug("using channels last mode for diffusion model")
-            logging.info("model weight dtype {}, manual cast: {}".format(self.get_dtype(), self.manual_cast_dtype))
-        self.model_type = model_type
-        self.model_sampling = model_sampling(model_config, model_type)
-
-        self.adm_channels = unet_config.get("adm_in_channels", None)
-        if self.adm_channels is None:
-            self.adm_channels = 0
-
-        self.concat_keys = ()
-        logging.info("model_type {}".format(model_type.name))
-        logging.debug("adm {}".format(self.adm_channels))
-        self.memory_usage_factor = model_config.memory_usage_factor
-
-    def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
-        sigma = t
-        xc = self.model_sampling.calculate_input(sigma, x)
-        if c_concat is not None:
-            xc = torch.cat([xc] + [c_concat], dim=1)
-
-        context = c_crossattn
-        dtype = self.get_dtype()
-
-        if self.manual_cast_dtype is not None:
-            dtype = self.manual_cast_dtype
-
-        xc = xc.to(dtype)
-        t = self.model_sampling.timestep(t).float()
-        context = context.to(dtype)
-        extra_conds = {}
-        for o in kwargs:
-            extra = kwargs[o]
-            if hasattr(extra, "dtype"):
-                if extra.dtype != torch.int and extra.dtype != torch.long:
-                    extra = extra.to(dtype)
-            extra_conds[o] = extra
-
-        model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds).float()
-        return self.model_sampling.calculate_denoised(sigma, model_output, x)
-
-    def get_dtype(self):
-        return self.diffusion_model.dtype
-
-    def is_adm(self):
-        return self.adm_channels > 0
-
-    def encode_adm(self, **kwargs):
-        return None
-
-    def extra_conds(self, **kwargs):
-        out = {}
-        if len(self.concat_keys) > 0:
-            cond_concat = []
-            denoise_mask = kwargs.get("concat_mask", kwargs.get("denoise_mask", None))
-            concat_latent_image = kwargs.get("concat_latent_image", None)
-            if concat_latent_image is None:
-                concat_latent_image = kwargs.get("latent_image", None)
-            else:
-                concat_latent_image = self.process_latent_in(concat_latent_image)
-
-            noise = kwargs.get("noise", None)
-            device = kwargs["device"]
-
-            if concat_latent_image.shape[1:] != noise.shape[1:]:
-                concat_latent_image = common_upscale(concat_latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
-
-            concat_latent_image = resize_to_batch_size(concat_latent_image, noise.shape[0])
-
-            if denoise_mask is not None:
-                if len(denoise_mask.shape) == len(noise.shape):
-                    denoise_mask = denoise_mask[:,:1]
-
-                denoise_mask = denoise_mask.reshape((-1, 1, denoise_mask.shape[-2], denoise_mask.shape[-1]))
-                if denoise_mask.shape[-2:] != noise.shape[-2:]:
-                    denoise_mask = common_upscale(denoise_mask, noise.shape[-1], noise.shape[-2], "bilinear", "center")
-                denoise_mask = resize_to_batch_size(denoise_mask.round(), noise.shape[0])
-
-            for ck in self.concat_keys:
-                if denoise_mask is not None:
-                    if ck == "mask":
-                        cond_concat.append(denoise_mask.to(device))
-                    elif ck == "masked_image":
-                        cond_concat.append(concat_latent_image.to(device)) #NOTE: the latent_image should be masked by the mask in pixel space
-                else:
-                    if ck == "mask":
-                        cond_concat.append(torch.ones_like(noise)[:,:1])
-                    elif ck == "masked_image":
-                        cond_concat.append(self.blank_inpaint_image_like(noise))
-            data = torch.cat(cond_concat, dim=1)
-            out['c_concat'] = CONDNoiseShape(data)
-
-        adm = self.encode_adm(**kwargs)
-        if adm is not None:
-            out['y'] = CONDRegular(adm)
-
-        cross_attn = kwargs.get("cross_attn", None)
-        if cross_attn is not None:
-            out['c_crossattn'] = CONDCrossAttn(cross_attn)
-
-        cross_attn_cnet = kwargs.get("cross_attn_controlnet", None)
-        if cross_attn_cnet is not None:
-            out['crossattn_controlnet'] = CONDCrossAttn(cross_attn_cnet)
-
-        c_concat = kwargs.get("noise_concat", None)
-        if c_concat is not None:
-            out['c_concat'] = CONDNoiseShape(c_concat)
-
-        return out
-
-    def load_model_weights(self, sd, unet_prefix=""):
-        to_load = {}
-        keys = list(sd.keys())
-        for k in keys:
-            if k.startswith(unet_prefix):
-                to_load[k[len(unet_prefix):]] = sd.pop(k)
-
-        to_load = self.model_config.process_unet_state_dict(to_load)
-        m, u = self.diffusion_model.load_state_dict(to_load, strict=False)
-        if len(m) > 0:
-            logging.warning("unet missing: {}".format(m))
-
-        if len(u) > 0:
-            logging.warning("unet unexpected: {}".format(u))
-        del to_load
-        return self
-
-    def process_latent_in(self, latent):
-        return self.latent_format.process_in(latent)
-
-    def process_latent_out(self, latent):
-        return self.latent_format.process_out(latent)
-
-    def state_dict_for_saving(self, clip_state_dict=None, vae_state_dict=None, clip_vision_state_dict=None):
-        extra_sds = []
-        if clip_state_dict is not None:
-            extra_sds.append(self.model_config.process_clip_state_dict_for_saving(clip_state_dict))
-        if vae_state_dict is not None:
-            extra_sds.append(self.model_config.process_vae_state_dict_for_saving(vae_state_dict))
-        if clip_vision_state_dict is not None:
-            extra_sds.append(self.model_config.process_clip_vision_state_dict_for_saving(clip_vision_state_dict))
-
-        unet_state_dict = self.diffusion_model.state_dict()
-        unet_state_dict = self.model_config.process_unet_state_dict_for_saving(unet_state_dict)
-
-        if self.model_type == ModelType.V_PREDICTION:
-            unet_state_dict["v_pred"] = torch.tensor([])
-
-        for sd in extra_sds:
-            unet_state_dict.update(sd)
-
-        return unet_state_dict
-
-    def set_inpaint(self):
-        self.concat_keys = ("mask", "masked_image")
-        def blank_inpaint_image_like(latent_image):
-            blank_image = torch.ones_like(latent_image)
-            # these are the values for "zero" in pixel space translated to latent space
-            blank_image[:,0] *= 0.8223
-            blank_image[:,1] *= -0.6876
-            blank_image[:,2] *= 0.6364
-            blank_image[:,3] *= 0.1380
-            return blank_image
-        self.blank_inpaint_image_like = blank_inpaint_image_like
-
-    def memory_required(self, input_shape):
-        if xformers_enabled() or pytorch_attention_flash_attention():
-            dtype = self.get_dtype()
-            if self.manual_cast_dtype is not None:
-                dtype = self.manual_cast_dtype
-            #TODO: this needs to be tweaked
-            area = input_shape[0] * math.prod(input_shape[2:])
-            return (area * dtype_size(dtype) * 0.01 * self.memory_usage_factor) * (1024 * 1024)
-        else:
-            #TODO: this formula might be too aggressive since I tweaked the sub-quad and split algorithms to use less memory.
-            area = input_shape[0] * math.prod(input_shape[2:])
-            return (area * 0.15 * self.memory_usage_factor) * (1024 * 1024)
-
-def make_beta_schedule(
-    schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3
-):
-    betas = (
-        torch.linspace(
-            linear_start**0.5, linear_end**0.5, n_timestep, dtype=torch.float64
-        )
-        ** 2
-    )
-    return betas
-
 from functools import partial
 
 def extract_into_tensor(a, t, x_shape):
@@ -14697,103 +13873,6 @@ class SD21UNCLIP(BaseModel):
             return torch.zeros((1, self.adm_channels))
         else:
             return unclip_adm(unclip_conditioning, device, self.noise_augmentor, kwargs.get("unclip_noise_augment_merge", 0.05), kwargs.get("seed", 0) - 10)
-
-class BASE:
-    unet_config = {}
-    unet_extra_config = {
-        "num_heads": -1,
-        "num_head_channels": 64,
-    }
-
-    required_keys = {}
-
-    clip_prefix = []
-    clip_vision_prefix = None
-    noise_aug_config = None
-    sampling_settings = {}
-    latent_format = LatentFormat
-    vae_key_prefix = ["first_stage_model."]
-    text_encoder_key_prefix = ["cond_stage_model."]
-    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
-
-    memory_usage_factor = 2.0
-
-    manual_cast_dtype = None
-    custom_operations = None
-
-    @classmethod
-    def matches(s, unet_config, state_dict=None):
-        for k in s.unet_config:
-            if k not in unet_config or s.unet_config[k] != unet_config[k]:
-                return False
-        if state_dict is not None:
-            for k in s.required_keys:
-                if k not in state_dict:
-                    return False
-        return True
-
-    def model_type(self, state_dict, prefix=""):
-        return ModelType.EPS
-
-    def inpaint_model(self):
-        return self.unet_config["in_channels"] > 4
-
-    def __init__(self, unet_config):
-        self.unet_config = unet_config.copy()
-        self.sampling_settings = self.sampling_settings.copy()
-        self.latent_format = self.latent_format()
-        for x in self.unet_extra_config:
-            self.unet_config[x] = self.unet_extra_config[x]
-
-    def get_model(self, state_dict, prefix="", device=None):
-        if self.noise_aug_config is not None:
-            out = SD21UNCLIP(
-                self,
-                self.noise_aug_config,
-                model_type=self.model_type(state_dict, prefix),
-                device=device,
-            )
-        else:
-            out = BaseModel(
-                self, model_type=self.model_type(state_dict, prefix), device=device
-            )
-        if self.inpaint_model():
-            out.set_inpaint()
-        return out
-
-    def process_clip_state_dict(self, state_dict):
-        state_dict = state_dict_prefix_replace(
-            state_dict, {k: "" for k in self.text_encoder_key_prefix}, filter_keys=True
-        )
-        return state_dict
-
-    def process_unet_state_dict(self, state_dict):
-        return state_dict
-
-    def process_vae_state_dict(self, state_dict):
-        return state_dict
-
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": self.text_encoder_key_prefix[0]}
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_clip_vision_state_dict_for_saving(self, state_dict):
-        replace_prefix = {}
-        if self.clip_vision_prefix is not None:
-            replace_prefix[""] = self.clip_vision_prefix
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_unet_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": "model.diffusion_model."}
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_vae_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": self.vae_key_prefix[0]}
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def set_inference_dtype(self, dtype, manual_cast_dtype):
-        self.unet_config["dtype"] = dtype
-        self.manual_cast_dtype = manual_cast_dtype
         
 
 #Original code can be found on: https://github.com/black-forest-labs/flux
@@ -15075,18 +14154,6 @@ class LastLayer(nn.Module):
         x = self.linear(x)
         return x
 
-
-def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False):
-    if device is None or weight.device == device:
-        if not copy:
-            if dtype is None or weight.dtype == dtype:
-                return weight
-        return weight.to(dtype=dtype, copy=copy)
-
-    r = torch.empty_like(weight, dtype=dtype, device=device)
-    r.copy_(weight, non_blocking=non_blocking)
-    return r
-
 def pad_to_patch_size(img, patch_size=(2, 2), padding_mode="circular"):
     if padding_mode == "circular" and torch.jit.is_tracing() or torch.jit.is_scripting():
         padding_mode = "reflect"
@@ -15300,372 +14367,12 @@ class Flux(BASE):
 models = [Flux]
 
 
-def model_config_from_unet_config(unet_config, state_dict=None):
-    for model_config in models:
-        if model_config.matches(unet_config, state_dict):
-            return model_config(unet_config)
-
-    logging.error("no match {}".format(unet_config))
-    return None
-
-
 def model_config_from_diffusers_unet(state_dict):
     unet_config = unet_config_from_diffusers_unet(state_dict)
     if unet_config is not None:
         return model_config_from_unet_config(unet_config)
     return None
 
-
-def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
-    context_dim = None
-    use_linear_in_transformer = False
-
-    transformer_prefix = prefix + "1.transformer_blocks."
-    transformer_keys = sorted(
-        list(filter(lambda a: a.startswith(transformer_prefix), state_dict_keys))
-    )
-    if len(transformer_keys) > 0:
-        last_transformer_depth = count_blocks(
-            state_dict_keys, transformer_prefix + "{}"
-        )
-        context_dim = state_dict[
-            "{}0.attn2.to_k.weight".format(transformer_prefix)
-        ].shape[1]
-        use_linear_in_transformer = (
-            len(state_dict["{}1.proj_in.weight".format(prefix)].shape) == 2
-        )
-        time_stack = (
-            "{}1.time_stack.0.attn1.to_q.weight".format(prefix) in state_dict
-            or "{}1.time_mix_blocks.0.attn1.to_q.weight".format(prefix) in state_dict
-        )
-        time_stack_cross = (
-            "{}1.time_stack.0.attn2.to_q.weight".format(prefix) in state_dict
-            or "{}1.time_mix_blocks.0.attn2.to_q.weight".format(prefix) in state_dict
-        )
-        return (
-            last_transformer_depth,
-            context_dim,
-            use_linear_in_transformer,
-            time_stack,
-            time_stack_cross,
-        )
-    return None
-
-
-def detect_unet_config(state_dict, key_prefix):
-    state_dict_keys = list(state_dict.keys())
-
-    if (
-        "{}joint_blocks.0.context_block.attn.qkv.weight".format(key_prefix)
-        in state_dict_keys
-    ):  # mmdit model
-        unet_config = {}
-        unet_config["in_channels"] = state_dict[
-            "{}x_embedder.proj.weight".format(key_prefix)
-        ].shape[1]
-        patch_size = state_dict["{}x_embedder.proj.weight".format(key_prefix)].shape[2]
-        unet_config["patch_size"] = patch_size
-        final_layer = "{}final_layer.linear.weight".format(key_prefix)
-        if final_layer in state_dict:
-            unet_config["out_channels"] = state_dict[final_layer].shape[0] // (
-                patch_size * patch_size
-            )
-
-        unet_config["depth"] = (
-            state_dict["{}x_embedder.proj.weight".format(key_prefix)].shape[0] // 64
-        )
-        unet_config["input_size"] = None
-        y_key = "{}y_embedder.mlp.0.weight".format(key_prefix)
-        if y_key in state_dict_keys:
-            unet_config["adm_in_channels"] = state_dict[y_key].shape[1]
-
-        context_key = "{}context_embedder.weight".format(key_prefix)
-        if context_key in state_dict_keys:
-            in_features = state_dict[context_key].shape[1]
-            out_features = state_dict[context_key].shape[0]
-            unet_config["context_embedder_config"] = {
-                "target": "torch.nn.Linear",
-                "params": {"in_features": in_features, "out_features": out_features},
-            }
-        num_patches_key = "{}pos_embed".format(key_prefix)
-        if num_patches_key in state_dict_keys:
-            num_patches = state_dict[num_patches_key].shape[1]
-            unet_config["num_patches"] = num_patches
-            unet_config["pos_embed_max_size"] = round(math.sqrt(num_patches))
-
-        rms_qk = "{}joint_blocks.0.context_block.attn.ln_q.weight".format(key_prefix)
-        if rms_qk in state_dict_keys:
-            unet_config["qk_norm"] = "rms"
-
-        unet_config["pos_embed_scaling_factor"] = None  # unused for inference
-        context_processor = "{}context_processor.layers.0.attn.qkv.weight".format(
-            key_prefix
-        )
-        if context_processor in state_dict_keys:
-            unet_config["context_processor_layers"] = count_blocks(
-                state_dict_keys,
-                "{}context_processor.layers.".format(key_prefix) + "{}.",
-            )
-        return unet_config
-
-    if "{}clf.1.weight".format(key_prefix) in state_dict_keys:  # stable cascade
-        unet_config = {}
-        text_mapper_name = "{}clip_txt_mapper.weight".format(key_prefix)
-        if text_mapper_name in state_dict_keys:
-            unet_config["stable_cascade_stage"] = "c"
-            w = state_dict[text_mapper_name]
-            if w.shape[0] == 1536:  # stage c lite
-                unet_config["c_cond"] = 1536
-                unet_config["c_hidden"] = [1536, 1536]
-                unet_config["nhead"] = [24, 24]
-                unet_config["blocks"] = [[4, 12], [12, 4]]
-            elif w.shape[0] == 2048:  # stage c full
-                unet_config["c_cond"] = 2048
-        elif "{}clip_mapper.weight".format(key_prefix) in state_dict_keys:
-            unet_config["stable_cascade_stage"] = "b"
-            w = state_dict["{}down_blocks.1.0.channelwise.0.weight".format(key_prefix)]
-            if w.shape[-1] == 640:
-                unet_config["c_hidden"] = [320, 640, 1280, 1280]
-                unet_config["nhead"] = [-1, -1, 20, 20]
-                unet_config["blocks"] = [[2, 6, 28, 6], [6, 28, 6, 2]]
-                unet_config["block_repeat"] = [[1, 1, 1, 1], [3, 3, 2, 2]]
-            elif w.shape[-1] == 576:  # stage b lite
-                unet_config["c_hidden"] = [320, 576, 1152, 1152]
-                unet_config["nhead"] = [-1, 9, 18, 18]
-                unet_config["blocks"] = [[2, 4, 14, 4], [4, 14, 4, 2]]
-                unet_config["block_repeat"] = [[1, 1, 1, 1], [2, 2, 2, 2]]
-        return unet_config
-
-    if (
-        "{}transformer.rotary_pos_emb.inv_freq".format(key_prefix) in state_dict_keys
-    ):  # stable audio dit
-        unet_config = {}
-        unet_config["audio_model"] = "dit1.0"
-        return unet_config
-
-    if (
-        "{}double_layers.0.attn.w1q.weight".format(key_prefix) in state_dict_keys
-    ):  # aura flow dit
-        unet_config = {}
-        unet_config["max_seq"] = state_dict[
-            "{}positional_encoding".format(key_prefix)
-        ].shape[1]
-        unet_config["cond_seq_dim"] = state_dict[
-            "{}cond_seq_linear.weight".format(key_prefix)
-        ].shape[1]
-        double_layers = count_blocks(
-            state_dict_keys, "{}double_layers.".format(key_prefix) + "{}."
-        )
-        single_layers = count_blocks(
-            state_dict_keys, "{}single_layers.".format(key_prefix) + "{}."
-        )
-        unet_config["n_double_layers"] = double_layers
-        unet_config["n_layers"] = double_layers + single_layers
-        return unet_config
-
-    if "{}mlp_t5.0.weight".format(key_prefix) in state_dict_keys:  # Hunyuan DiT
-        unet_config = {}
-        unet_config["image_model"] = "hydit"
-        unet_config["depth"] = count_blocks(
-            state_dict_keys, "{}blocks.".format(key_prefix) + "{}."
-        )
-        unet_config["hidden_size"] = state_dict[
-            "{}x_embedder.proj.weight".format(key_prefix)
-        ].shape[0]
-        if unet_config["hidden_size"] == 1408 and unet_config["depth"] == 40:  # DiT-g/2
-            unet_config["mlp_ratio"] = 4.3637
-        if state_dict["{}extra_embedder.0.weight".format(key_prefix)].shape[1] == 3968:
-            unet_config["size_cond"] = True
-            unet_config["use_style_cond"] = True
-            unet_config["image_model"] = "hydit1"
-        return unet_config
-
-    if (
-        "{}double_blocks.0.img_attn.norm.key_norm.scale".format(key_prefix)
-        in state_dict_keys
-    ):  # Flux
-        dit_config = {}
-        dit_config["image_model"] = "flux"
-        dit_config["in_channels"] = 16
-        dit_config["vec_in_dim"] = 768
-        dit_config["context_in_dim"] = 4096
-        dit_config["hidden_size"] = 3072
-        dit_config["mlp_ratio"] = 4.0
-        dit_config["num_heads"] = 24
-        dit_config["depth"] = count_blocks(
-            state_dict_keys, "{}double_blocks.".format(key_prefix) + "{}."
-        )
-        dit_config["depth_single_blocks"] = count_blocks(
-            state_dict_keys, "{}single_blocks.".format(key_prefix) + "{}."
-        )
-        dit_config["axes_dim"] = [16, 56, 56]
-        dit_config["theta"] = 10000
-        dit_config["qkv_bias"] = True
-        dit_config["guidance_embed"] = (
-            "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
-        )
-        return dit_config
-
-    if "{}input_blocks.0.0.weight".format(key_prefix) not in state_dict_keys:
-        return None
-
-    unet_config = {
-        "use_checkpoint": False,
-        "image_size": 32,
-        "use_spatial_transformer": True,
-        "legacy": False,
-    }
-
-    y_input = "{}label_emb.0.0.weight".format(key_prefix)
-    if y_input in state_dict_keys:
-        unet_config["num_classes"] = "sequential"
-        unet_config["adm_in_channels"] = state_dict[y_input].shape[1]
-    else:
-        unet_config["adm_in_channels"] = None
-
-    model_channels = state_dict["{}input_blocks.0.0.weight".format(key_prefix)].shape[0]
-    in_channels = state_dict["{}input_blocks.0.0.weight".format(key_prefix)].shape[1]
-
-    out_key = "{}out.2.weight".format(key_prefix)
-    if out_key in state_dict:
-        out_channels = state_dict[out_key].shape[0]
-    else:
-        out_channels = 4
-
-    num_res_blocks = []
-    channel_mult = []
-    attention_resolutions = []
-    transformer_depth = []
-    transformer_depth_output = []
-    context_dim = None
-    use_linear_in_transformer = False
-
-    video_model = False
-    video_model_cross = False
-
-    current_res = 1
-    count = 0
-
-    last_res_blocks = 0
-    last_channel_mult = 0
-
-    input_block_count = count_blocks(
-        state_dict_keys, "{}input_blocks".format(key_prefix) + ".{}."
-    )
-    for count in range(input_block_count):
-        prefix = "{}input_blocks.{}.".format(key_prefix, count)
-        prefix_output = "{}output_blocks.{}.".format(
-            key_prefix, input_block_count - count - 1
-        )
-
-        block_keys = sorted(
-            list(filter(lambda a: a.startswith(prefix), state_dict_keys))
-        )
-        if len(block_keys) == 0:
-            break
-
-        block_keys_output = sorted(
-            list(filter(lambda a: a.startswith(prefix_output), state_dict_keys))
-        )
-
-        if "{}0.op.weight".format(prefix) in block_keys:  # new layer
-            num_res_blocks.append(last_res_blocks)
-            channel_mult.append(last_channel_mult)
-
-            current_res *= 2
-            last_res_blocks = 0
-            last_channel_mult = 0
-            out = calculate_transformer_depth(
-                prefix_output, state_dict_keys, state_dict
-            )
-            if out is not None:
-                transformer_depth_output.append(out[0])
-            else:
-                transformer_depth_output.append(0)
-        else:
-            res_block_prefix = "{}0.in_layers.0.weight".format(prefix)
-            if res_block_prefix in block_keys:
-                last_res_blocks += 1
-                last_channel_mult = (
-                    state_dict["{}0.out_layers.3.weight".format(prefix)].shape[0]
-                    // model_channels
-                )
-
-                out = calculate_transformer_depth(prefix, state_dict_keys, state_dict)
-                if out is not None:
-                    transformer_depth.append(out[0])
-                    if context_dim is None:
-                        context_dim = out[1]
-                        use_linear_in_transformer = out[2]
-                        video_model = out[3]
-                        video_model_cross = out[4]
-                else:
-                    transformer_depth.append(0)
-
-            res_block_prefix = "{}0.in_layers.0.weight".format(prefix_output)
-            if res_block_prefix in block_keys_output:
-                out = calculate_transformer_depth(
-                    prefix_output, state_dict_keys, state_dict
-                )
-                if out is not None:
-                    transformer_depth_output.append(out[0])
-                else:
-                    transformer_depth_output.append(0)
-
-    num_res_blocks.append(last_res_blocks)
-    channel_mult.append(last_channel_mult)
-    if "{}middle_block.1.proj_in.weight".format(key_prefix) in state_dict_keys:
-        transformer_depth_middle = count_blocks(
-            state_dict_keys,
-            "{}middle_block.1.transformer_blocks.".format(key_prefix) + "{}",
-        )
-    elif "{}middle_block.0.in_layers.0.weight".format(key_prefix) in state_dict_keys:
-        transformer_depth_middle = -1
-    else:
-        transformer_depth_middle = -2
-
-    unet_config["in_channels"] = in_channels
-    unet_config["out_channels"] = out_channels
-    unet_config["model_channels"] = model_channels
-    unet_config["num_res_blocks"] = num_res_blocks
-    unet_config["transformer_depth"] = transformer_depth
-    unet_config["transformer_depth_output"] = transformer_depth_output
-    unet_config["channel_mult"] = channel_mult
-    unet_config["transformer_depth_middle"] = transformer_depth_middle
-    unet_config["use_linear_in_transformer"] = use_linear_in_transformer
-    unet_config["context_dim"] = context_dim
-
-    if video_model:
-        unet_config["extra_ff_mix_layer"] = True
-        unet_config["use_spatial_context"] = True
-        unet_config["merge_strategy"] = "learned_with_images"
-        unet_config["merge_factor"] = 0.0
-        unet_config["video_kernel_size"] = [3, 1, 1]
-        unet_config["use_temporal_resblock"] = True
-        unet_config["use_temporal_attention"] = True
-        unet_config["disable_temporal_crossattention"] = not video_model_cross
-    else:
-        unet_config["use_temporal_resblock"] = False
-        unet_config["use_temporal_attention"] = False
-
-    return unet_config
-
-
-def model_config_from_unet_config(unet_config, state_dict=None):
-    for model_config in models:
-        if model_config.matches(unet_config, state_dict):
-            return model_config(unet_config)
-
-    logging.error("no match {}".format(unet_config))
-    return None
-
-
-def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=False):
-    unet_config = detect_unet_config(state_dict, unet_key_prefix)
-    if unet_config is None:
-        return None
-    model_config = model_config_from_unet_config(unet_config, state_dict)
-    return model_config
 
 
 def load_diffusion_model_state_dict(
@@ -15808,78 +14515,6 @@ def convert_vae_state_dict(vae_state_dict):
     return new_state_dict
 
 
-class DiagonalGaussianDistribution(object):
-    def __init__(self, parameters, deterministic=False):
-        self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.parameters.device
-            )
-
-    def sample(self):
-        x = self.mean + self.std * torch.randn(self.mean.shape).to(
-            device=self.parameters.device
-        )
-        return x
-
-    def kl(self, other=None):
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        else:
-            if other is None:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                    dim=[1, 2, 3],
-                )
-            else:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var
-                    + self.var / other.var
-                    - 1.0
-                    - self.logvar
-                    + other.logvar,
-                    dim=[1, 2, 3],
-                )
-
-    def nll(self, sample, dims=[1, 2, 3]):
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims,
-        )
-
-    def mode(self):
-        return self.mean
-
-
-class DiagonalGaussianRegularizer(torch.nn.Module):
-    def __init__(self, sample: bool = True):
-        super().__init__()
-        self.sample = sample
-
-    def get_trainable_parameters(self) -> Any:
-        yield from ()
-
-    def forward(self, z: torch.Tensor) -> Tuple[torch.Tensor, dict]:
-        log = dict()
-        posterior = DiagonalGaussianDistribution(z)
-        if self.sample:
-            z = posterior.sample()
-        else:
-            z = posterior.mode()
-        kl_loss = posterior.kl()
-        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-        log["kl_loss"] = kl_loss
-        return z, log
-
-
 class LitEma(nn.Module):
     def __init__(self, model, decay=0.9999, use_num_upates=True):
         super().__init__()
@@ -15982,559 +14617,6 @@ def instantiate_from_config(config):
             return None
         raise KeyError("Expected key `target` to instantiate.")
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
-
-
-class AbstractAutoencoder(torch.nn.Module):
-    """
-    This is the base class for all autoencoders, including image autoencoders, image autoencoders with discriminators,
-    unCLIP models, etc. Hence, it is fairly general, and specific features
-    (e.g. discriminator training, encoding, decoding) must be implemented in subclasses.
-    """
-
-    def __init__(
-        self,
-        ema_decay: Union[None, float] = None,
-        monitor: Union[None, str] = None,
-        input_key: str = "jpg",
-        **kwargs,
-    ):
-        super().__init__()
-
-        self.input_key = input_key
-        self.use_ema = ema_decay is not None
-        if monitor is not None:
-            self.monitor = monitor
-
-        if self.use_ema:
-            self.model_ema = LitEma(self, decay=ema_decay)
-            logpy.info(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
-
-    def get_input(self, batch) -> Any:
-        raise NotImplementedError()
-
-    def on_train_batch_end(self, *args, **kwargs):
-        # for EMA computation
-        if self.use_ema:
-            self.model_ema(self)
-
-    @contextmanager
-    def ema_scope(self, context=None):
-        if self.use_ema:
-            self.model_ema.store(self.parameters())
-            self.model_ema.copy_to(self)
-            if context is not None:
-                logpy.info(f"{context}: Switched to EMA weights")
-        try:
-            yield None
-        finally:
-            if self.use_ema:
-                self.model_ema.restore(self.parameters())
-                if context is not None:
-                    logpy.info(f"{context}: Restored training weights")
-
-    def encode(self, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError("encode()-method of abstract base class called")
-
-    def decode(self, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError("decode()-method of abstract base class called")
-
-    def instantiate_optimizer_from_config(self, params, lr, cfg):
-        logpy.info(f"loading >>> {cfg['target']} <<< optimizer from config")
-        return get_obj_from_str(cfg["target"])(
-            params, lr=lr, **cfg.get("params", dict())
-        )
-
-    def configure_optimizers(self) -> Any:
-        raise NotImplementedError()
-
-
-class AutoencodingEngine(AbstractAutoencoder):
-    """
-    Base class for all image autoencoders that we train, like VQGAN or AutoencoderKL
-    (we also restore them explicitly as special cases for legacy reasons).
-    Regularizations such as KL or VQ are moved to the regularizer class.
-    """
-
-    def __init__(
-        self,
-        *args,
-        encoder_config: Dict,
-        decoder_config: Dict,
-        regularizer_config: Dict,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-
-        self.encoder: torch.nn.Module = instantiate_from_config(encoder_config)
-        self.decoder: torch.nn.Module = instantiate_from_config(decoder_config)
-        self.regularization: AbstractRegularizer = instantiate_from_config(
-            regularizer_config
-        )
-
-    def get_last_layer(self):
-        return self.decoder.get_last_layer()
-
-    def encode(
-        self,
-        x: torch.Tensor,
-        return_reg_log: bool = False,
-        unregularized: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        z = self.encoder(x)
-        if unregularized:
-            return z, dict()
-        z, reg_log = self.regularization(z)
-        if return_reg_log:
-            return z, reg_log
-        return z
-
-    def decode(self, z: torch.Tensor, **kwargs) -> torch.Tensor:
-        x = self.decoder(z, **kwargs)
-        return x
-
-    def forward(
-        self, x: torch.Tensor, **additional_decode_kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
-        z, reg_log = self.encode(x, return_reg_log=True)
-        dec = self.decode(z, **additional_decode_kwargs)
-        return z, dec, reg_log
-
-
-class AutoencodingEngineLegacy(AutoencodingEngine):
-    def __init__(self, embed_dim: int, **kwargs):
-        self.max_batch_size = kwargs.pop("max_batch_size", None)
-        ddconfig = kwargs.pop("ddconfig")
-        super().__init__(
-            encoder_config={
-                "target": "flux.Encoder",
-                "params": ddconfig,
-            },
-            decoder_config={
-                "target": "flux.Decoder",
-                "params": ddconfig,
-            },
-            **kwargs,
-        )
-        self.quant_conv = disable_weight_init.Conv2d(
-            (1 + ddconfig["double_z"]) * ddconfig["z_channels"],
-            (1 + ddconfig["double_z"]) * embed_dim,
-            1,
-        )
-        self.post_quant_conv = disable_weight_init.Conv2d(
-            embed_dim, ddconfig["z_channels"], 1
-        )
-        self.embed_dim = embed_dim
-
-    def get_autoencoder_params(self) -> list:
-        params = super().get_autoencoder_params()
-        return params
-
-    def encode(
-        self, x: torch.Tensor, return_reg_log: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        if self.max_batch_size is None:
-            z = self.encoder(x)
-            z = self.quant_conv(z)
-        else:
-            N = x.shape[0]
-            bs = self.max_batch_size
-            n_batches = int(math.ceil(N / bs))
-            z = list()
-            for i_batch in range(n_batches):
-                z_batch = self.encoder(x[i_batch * bs : (i_batch + 1) * bs])
-                z_batch = self.quant_conv(z_batch)
-                z.append(z_batch)
-            z = torch.cat(z, 0)
-
-        z, reg_log = self.regularization(z)
-        if return_reg_log:
-            return z, reg_log
-        return z
-
-    def decode(self, z: torch.Tensor, **decoder_kwargs) -> torch.Tensor:
-        if self.max_batch_size is None:
-            dec = self.post_quant_conv(z)
-            dec = self.decoder(dec, **decoder_kwargs)
-        else:
-            N = z.shape[0]
-            bs = self.max_batch_size
-            n_batches = int(math.ceil(N / bs))
-            dec = list()
-            for i_batch in range(n_batches):
-                dec_batch = self.post_quant_conv(z[i_batch * bs : (i_batch + 1) * bs])
-                dec_batch = self.decoder(dec_batch, **decoder_kwargs)
-                dec.append(dec_batch)
-            dec = torch.cat(dec, 0)
-
-        return dec
-
-
-class AutoencoderKL(AutoencodingEngineLegacy):
-    def __init__(self, **kwargs):
-        if "lossconfig" in kwargs:
-            kwargs["loss_config"] = kwargs.pop("lossconfig")
-        super().__init__(
-            regularizer_config={"target": ("flux.DiagonalGaussianRegularizer")},
-            **kwargs,
-        )
-
-
-class VAE:
-    def __init__(self, sd=None, device=None, config=None, dtype=None):
-        if (
-            "decoder.up_blocks.0.resnets.0.norm1.weight" in sd.keys()
-        ):  # diffusers format
-            sd = convert_vae_state_dict(sd)
-
-        self.memory_used_encode = lambda shape, dtype: (
-            1767 * shape[2] * shape[3]
-        ) * dtype_size(
-            dtype
-        )  # These are for AutoencoderKL and need tweaking (should be lower)
-        self.memory_used_decode = lambda shape, dtype: (
-            2178 * shape[2] * shape[3] * 64
-        ) * dtype_size(dtype)
-        self.downscale_ratio = 8
-        self.upscale_ratio = 8
-        self.latent_channels = 4
-        self.output_channels = 3
-        self.process_input = lambda image: image * 2.0 - 1.0
-        self.process_output = lambda image: torch.clamp(
-            (image + 1.0) / 2.0, min=0.0, max=1.0
-        )
-        self.working_dtypes = [torch.bfloat16, torch.float32]
-
-        if config is None:
-            if "decoder.conv_in.weight" in sd:
-                # default SD1.x/SD2.x VAE parameters
-                ddconfig = {
-                    "double_z": True,
-                    "z_channels": 4,
-                    "resolution": 256,
-                    "in_channels": 3,
-                    "out_ch": 3,
-                    "ch": 128,
-                    "ch_mult": [1, 2, 4, 4],
-                    "num_res_blocks": 2,
-                    "attn_resolutions": [],
-                    "dropout": 0.0,
-                }
-
-                if (
-                    "encoder.down.2.downsample.conv.weight" not in sd
-                    and "decoder.up.3.upsample.conv.weight" not in sd
-                ):  # Stable diffusion x4 upscaler VAE
-                    ddconfig["ch_mult"] = [1, 2, 4]
-                    self.downscale_ratio = 4
-                    self.upscale_ratio = 4
-
-                self.latent_channels = ddconfig["z_channels"] = sd[
-                    "decoder.conv_in.weight"
-                ].shape[1]
-                if "quant_conv.weight" in sd:
-                    self.first_stage_model = AutoencoderKL(
-                        ddconfig=ddconfig, embed_dim=4
-                    )
-                else:
-                    self.first_stage_model = AutoencodingEngine(
-                        regularizer_config={
-                            "target": "flux.DiagonalGaussianRegularizer"
-                        },
-                        encoder_config={
-                            "target": "flux.Encoder",
-                            "params": ddconfig,
-                        },
-                        decoder_config={
-                            "target": "flux.Decoder",
-                            "params": ddconfig,
-                        },
-                    )
-            else:
-                logging.warning("WARNING: No VAE weights detected, VAE not initalized.")
-                self.first_stage_model = None
-                return
-        else:
-            self.first_stage_model = AutoencoderKL(**(config["params"]))
-        self.first_stage_model = self.first_stage_model.eval()
-
-        m, u = self.first_stage_model.load_state_dict(sd, strict=False)
-        if len(m) > 0:
-            logging.warning("Missing VAE keys {}".format(m))
-
-        if len(u) > 0:
-            logging.debug("Leftover VAE keys {}".format(u))
-
-        if device is None:
-            device = vae_device()
-        self.device = device
-        offload_device = vae_offload_device()
-        if dtype is None:
-            dtype = vae_dtype(self.device, self.working_dtypes)
-        self.vae_dtype = dtype
-        self.first_stage_model.to(self.vae_dtype)
-        self.output_device = intermediate_device()
-
-        self.patcher = ModelPatcher(
-            self.first_stage_model,
-            load_device=self.device,
-            offload_device=offload_device,
-        )
-        logging.debug(
-            "VAE load device: {}, offload device: {}, dtype: {}".format(
-                self.device, offload_device, self.vae_dtype
-            )
-        )
-
-    def vae_encode_crop_pixels(self, pixels):
-        dims = pixels.shape[1:-1]
-        for d in range(len(dims)):
-            x = (dims[d] // self.downscale_ratio) * self.downscale_ratio
-            x_offset = (dims[d] % self.downscale_ratio) // 2
-            if x != dims[d]:
-                pixels = pixels.narrow(d + 1, x_offset, x)
-        return pixels
-
-    def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap=16):
-        steps = samples.shape[0] * get_tiled_scale_steps(
-            samples.shape[3], samples.shape[2], tile_x, tile_y, overlap
-        )
-        steps += samples.shape[0] * get_tiled_scale_steps(
-            samples.shape[3], samples.shape[2], tile_x // 2, tile_y * 2, overlap
-        )
-        steps += samples.shape[0] * get_tiled_scale_steps(
-            samples.shape[3], samples.shape[2], tile_x * 2, tile_y // 2, overlap
-        )
-        pbar = ProgressBar(steps)
-
-        decode_fn = lambda a: self.first_stage_model.decode(
-            a.to(self.vae_dtype).to(self.device)
-        ).float()
-        output = self.process_output(
-            (
-                tiled_scale(
-                    samples,
-                    decode_fn,
-                    tile_x // 2,
-                    tile_y * 2,
-                    overlap,
-                    upscale_amount=self.upscale_ratio,
-                    output_device=self.output_device,
-                    pbar=pbar,
-                )
-                + tiled_scale(
-                    samples,
-                    decode_fn,
-                    tile_x * 2,
-                    tile_y // 2,
-                    overlap,
-                    upscale_amount=self.upscale_ratio,
-                    output_device=self.output_device,
-                    pbar=pbar,
-                )
-                + tiled_scale(
-                    samples,
-                    decode_fn,
-                    tile_x,
-                    tile_y,
-                    overlap,
-                    upscale_amount=self.upscale_ratio,
-                    output_device=self.output_device,
-                    pbar=pbar,
-                )
-            )
-            / 3.0
-        )
-        return output
-
-    def decode_tiled_1d(self, samples, tile_x=128, overlap=32):
-        decode_fn = lambda a: self.first_stage_model.decode(
-            a.to(self.vae_dtype).to(self.device)
-        ).float()
-        return tiled_scale_multidim(
-            samples,
-            decode_fn,
-            tile=(tile_x,),
-            overlap=overlap,
-            upscale_amount=self.upscale_ratio,
-            out_channels=self.output_channels,
-            output_device=self.output_device,
-        )
-
-    def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
-        steps = pixel_samples.shape[0] * get_tiled_scale_steps(
-            pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap
-        )
-        steps += pixel_samples.shape[0] * get_tiled_scale_steps(
-            pixel_samples.shape[3],
-            pixel_samples.shape[2],
-            tile_x // 2,
-            tile_y * 2,
-            overlap,
-        )
-        steps += pixel_samples.shape[0] * get_tiled_scale_steps(
-            pixel_samples.shape[3],
-            pixel_samples.shape[2],
-            tile_x * 2,
-            tile_y // 2,
-            overlap,
-        )
-        pbar = ProgressBar(steps)
-
-        encode_fn = lambda a: self.first_stage_model.encode(
-            (self.process_input(a)).to(self.vae_dtype).to(self.device)
-        ).float()
-        samples = tiled_scale(
-            pixel_samples,
-            encode_fn,
-            tile_x,
-            tile_y,
-            overlap,
-            upscale_amount=(1 / self.downscale_ratio),
-            out_channels=self.latent_channels,
-            output_device=self.output_device,
-            pbar=pbar,
-        )
-        samples += tiled_scale(
-            pixel_samples,
-            encode_fn,
-            tile_x * 2,
-            tile_y // 2,
-            overlap,
-            upscale_amount=(1 / self.downscale_ratio),
-            out_channels=self.latent_channels,
-            output_device=self.output_device,
-            pbar=pbar,
-        )
-        samples += tiled_scale(
-            pixel_samples,
-            encode_fn,
-            tile_x // 2,
-            tile_y * 2,
-            overlap,
-            upscale_amount=(1 / self.downscale_ratio),
-            out_channels=self.latent_channels,
-            output_device=self.output_device,
-            pbar=pbar,
-        )
-        samples /= 3.0
-        return samples
-
-    def encode_tiled_1d(self, samples, tile_x=128 * 2048, overlap=32 * 2048):
-        encode_fn = lambda a: self.first_stage_model.encode(
-            (self.process_input(a)).to(self.vae_dtype).to(self.device)
-        ).float()
-        return tiled_scale_multidim(
-            samples,
-            encode_fn,
-            tile=(tile_x,),
-            overlap=overlap,
-            upscale_amount=(1 / self.downscale_ratio),
-            out_channels=self.latent_channels,
-            output_device=self.output_device,
-        )
-
-    def decode(self, samples_in):
-        try:
-            memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-            load_models_gpu([self.patcher], memory_required=memory_used)
-            free_memory = get_free_memory(self.device)
-            batch_number = int(free_memory / memory_used)
-            batch_number = max(1, batch_number)
-
-            pixel_samples = torch.empty(
-                (samples_in.shape[0], self.output_channels)
-                + tuple(map(lambda a: a * self.upscale_ratio, samples_in.shape[2:])),
-                device=self.output_device,
-            )
-            for x in range(0, samples_in.shape[0], batch_number):
-                samples = (
-                    samples_in[x : x + batch_number].to(self.vae_dtype).to(self.device)
-                )
-                pixel_samples[x : x + batch_number] = self.process_output(
-                    self.first_stage_model.decode(samples)
-                    .to(self.output_device)
-                    .float()
-                )
-        except OOM_EXCEPTION as e:
-            logging.warning(
-                "Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding."
-            )
-            if len(samples_in.shape) == 3:
-                pixel_samples = self.decode_tiled_1d(samples_in)
-            else:
-                pixel_samples = self.decode_tiled_(samples_in)
-
-        pixel_samples = pixel_samples.to(self.output_device).movedim(1, -1)
-        return pixel_samples
-
-    def decode_tiled(self, samples, tile_x=64, tile_y=64, overlap=16):
-        load_model_gpu(self.patcher)
-        output = self.decode_tiled_(samples, tile_x, tile_y, overlap)
-        return output.movedim(1, -1)
-
-    def encode(self, pixel_samples):
-        pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
-        pixel_samples = pixel_samples.movedim(-1, 1)
-        try:
-            memory_used = self.memory_used_encode(pixel_samples.shape, self.vae_dtype)
-            load_models_gpu([self.patcher], memory_required=memory_used)
-            free_memory = get_free_memory(self.device)
-            batch_number = int(free_memory / memory_used)
-            batch_number = max(1, batch_number)
-            samples = torch.empty(
-                (pixel_samples.shape[0], self.latent_channels)
-                + tuple(
-                    map(lambda a: a // self.downscale_ratio, pixel_samples.shape[2:])
-                ),
-                device=self.output_device,
-            )
-            for x in range(0, pixel_samples.shape[0], batch_number):
-                pixels_in = (
-                    self.process_input(pixel_samples[x : x + batch_number])
-                    .to(self.vae_dtype)
-                    .to(self.device)
-                )
-                samples[x : x + batch_number] = (
-                    self.first_stage_model.encode(pixels_in)
-                    .to(self.output_device)
-                    .float()
-                )
-
-        except OOM_EXCEPTION as e:
-            logging.warning(
-                "Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding."
-            )
-            if len(pixel_samples.shape) == 3:
-                samples = self.encode_tiled_1d(pixel_samples)
-            else:
-                samples = self.encode_tiled_(pixel_samples)
-
-        return samples
-
-    def encode_tiled(self, pixel_samples, tile_x=512, tile_y=512, overlap=64):
-        pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
-        load_model_gpu(self.patcher)
-        pixel_samples = pixel_samples.movedim(-1, 1)
-        samples = self.encode_tiled_(
-            pixel_samples, tile_x=tile_x, tile_y=tile_y, overlap=overlap
-        )
-        return samples
-
-    def get_sd(self):
-        return self.first_stage_model.state_dict()
-
-
-class CLIPType(Enum):
-    STABLE_DIFFUSION = 1
-    STABLE_CASCADE = 2
-    SD3 = 3
-    STABLE_AUDIO = 4
-    HUNYUAN_DIT = 5
-    FLUX = 6
-
-
-def text_encoder_offload_device():
-    return torch.device("cpu")
 
 
 class LongClipTokenizer_(SDTokenizer):
@@ -16643,18 +14725,6 @@ class FluxTokenizer:
 
     def state_dict(self):
         return {}
-
-
-def pick_weight_dtype(dtype, fallback_dtype, device=None):
-    if dtype is None:
-        dtype = fallback_dtype
-    elif dtype_size(dtype) > dtype_size(fallback_dtype):
-        dtype = fallback_dtype
-
-    if not supports_cast(device, dtype):
-        dtype = fallback_dtype
-
-    return dtype
 
 
 class FluxClipModel(torch.nn.Module):
@@ -17296,130 +15366,6 @@ class SAT5Model(SD1ClipModel):
         )
 
 
-class CLIP:
-    def __init__(
-        self,
-        target=None,
-        embedding_directory=None,
-        no_init=False,
-        tokenizer_data={},
-        parameters=0,
-        model_options={},
-    ):
-        if no_init:
-            return
-        params = target.params.copy()
-        clip = target.clip
-        tokenizer = target.tokenizer
-
-        load_device = model_options.get("load_device", text_encoder_device())
-        offload_device = model_options.get(
-            "offload_device", text_encoder_offload_device()
-        )
-        dtype = model_options.get("dtype", None)
-        if dtype is None:
-            dtype = text_encoder_dtype(load_device)
-
-        params["dtype"] = dtype
-        params["device"] = model_options.get(
-            "initial_device",
-            text_encoder_initial_device(
-                load_device, offload_device, parameters * dtype_size(dtype)
-            ),
-        )
-        params["model_options"] = model_options
-
-        self.cond_stage_model = clip(**(params))
-
-        for dt in self.cond_stage_model.dtypes:
-            if not supports_cast(load_device, dt):
-                load_device = offload_device
-                if params["device"] != offload_device:
-                    self.cond_stage_model.to(offload_device)
-                    logging.warning("Had to shift TE back.")
-
-        self.tokenizer = tokenizer(
-            embedding_directory=embedding_directory, tokenizer_data=tokenizer_data
-        )
-        self.patcher = ModelPatcher(
-            self.cond_stage_model,
-            load_device=load_device,
-            offload_device=offload_device,
-        )
-        if params["device"] == load_device:
-            load_models_gpu([self.patcher], force_full_load=True)
-        self.layer_idx = None
-        logging.debug(
-            "CLIP model load device: {}, offload device: {}, current: {}".format(
-                load_device, offload_device, params["device"]
-            )
-        )
-
-    def clone(self):
-        n = CLIP(no_init=True)
-        n.patcher = self.patcher.clone()
-        n.cond_stage_model = self.cond_stage_model
-        n.tokenizer = self.tokenizer
-        n.layer_idx = self.layer_idx
-        return n
-
-    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        return self.patcher.add_patches(patches, strength_patch, strength_model)
-
-    def clip_layer(self, layer_idx):
-        self.layer_idx = layer_idx
-
-    def tokenize(self, text, return_word_ids=False):
-        return self.tokenizer.tokenize_with_weights(text, return_word_ids)
-
-    def encode_from_tokens(self, tokens, return_pooled=False, return_dict=False):
-        self.cond_stage_model.reset_clip_options()
-
-        if self.layer_idx is not None:
-            self.cond_stage_model.set_clip_options({"layer": self.layer_idx})
-
-        if return_pooled == "unprojected":
-            self.cond_stage_model.set_clip_options({"projected_pooled": False})
-
-        self.load_model()
-        o = self.cond_stage_model.encode_token_weights(tokens)
-        cond, pooled = o[:2]
-        if return_dict:
-            out = {"cond": cond, "pooled_output": pooled}
-            if len(o) > 2:
-                for k in o[2]:
-                    out[k] = o[2][k]
-            return out
-
-        if return_pooled:
-            return cond, pooled
-        return cond
-
-    def encode(self, text):
-        tokens = self.tokenize(text)
-        return self.encode_from_tokens(tokens)
-
-    def load_sd(self, sd, full_model=False):
-        if full_model:
-            return self.cond_stage_model.load_state_dict(sd, strict=False)
-        else:
-            return self.cond_stage_model.load_sd(sd)
-
-    def get_sd(self):
-        sd_clip = self.cond_stage_model.state_dict()
-        sd_tokenizer = self.tokenizer.state_dict()
-        for k in sd_tokenizer:
-            sd_clip[k] = sd_tokenizer[k]
-        return sd_clip
-
-    def load_model(self):
-        load_model_gpu(self.patcher)
-        return self.patcher
-
-    def get_key_patches(self):
-        return self.patcher.get_key_patches()
-
-
 def load_text_encoder_state_dicts(
     state_dicts=[],
     embedding_directory=None,
@@ -17494,297 +15440,6 @@ def load_text_encoder_state_dicts(
         if len(u) > 0:
             logging.debug("clip unexpected: {}".format(u))
     return clip
-
-
-def cast_to_device(tensor, device, dtype, copy=False):
-    device_supports_cast = False
-    if tensor.dtype == torch.float32 or tensor.dtype == torch.float16:
-        device_supports_cast = True
-    elif tensor.dtype == torch.bfloat16:
-        if hasattr(device, "type") and device.type.startswith("cuda"):
-            device_supports_cast = True
-
-    non_blocking = device_should_use_non_blocking(device)
-
-    if device_supports_cast:
-        if copy:
-            if tensor.device == device:
-                return tensor.to(dtype, copy=copy, non_blocking=non_blocking)
-            return tensor.to(device, copy=copy, non_blocking=non_blocking).to(
-                dtype, non_blocking=non_blocking
-            )
-        else:
-            return tensor.to(device, non_blocking=non_blocking).to(
-                dtype, non_blocking=non_blocking
-            )
-    else:
-        return tensor.to(device, dtype, copy=copy, non_blocking=non_blocking)
-
-
-def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
-    if input is not None:
-        if dtype is None:
-            dtype = input.dtype
-        if bias_dtype is None:
-            bias_dtype = dtype
-        if device is None:
-            device = input.device
-
-    bias = None
-    non_blocking = device_supports_non_blocking(device)
-    if s.bias is not None:
-        has_function = s.bias_function is not None
-        bias = cast_to(
-            s.bias, bias_dtype, device, non_blocking=non_blocking, copy=has_function
-        )
-        if has_function:
-            bias = s.bias_function(bias)
-
-    has_function = s.weight_function is not None
-    weight = cast_to(
-        s.weight, dtype, device, non_blocking=non_blocking, copy=has_function
-    )
-    if has_function:
-        weight = s.weight_function(weight)
-    return weight, bias
-
-
-class CastWeightBiasOp:
-    comfy_cast_weights = False
-    weight_function = None
-    bias_function = None
-
-
-class disable_weight_init:
-    class Linear(torch.nn.Linear, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.linear(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return self._conv_forward(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Conv2d(torch.nn.Conv2d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return self._conv_forward(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Conv3d(torch.nn.Conv3d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return self._conv_forward(input, weight, bias)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class GroupNorm(torch.nn.GroupNorm, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.group_norm(
-                input, self.num_groups, weight, bias, self.eps
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class LayerNorm(torch.nn.LayerNorm, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input):
-            if self.weight is not None:
-                weight, bias = cast_bias_weight(self, input)
-            else:
-                weight = None
-                bias = None
-            return torch.nn.functional.layer_norm(
-                input, self.normalized_shape, weight, bias, self.eps
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class ConvTranspose2d(torch.nn.ConvTranspose2d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input, output_size=None):
-            num_spatial_dims = 2
-            output_padding = self._output_padding(
-                input,
-                output_size,
-                self.stride,
-                self.padding,
-                self.kernel_size,
-                num_spatial_dims,
-                self.dilation,
-            )
-
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.conv_transpose2d(
-                input,
-                weight,
-                bias,
-                self.stride,
-                self.padding,
-                output_padding,
-                self.groups,
-                self.dilation,
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class ConvTranspose1d(torch.nn.ConvTranspose1d, CastWeightBiasOp):
-        def reset_parameters(self):
-            return None
-
-        def forward_comfy_cast_weights(self, input, output_size=None):
-            num_spatial_dims = 1
-            output_padding = self._output_padding(
-                input,
-                output_size,
-                self.stride,
-                self.padding,
-                self.kernel_size,
-                num_spatial_dims,
-                self.dilation,
-            )
-
-            weight, bias = cast_bias_weight(self, input)
-            return torch.nn.functional.conv_transpose1d(
-                input,
-                weight,
-                bias,
-                self.stride,
-                self.padding,
-                output_padding,
-                self.groups,
-                self.dilation,
-            )
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                return super().forward(*args, **kwargs)
-
-    class Embedding(torch.nn.Embedding, CastWeightBiasOp):
-        def reset_parameters(self):
-            self.bias = None
-            return None
-
-        def forward_comfy_cast_weights(self, input, out_dtype=None):
-            output_dtype = out_dtype
-            if (
-                self.weight.dtype == torch.float16
-                or self.weight.dtype == torch.bfloat16
-            ):
-                out_dtype = None
-            weight, bias = cast_bias_weight(self, device=input.device, dtype=out_dtype)
-            return torch.nn.functional.embedding(
-                input,
-                weight,
-                self.padding_idx,
-                self.max_norm,
-                self.norm_type,
-                self.scale_grad_by_freq,
-                self.sparse,
-            ).to(dtype=output_dtype)
-
-        def forward(self, *args, **kwargs):
-            if self.comfy_cast_weights:
-                return self.forward_comfy_cast_weights(*args, **kwargs)
-            else:
-                if "out_dtype" in kwargs:
-                    kwargs.pop("out_dtype")
-                return super().forward(*args, **kwargs)
-
-    @classmethod
-    def conv_nd(s, dims, *args, **kwargs):
-        if dims == 2:
-            return s.Conv2d(*args, **kwargs)
-        elif dims == 3:
-            return s.Conv3d(*args, **kwargs)
-        else:
-            raise ValueError(f"unsupported dimensions: {dims}")
-
-
-class manual_cast(disable_weight_init):
-    class Linear(disable_weight_init.Linear):
-        comfy_cast_weights = True
-
-    class Conv1d(disable_weight_init.Conv1d):
-        comfy_cast_weights = True
-
-    class Conv2d(disable_weight_init.Conv2d):
-        comfy_cast_weights = True
-
-    class Conv3d(disable_weight_init.Conv3d):
-        comfy_cast_weights = True
-
-    class GroupNorm(disable_weight_init.GroupNorm):
-        comfy_cast_weights = True
-
-    class LayerNorm(disable_weight_init.LayerNorm):
-        comfy_cast_weights = True
-
-    class ConvTranspose2d(disable_weight_init.ConvTranspose2d):
-        comfy_cast_weights = True
-
-    class ConvTranspose1d(disable_weight_init.ConvTranspose1d):
-        comfy_cast_weights = True
-
-    class Embedding(disable_weight_init.Embedding):
-        comfy_cast_weights = True
-
 
 TORCH_COMPATIBLE_QTYPES = {
     None,
@@ -18718,15 +16373,6 @@ class VAELoader:
             sd["vae_shift"] = torch.tensor(0.1159)
         return sd
 
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {"vae_name": (s.vae_list(),)}}
-
-    RETURN_TYPES = ("VAE",)
-    FUNCTION = "load_vae"
-
-    CATEGORY = "loaders"
-
     # TODO: scale factor?
     def load_vae(self, vae_name):
         if vae_name in ["taesd", "taesdxl", "taesd3", "taef1"]:
@@ -18777,22 +16423,6 @@ def gguf_clip_loader(path):
 
 
 class CLIPLoaderGGUF:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "clip_name": (s.get_filename_list(),),
-                "type": (
-                    ["stable_diffusion", "stable_cascade", "sd3", "stable_audio"],
-                ),
-            }
-        }
-
-    RETURN_TYPES = ("CLIP",)
-    FUNCTION = "load_clip"
-    CATEGORY = "bootleg"
-    TITLE = "CLIPLoader (GGUF)"
-
     @classmethod
     def get_filename_list(s):
         files = []
@@ -18865,19 +16495,6 @@ class CLIPLoaderGGUF:
 
 
 class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
-    @classmethod
-    def INPUT_TYPES(s):
-        file_options = (s.get_filename_list(),)
-        return {
-            "required": {
-                "clip_name1": file_options,
-                "clip_name2": file_options,
-                "type": (("sdxl", "sd3", "flux"),),
-            }
-        }
-
-    TITLE = "DualCLIPLoader (GGUF)"
-
     def load_clip(self, clip_name1, clip_name2, type):
         clip_path1 = ".\\_internal\\clip\\" + clip_name1
         clip_path2 = ".\\_internal\\clip\\" + clip_name2
@@ -18887,25 +16504,6 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
 
 
 class CLIPTextEncodeFlux:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "clip": ("CLIP",),
-                "clip_l": ("STRING", {"multiline": True, "dynamicPrompts": True}),
-                "t5xxl": ("STRING", {"multiline": True, "dynamicPrompts": True}),
-                "guidance": (
-                    "FLOAT",
-                    {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1},
-                ),
-            }
-        }
-
-    RETURN_TYPES = ("CONDITIONING",)
-    FUNCTION = "encode"
-
-    CATEGORY = "advanced/conditioning/flux"
-
     def encode(self, clip, clip_l, t5xxl, guidance):
         tokens = clip.tokenize(clip_l)
         tokens["t5xxl"] = clip.tokenize(t5xxl)["t5xxl"]
@@ -18917,14 +16515,6 @@ class CLIPTextEncodeFlux:
 
 
 class ConditioningZeroOut:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {"conditioning": ("CONDITIONING",)}}
-
-    RETURN_TYPES = ("CONDITIONING",)
-    FUNCTION = "zero_out"
-
-    CATEGORY = "advanced/conditioning"
 
     def zero_out(self, conditioning):
         c = []
@@ -18936,31 +16526,6 @@ class ConditioningZeroOut:
             n = [torch.zeros_like(t[0]), d]
             c.append(n)
         return (c,)
-
-def prepare_noise(latent_image, seed, noise_inds=None):
-    """
-    creates random noise given a latent image and a seed.
-    optional arg skip can be used to skip and discard x number of noise generations for a given seed
-    """
-    generator = torch.manual_seed(seed)
-    if noise_inds is None:
-        return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
-    
-    unique_inds, inverse = np.unique(noise_inds, return_inverse=True)
-    noises = []
-    for i in range(unique_inds[-1]+1):
-        noise = torch.randn([1] + list(latent_image.size())[1:], dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
-        if i in unique_inds:
-            noises.append(noise)
-    noises = [noises[i] for i in inverse]
-    noises = torch.cat(noises, axis=0)
-    return noises
-
-def fix_empty_latent_channels(model, latent_image):
-    latent_channels = model.get_model_object("latent_format").latent_channels #Resize the empty latent image so it has the right number of channels
-    if latent_channels != latent_image.shape[1] and torch.count_nonzero(latent_image) == 0:
-        latent_image = repeat_to_batch_size(latent_image, latent_channels, dim=1)
-    return latent_image
 
 KSAMPLER_NAMES = ["euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_cfg_pp", "heun", "heunpp2","dpm_2", "dpm_2_ancestral",
                   "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp", "dpmpp_sde", "dpmpp_sde_gpu",
@@ -18981,292 +16546,6 @@ def calculate_sigmas1(model_sampling, scheduler_name, steps):
     else:
         logging.error("error invalid scheduler {}".format(scheduler_name))
     return sigmas
-
-def sampler_object(name):
-    sampler = ksampler(name)
-    return sampler
-
-def convert_cond(cond):
-    out = []
-    for c in cond:
-        temp = c[1].copy()
-        model_conds = temp.get("model_conds", {})
-        if c[0] is not None:
-            model_conds["c_crossattn"] = CONDCrossAttn(c[0]) #TODO: remove
-            temp["cross_attn"] = c[0]
-        temp["model_conds"] = model_conds
-        out.append(temp)
-    return out
-
-def get_area_and_mult(conds, x_in, timestep_in):
-    dims = tuple(x_in.shape[2:])
-    area = None
-    strength = 1.0
-
-    if 'timestep_start' in conds:
-        timestep_start = conds['timestep_start']
-        if timestep_in[0] > timestep_start:
-            return None
-    if 'timestep_end' in conds:
-        timestep_end = conds['timestep_end']
-        if timestep_in[0] < timestep_end:
-            return None
-    if 'area' in conds:
-        area = list(conds['area'])
-    if 'strength' in conds:
-        strength = conds['strength']
-
-    input_x = x_in
-    if area is not None:
-        for i in range(len(dims)):
-            area[i] = min(input_x.shape[i + 2] - area[len(dims) + i], area[i])
-            input_x = input_x.narrow(i + 2, area[len(dims) + i], area[i])
-
-    if 'mask' in conds:
-        # Scale the mask to the size of the input
-        # The mask should have been resized as we began the sampling process
-        mask_strength = 1.0
-        if "mask_strength" in conds:
-            mask_strength = conds["mask_strength"]
-        mask = conds['mask']
-        assert(mask.shape[1:] == x_in.shape[2:])
-
-        mask = mask[:input_x.shape[0]]
-        if area is not None:
-            for i in range(len(dims)):
-                mask = mask.narrow(i + 1, area[len(dims) + i], area[i])
-
-        mask = mask * mask_strength
-        mask = mask.unsqueeze(1).repeat(input_x.shape[0] // mask.shape[0], input_x.shape[1], 1, 1)
-    else:
-        mask = torch.ones_like(input_x)
-    mult = mask * strength
-
-    if 'mask' not in conds and area is not None:
-        rr = 8
-        for i in range(len(dims)):
-            if area[len(dims) + i] != 0:
-                for t in range(rr):
-                    m = mult.narrow(i + 2, t, 1)
-                    m *= ((1.0/rr) * (t + 1))
-            if (area[i] + area[len(dims) + i]) < x_in.shape[i + 2]:
-                for t in range(rr):
-                    m = mult.narrow(i + 2, area[i] - 1 - t, 1)
-                    m *= ((1.0/rr) * (t + 1))
-
-    conditioning = {}
-    model_conds = conds["model_conds"]
-    for c in model_conds:
-        conditioning[c] = model_conds[c].process_cond(batch_size=x_in.shape[0], device=x_in.device, area=area)
-
-    control = conds.get('control', None)
-
-    patches = None
-    if 'gligen' in conds:
-        gligen = conds['gligen']
-        patches = {}
-        gligen_type = gligen[0]
-        gligen_model = gligen[1]
-        if gligen_type == "position":
-            gligen_patch = gligen_model.model.set_position(input_x.shape, gligen[2], input_x.device)
-        else:
-            gligen_patch = gligen_model.model.set_empty(input_x.shape, input_x.device)
-
-        patches['middle_patch'] = [gligen_patch]
-
-    cond_obj = collections.namedtuple('cond_obj', ['input_x', 'mult', 'conditioning', 'area', 'control', 'patches'])
-    return cond_obj(input_x, mult, conditioning, area, control, patches)
-
-def cond_equal_size(c1, c2):
-    if c1 is c2:
-        return True
-    if c1.keys() != c2.keys():
-        return False
-    for k in c1:
-        if not c1[k].can_concat(c2[k]):
-            return False
-    return True
-
-def can_concat_cond(c1, c2):
-    if c1.input_x.shape != c2.input_x.shape:
-        return False
-
-    def objects_concatable(obj1, obj2):
-        if (obj1 is None) != (obj2 is None):
-            return False
-        if obj1 is not None:
-            if obj1 is not obj2:
-                return False
-        return True
-
-    if not objects_concatable(c1.control, c2.control):
-        return False
-
-    if not objects_concatable(c1.patches, c2.patches):
-        return False
-
-    return cond_equal_size(c1.conditioning, c2.conditioning)
-
-def cond_cat(c_list):
-    c_crossattn = []
-    c_concat = []
-    c_adm = []
-    crossattn_max_len = 0
-
-    temp = {}
-    for x in c_list:
-        for k in x:
-            cur = temp.get(k, [])
-            cur.append(x[k])
-            temp[k] = cur
-
-    out = {}
-    for k in temp:
-        conds = temp[k]
-        out[k] = conds[0].concat(conds[1:])
-
-    return out
-
-def calc_cond_batch(model, conds, x_in, timestep, model_options):
-    out_conds = []
-    out_counts = []
-    to_run = []
-
-    for i in range(len(conds)):
-        out_conds.append(torch.zeros_like(x_in))
-        out_counts.append(torch.ones_like(x_in) * 1e-37)
-
-        cond = conds[i]
-        if cond is not None:
-            for x in cond:
-                p = get_area_and_mult(x, x_in, timestep)
-                if p is None:
-                    continue
-
-                to_run += [(p, i)]
-
-    while len(to_run) > 0:
-        first = to_run[0]
-        first_shape = first[0][0].shape
-        to_batch_temp = []
-        for x in range(len(to_run)):
-            if can_concat_cond(to_run[x][0], first[0]):
-                to_batch_temp += [x]
-
-        to_batch_temp.reverse()
-        to_batch = to_batch_temp[:1]
-
-        free_memory = get_free_memory(x_in.device)
-        for i in range(1, len(to_batch_temp) + 1):
-            batch_amount = to_batch_temp[:len(to_batch_temp)//i]
-            input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
-            if model.memory_required(input_shape) * 1.5 < free_memory:
-                to_batch = batch_amount
-                break
-
-        input_x = []
-        mult = []
-        c = []
-        cond_or_uncond = []
-        area = []
-        control = None
-        patches = None
-        for x in to_batch:
-            o = to_run.pop(x)
-            p = o[0]
-            input_x.append(p.input_x)
-            mult.append(p.mult)
-            c.append(p.conditioning)
-            area.append(p.area)
-            cond_or_uncond.append(o[1])
-            control = p.control
-            patches = p.patches
-
-        batch_chunks = len(cond_or_uncond)
-        input_x = torch.cat(input_x)
-        c = cond_cat(c)
-        timestep_ = torch.cat([timestep] * batch_chunks)
-
-        if control is not None:
-            c['control'] = control.get_control(input_x, timestep_, c, len(cond_or_uncond))
-
-        transformer_options = {}
-        if 'transformer_options' in model_options:
-            transformer_options = model_options['transformer_options'].copy()
-
-        if patches is not None:
-            if "patches" in transformer_options:
-                cur_patches = transformer_options["patches"].copy()
-                for p in patches:
-                    if p in cur_patches:
-                        cur_patches[p] = cur_patches[p] + patches[p]
-                    else:
-                        cur_patches[p] = patches[p]
-                transformer_options["patches"] = cur_patches
-            else:
-                transformer_options["patches"] = patches
-
-        transformer_options["cond_or_uncond"] = cond_or_uncond[:]
-        transformer_options["sigmas"] = timestep
-
-        c['transformer_options'] = transformer_options
-
-        if 'model_function_wrapper' in model_options:
-            output = model_options['model_function_wrapper'](model.apply_model, {"input": input_x, "timestep": timestep_, "c": c, "cond_or_uncond": cond_or_uncond}).chunk(batch_chunks)
-        else:
-            output = model.apply_model(input_x, timestep_, **c).chunk(batch_chunks)
-
-        for o in range(batch_chunks):
-            cond_index = cond_or_uncond[o]
-            a = area[o]
-            if a is None:
-                out_conds[cond_index] += output[o] * mult[o]
-                out_counts[cond_index] += mult[o]
-            else:
-                out_c = out_conds[cond_index]
-                out_cts = out_counts[cond_index]
-                dims = len(a) // 2
-                for i in range(dims):
-                    out_c = out_c.narrow(i + 2, a[i + dims], a[i])
-                    out_cts = out_cts.narrow(i + 2, a[i + dims], a[i])
-                out_c += output[o] * mult[o]
-                out_cts += mult[o]
-
-    for i in range(len(out_conds)):
-        out_conds[i] /= out_counts[i]
-
-    return out_conds
-
-def cfg_function(model, cond_pred, uncond_pred, cond_scale, x, timestep, model_options={}, cond=None, uncond=None):
-    if "sampler_cfg_function" in model_options:
-        args = {"cond": x - cond_pred, "uncond": x - uncond_pred, "cond_scale": cond_scale, "timestep": timestep, "input": x, "sigma": timestep,
-                "cond_denoised": cond_pred, "uncond_denoised": uncond_pred, "model": model, "model_options": model_options}
-        cfg_result = x - model_options["sampler_cfg_function"](args)
-    else:
-        cfg_result = uncond_pred + (cond_pred - uncond_pred) * cond_scale
-
-    for fn in model_options.get("sampler_post_cfg_function", []):
-        args = {"denoised": cfg_result, "cond": cond, "uncond": uncond, "model": model, "uncond_denoised": uncond_pred, "cond_denoised": cond_pred,
-                "sigma": timestep, "model_options": model_options, "input": x}
-        cfg_result = fn(args)
-
-    return cfg_result
-
-def sampling_function(model, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None):
-    if math.isclose(cond_scale, 1.0) and model_options.get("disable_cfg1_optimization", False) == False:
-        uncond_ = None
-    else:
-        uncond_ = uncond
-
-    conds = [cond, uncond_]
-    out = calc_cond_batch(model, conds, x, timestep, model_options)
-
-    for fn in model_options.get("sampler_pre_cfg_function", []):
-        args = {"conds":conds, "conds_out": out, "cond_scale": cond_scale, "timestep": timestep,
-                "input": x, "sigma": timestep, "model": model, "model_options": model_options}
-        out  = fn(args)
-
-    return cfg_function(model, out[0], out[1], cond_scale, x, timestep, model_options=model_options, cond=cond, uncond=uncond_)
 
 def get_mask_aabb(masks):
     if masks.numel() == 0:
@@ -19338,202 +16617,6 @@ def resolve_areas_and_cond_masks_multidim(conditions, dims, device):
             modified['mask'] = mask
             conditions[i] = modified
 
-def resolve_areas_and_cond_masks(conditions, h, w, device):
-    logging.warning("WARNING: The comfy.samplers.resolve_areas_and_cond_masks function is deprecated please use the resolve_areas_and_cond_masks_multidim one instead.")
-    return resolve_areas_and_cond_masks_multidim(conditions, [h, w], device)
-
-def create_cond_with_same_area_if_none(conds, c): #TODO: handle dim != 2
-    if 'area' not in c:
-        return
-
-    c_area = c['area']
-    smallest = None
-    for x in conds:
-        if 'area' in x:
-            a = x['area']
-            if c_area[2] >= a[2] and c_area[3] >= a[3]:
-                if a[0] + a[2] >= c_area[0] + c_area[2]:
-                    if a[1] + a[3] >= c_area[1] + c_area[3]:
-                        if smallest is None:
-                            smallest = x
-                        elif 'area' not in smallest:
-                            smallest = x
-                        else:
-                            if smallest['area'][0] * smallest['area'][1] > a[0] * a[1]:
-                                smallest = x
-        else:
-            if smallest is None:
-                smallest = x
-    if smallest is None:
-        return
-    if 'area' in smallest:
-        if smallest['area'] == c_area:
-            return
-
-    out = c.copy()
-    out['model_conds'] = smallest['model_conds'].copy() #TODO: which fields should be copied?
-    conds += [out]
-
-def calculate_start_end_timesteps(model, conds):
-    s = model.model_sampling
-    for t in range(len(conds)):
-        x = conds[t]
-
-        timestep_start = None
-        timestep_end = None
-        if 'start_percent' in x:
-            timestep_start = s.percent_to_sigma(x['start_percent'])
-        if 'end_percent' in x:
-            timestep_end = s.percent_to_sigma(x['end_percent'])
-
-        if (timestep_start is not None) or (timestep_end is not None):
-            n = x.copy()
-            if (timestep_start is not None):
-                n['timestep_start'] = timestep_start
-            if (timestep_end is not None):
-                n['timestep_end'] = timestep_end
-            conds[t] = n
-
-def pre_run_control(model, conds):
-    s = model.model_sampling
-    for t in range(len(conds)):
-        x = conds[t]
-
-        timestep_start = None
-        timestep_end = None
-        percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
-        if 'control' in x:
-            x['control'].pre_run(model, percent_to_timestep_function)
-
-def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
-    cond_cnets = []
-    cond_other = []
-    uncond_cnets = []
-    uncond_other = []
-    for t in range(len(conds)):
-        x = conds[t]
-        if 'area' not in x:
-            if name in x and x[name] is not None:
-                cond_cnets.append(x[name])
-            else:
-                cond_other.append((x, t))
-    for t in range(len(uncond)):
-        x = uncond[t]
-        if 'area' not in x:
-            if name in x and x[name] is not None:
-                uncond_cnets.append(x[name])
-            else:
-                uncond_other.append((x, t))
-
-    if len(uncond_cnets) > 0:
-        return
-
-    for x in range(len(cond_cnets)):
-        temp = uncond_other[x % len(uncond_other)]
-        o = temp[0]
-        if name in o and o[name] is not None:
-            n = o.copy()
-            n[name] = uncond_fill_func(cond_cnets, x)
-            uncond += [n]
-        else:
-            n = o.copy()
-            n[name] = uncond_fill_func(cond_cnets, x)
-            uncond[temp[1]] = n
-
-def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwargs):
-    for t in range(len(conds)):
-        x = conds[t]
-        params = x.copy()
-        params["device"] = device
-        params["noise"] = noise
-        default_width = None
-        if len(noise.shape) >= 4: #TODO: 8 multiple should be set by the model
-            default_width = noise.shape[3] * 8
-        params["width"] = params.get("width", default_width)
-        params["height"] = params.get("height", noise.shape[2] * 8)
-        params["prompt_type"] = params.get("prompt_type", prompt_type)
-        for k in kwargs:
-            if k not in params:
-                params[k] = kwargs[k]
-
-        out = model_function(**params)
-        x = x.copy()
-        model_conds = x['model_conds'].copy()
-        for k in out:
-            model_conds[k] = out[k]
-        x['model_conds'] = model_conds
-        conds[t] = x
-    return conds
-
-def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=None, seed=None):
-    for k in conds:
-        conds[k] = conds[k][:]
-        resolve_areas_and_cond_masks_multidim(conds[k], noise.shape[2:], device)
-
-    for k in conds:
-        calculate_start_end_timesteps(model, conds[k])
-
-    if hasattr(model, 'extra_conds'):
-        for k in conds:
-            conds[k] = encode_model_conds(model.extra_conds, conds[k], noise, device, k, latent_image=latent_image, denoise_mask=denoise_mask, seed=seed)
-
-    #make sure each cond area has an opposite one with the same area
-    for k in conds:
-        for c in conds[k]:
-            for kk in conds:
-                if k != kk:
-                    create_cond_with_same_area_if_none(conds[kk], c)
-
-    for k in conds:
-        pre_run_control(model, conds[k])
-
-    if "positive" in conds:
-        positive = conds["positive"]
-        for k in conds:
-            if k != "positive":
-                apply_empty_x_to_equal_area(list(filter(lambda c: c.get('control_apply_to_uncond', False) == True, positive)), conds[k], 'control', lambda cond_cnets, x: cond_cnets[x])
-                apply_empty_x_to_equal_area(positive, conds[k], 'gligen', lambda cond_cnets, x: cond_cnets[x])
-
-    return conds
-
-def get_models_from_cond(cond, model_type):
-    models = []
-    for c in cond:
-        if model_type in c:
-            models += [c[model_type]]
-    return models
-
-def get_additional_models(conds, dtype):
-    """loads additional models in conditioning"""
-    cnets = []
-    gligen = []
-
-    for k in conds:
-        cnets += get_models_from_cond(conds[k], "control")
-        gligen += get_models_from_cond(conds[k], "gligen")
-
-    control_nets = set(cnets)
-
-    inference_memory = 0
-    control_models = []
-    for m in control_nets:
-        control_models += m.get_models()
-        inference_memory += m.inference_memory_requirements(dtype)
-
-    gligen = [x[1] for x in gligen]
-    models = control_models + gligen
-    return models, inference_memory
-
-def prepare_sampling(model, noise_shape, conds):
-    device = model.load_device
-    real_model = None
-    models, inference_memory = get_additional_models(conds, model.model_dtype())
-    memory_required = model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:])) + inference_memory
-    minimum_memory_required = model.memory_required([noise_shape[0]] + list(noise_shape[1:])) + inference_memory
-    load_models_gpu([model] + models, memory_required=memory_required, minimum_memory_required=minimum_memory_required)
-    real_model = model.model
-
-    return real_model, conds, models
 
 def prepare_mask(noise_mask, shape, device):
     """ensures noise mask is of proper dimensions"""
@@ -19548,82 +16631,6 @@ def cleanup_additional_models(models):
     for m in models:
         if hasattr(m, 'cleanup'):
             m.cleanup()
-
-def cleanup_models(conds, models):
-    cleanup_additional_models(models)
-
-    control_cleanup = []
-    for k in conds:
-        control_cleanup += get_models_from_cond(conds[k], "control")
-
-    cleanup_additional_models(set(control_cleanup))
-
-class CFGGuider:
-    def __init__(self, model_patcher):
-        self.model_patcher = model_patcher
-        self.model_options = model_patcher.model_options
-        self.original_conds = {}
-        self.cfg = 1.0
-
-    def set_conds(self, positive, negative):
-        self.inner_set_conds({"positive": positive, "negative": negative})
-
-    def set_cfg(self, cfg):
-        self.cfg = cfg
-
-    def inner_set_conds(self, conds):
-        for k in conds:
-            self.original_conds[k] = convert_cond(conds[k])
-
-    def __call__(self, *args, **kwargs):
-        return self.predict_noise(*args, **kwargs)
-
-    def predict_noise(self, x, timestep, model_options={}, seed=None):
-        return sampling_function(self.inner_model, x, timestep, self.conds.get("negative", None), self.conds.get("positive", None), self.cfg, model_options=model_options, seed=seed)
-
-    def inner_sample(self, noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed):
-        if latent_image is not None and torch.count_nonzero(latent_image) > 0: #Don't shift the empty latent image.
-            latent_image = self.inner_model.process_latent_in(latent_image)
-
-        self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed)
-
-        extra_args = {"model_options": self.model_options, "seed":seed}
-
-        samples = sampler.sample(self, sigmas, extra_args, callback, noise, latent_image, denoise_mask, disable_pbar)
-        return self.inner_model.process_latent_out(samples.to(torch.float32))
-
-    def sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None):
-        if sigmas.shape[-1] == 0:
-            return latent_image
-
-        self.conds = {}
-        for k in self.original_conds:
-            self.conds[k] = list(map(lambda a: a.copy(), self.original_conds[k]))
-
-        self.inner_model, self.conds, self.loaded_models = prepare_sampling(self.model_patcher, noise.shape, self.conds)
-        device = self.model_patcher.load_device
-
-        if denoise_mask is not None:
-            denoise_mask = prepare_mask(denoise_mask, noise.shape, device)
-
-        noise = noise.to(device)
-        latent_image = latent_image.to(device)
-        sigmas = sigmas.to(device)
-
-        output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed)
-
-        cleanup_models(self.conds, self.loaded_models)
-        del self.inner_model
-        del self.conds
-        del self.loaded_models
-        return output
-
-def sample1(model, noise, positive, negative, cfg, device, sampler, sigmas, model_options={}, latent_image=None, denoise_mask=None, callback=None, disable_pbar=False, seed=None):
-    cfg_guider = CFGGuider(model)
-    cfg_guider.set_conds(positive, negative)
-    cfg_guider.set_cfg(cfg)
-    return cfg_guider.sample(noise, latent_image, sampler, sigmas, denoise_mask, callback, disable_pbar, seed)
-
 
 class KSampler1:
     SCHEDULERS = SCHEDULER_NAMES
@@ -19691,33 +16698,6 @@ class KSampler1:
 
         return sample1(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
 
-
-def sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
-    sampler = KSampler1(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
-
-    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed)
-    samples = samples.to(intermediate_device())
-    return samples
-
-def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
-    latent_image = latent["samples"]
-    latent_image = fix_empty_latent_channels(model, latent_image)
-
-    if disable_noise:
-        noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
-    else:
-        batch_inds = latent["batch_index"] if "batch_index" in latent else None
-        noise = prepare_noise(latent_image, seed, batch_inds)
-
-    noise_mask = None
-    if "noise_mask" in latent:
-        noise_mask = latent["noise_mask"]
-    samples = sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
-                                  denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
-                                  force_full_denoise=force_full_denoise, noise_mask=noise_mask, seed=seed)
-    out = latent.copy()
-    out["samples"] = samples
-    return (out, )
 
 
 class KSampler:
