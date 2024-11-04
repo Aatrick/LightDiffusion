@@ -1,5 +1,5 @@
-prompt: a frontview of a lockheed martin f35 preparing for takeoff at night on an aircraft carrier, majestic, bokeh, cinematic, hyperrealistic
-neg: (embedding:UnrealisticDream), (embedding:BadDream)
-w: 768
-h: 1408
-cfg: 8
+prompt: a stormy ocean with a fisher boat 
+neg: (embedding:easynegative), (embedding:ng_deepnegative)
+w: 1152
+h: 896
+cfg: 3
