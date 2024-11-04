@@ -4,6 +4,8 @@ The purpose of this repository and project is to remake the famous stable-diffus
 least number of lines and in the least complex way. It's made by retro-engineering Stable-Diffusion, ComfyUI and
 SDWebUI.
 
+There's also a LightDiffusion version using Flux Dev available in releases and Flux branch.
+
 ## Features
 
 - Original Txt2Img, Img2Img (R-ERSGAN4x+ UltimateSDUpscaling DPM++ 2M)
