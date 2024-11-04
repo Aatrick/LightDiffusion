@@ -3936,444 +3936,7 @@ class UNetModel(nn.Module):
         device=None,
         operations=ops,
     ):
-        super().__init__()
-
-        if context_dim is not None:
-            assert use_spatial_transformer, 'Fool!! You forgot to use the spatial transformer for your cross-attention conditioning...'
-            # from omegaconf.listconfig import ListConfig
-            # if type(context_dim) == ListConfig:
-            #     context_dim = list(context_dim)
-
-        if num_heads_upsample == -1:
-            num_heads_upsample = num_heads
-
-        if num_heads == -1:
-            assert num_head_channels != -1, 'Either num_heads or num_head_channels has to be set'
-
-        if num_head_channels == -1:
-            assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
-
-        self.in_channels = in_channels
-        self.model_channels = model_channels
-        self.out_channels = out_channels
-
-        if isinstance(num_res_blocks, int):
-            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
-        else:
-            if len(num_res_blocks) != len(channel_mult):
-                raise ValueError("provide num_res_blocks either as an int (globally constant) or "
-                                 "as a list/tuple (per-level) with the same length as channel_mult")
-            self.num_res_blocks = num_res_blocks
-
-        if disable_self_attentions is not None:
-            # should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
-            assert len(disable_self_attentions) == len(channel_mult)
-        if num_attention_blocks is not None:
-            assert len(num_attention_blocks) == len(self.num_res_blocks)
-
-        transformer_depth = transformer_depth[:]
-        transformer_depth_output = transformer_depth_output[:]
-
-        self.dropout = dropout
-        self.channel_mult = channel_mult
-        self.conv_resample = conv_resample
-        self.num_classes = num_classes
-        self.use_checkpoint = use_checkpoint
-        self.dtype = dtype
-        self.num_heads = num_heads
-        self.num_head_channels = num_head_channels
-        self.num_heads_upsample = num_heads_upsample
-        self.use_temporal_resblocks = use_temporal_resblock
-        self.predict_codebook_ids = n_embed is not None
-
-        self.default_num_video_frames = None
-
-        time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            operations.Linear(model_channels, time_embed_dim, dtype=self.dtype, device=device),
-            nn.SiLU(),
-            operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-        )
-
-        if self.num_classes is not None:
-            if isinstance(self.num_classes, int):
-                self.label_emb = nn.Embedding(num_classes, time_embed_dim, dtype=self.dtype, device=device)
-            elif self.num_classes == "continuous":
-                logging.debug("setting up linear c_adm embedding layer")
-                self.label_emb = nn.Linear(1, time_embed_dim)
-            elif self.num_classes == "sequential":
-                assert adm_in_channels is not None
-                self.label_emb = nn.Sequential(
-                    nn.Sequential(
-                        operations.Linear(adm_in_channels, time_embed_dim, dtype=self.dtype, device=device),
-                        nn.SiLU(),
-                        operations.Linear(time_embed_dim, time_embed_dim, dtype=self.dtype, device=device),
-                    )
-                )
-            else:
-                raise ValueError()
-
-        self.input_blocks = nn.ModuleList(
-            [
-                TimestepEmbedSequential(
-                    operations.conv_nd(dims, in_channels, model_channels, 3, padding=1, dtype=self.dtype, device=device)
-                )
-            ]
-        )
-        self._feature_size = model_channels
-        input_block_chans = [model_channels]
-        ch = model_channels
-        ds = 1
-
-        def get_attention_layer(
-            ch,
-            num_heads,
-            dim_head,
-            depth=1,
-            context_dim=None,
-            use_checkpoint=False,
-            disable_self_attn=False,
-        ):
-            return SpatialTransformer(
-                            ch, num_heads, dim_head, depth=depth, context_dim=context_dim,
-                            disable_self_attn=disable_self_attn, use_linear=use_linear_in_transformer,
-                            use_checkpoint=use_checkpoint, attn_precision=attn_precision, dtype=self.dtype, device=device, operations=operations
-                        )
-
-        def get_resblock(
-            merge_factor,
-            merge_strategy,
-            video_kernel_size,
-            ch,
-            time_embed_dim,
-            dropout,
-            out_channels,
-            dims,
-            use_checkpoint,
-            use_scale_shift_norm,
-            down=False,
-            up=False,
-            dtype=None,
-            device=None,
-            operations=ops
-        ):
-            if self.use_temporal_resblocks:
-                return VideoResBlock(
-                    merge_factor=merge_factor,
-                    merge_strategy=merge_strategy,
-                    video_kernel_size=video_kernel_size,
-                    channels=ch,
-                    emb_channels=time_embed_dim,
-                    dropout=dropout,
-                    out_channels=out_channels,
-                    dims=dims,
-                    use_checkpoint=use_checkpoint,
-                    use_scale_shift_norm=use_scale_shift_norm,
-                    down=down,
-                    up=up,
-                    dtype=dtype,
-                    device=device,
-                    operations=operations
-                )
-            else:
-                return ResBlock(
-                    channels=ch,
-                    emb_channels=time_embed_dim,
-                    dropout=dropout,
-                    out_channels=out_channels,
-                    use_checkpoint=use_checkpoint,
-                    dims=dims,
-                    use_scale_shift_norm=use_scale_shift_norm,
-                    down=down,
-                    up=up,
-                    dtype=dtype,
-                    device=device,
-                    operations=operations
-                )
-
-        for level, mult in enumerate(channel_mult):
-            for nr in range(self.num_res_blocks[level]):
-                layers = [
-                    get_resblock(
-                        merge_factor=merge_factor,
-                        merge_strategy=merge_strategy,
-                        video_kernel_size=video_kernel_size,
-                        ch=ch,
-                        time_embed_dim=time_embed_dim,
-                        dropout=dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                        dtype=self.dtype,
-                        device=device,
-                        operations=operations,
-                    )
-                ]
-                ch = mult * model_channels
-                num_transformers = transformer_depth.pop(0)
-                if num_transformers > 0:
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
-                        disabled_sa = False
-
-                    if not exists(num_attention_blocks) or nr < num_attention_blocks[level]:
-                        layers.append(get_attention_layer(
-                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
-                                disable_self_attn=disabled_sa, use_checkpoint=use_checkpoint)
-                        )
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-                input_block_chans.append(ch)
-            if level != len(channel_mult) - 1:
-                out_ch = ch
-                self.input_blocks.append(
-                    TimestepEmbedSequential(
-                        get_resblock(
-                            merge_factor=merge_factor,
-                            merge_strategy=merge_strategy,
-                            video_kernel_size=video_kernel_size,
-                            ch=ch,
-                            time_embed_dim=time_embed_dim,
-                            dropout=dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                            dtype=self.dtype,
-                            device=device,
-                            operations=operations
-                        )
-                        if resblock_updown
-                        else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch, dtype=self.dtype, device=device, operations=operations
-                        )
-                    )
-                )
-                ch = out_ch
-                input_block_chans.append(ch)
-                ds *= 2
-                self._feature_size += ch
-
-        if num_head_channels == -1:
-            dim_head = ch // num_heads
-        else:
-            num_heads = ch // num_head_channels
-            dim_head = num_head_channels
-        if legacy:
-            #num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-        mid_block = [
-            get_resblock(
-                merge_factor=merge_factor,
-                merge_strategy=merge_strategy,
-                video_kernel_size=video_kernel_size,
-                ch=ch,
-                time_embed_dim=time_embed_dim,
-                dropout=dropout,
-                out_channels=None,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-                dtype=self.dtype,
-                device=device,
-                operations=operations
-            )]
-
-        self.middle_block = None
-        if transformer_depth_middle >= -1:
-            if transformer_depth_middle >= 0:
-                mid_block += [get_attention_layer(  # always uses a self-attn
-                                ch, num_heads, dim_head, depth=transformer_depth_middle, context_dim=context_dim,
-                                disable_self_attn=disable_middle_self_attn, use_checkpoint=use_checkpoint
-                            ),
-                get_resblock(
-                    merge_factor=merge_factor,
-                    merge_strategy=merge_strategy,
-                    video_kernel_size=video_kernel_size,
-                    ch=ch,
-                    time_embed_dim=time_embed_dim,
-                    dropout=dropout,
-                    out_channels=None,
-                    dims=dims,
-                    use_checkpoint=use_checkpoint,
-                    use_scale_shift_norm=use_scale_shift_norm,
-                    dtype=self.dtype,
-                    device=device,
-                    operations=operations
-                )]
-            self.middle_block = TimestepEmbedSequential(*mid_block)
-        self._feature_size += ch
-
-        self.output_blocks = nn.ModuleList([])
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(self.num_res_blocks[level] + 1):
-                ich = input_block_chans.pop()
-                layers = [
-                    get_resblock(
-                        merge_factor=merge_factor,
-                        merge_strategy=merge_strategy,
-                        video_kernel_size=video_kernel_size,
-                        ch=ch + ich,
-                        time_embed_dim=time_embed_dim,
-                        dropout=dropout,
-                        out_channels=model_channels * mult,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                        dtype=self.dtype,
-                        device=device,
-                        operations=operations
-                    )
-                ]
-                ch = model_channels * mult
-                num_transformers = transformer_depth_output.pop()
-                if num_transformers > 0:
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        #num_heads = 1
-                        dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
-                        disabled_sa = False
-
-                    if not exists(num_attention_blocks) or i < num_attention_blocks[level]:
-                        layers.append(
-                            get_attention_layer(
-                                ch, num_heads, dim_head, depth=num_transformers, context_dim=context_dim,
-                                disable_self_attn=disabled_sa, use_checkpoint=use_checkpoint
-                            )
-                        )
-                if level and i == self.num_res_blocks[level]:
-                    out_ch = ch
-                    layers.append(
-                        get_resblock(
-                            merge_factor=merge_factor,
-                            merge_strategy=merge_strategy,
-                            video_kernel_size=video_kernel_size,
-                            ch=ch,
-                            time_embed_dim=time_embed_dim,
-                            dropout=dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
-                            dtype=self.dtype,
-                            device=device,
-                            operations=operations
-                        )
-                        if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch, dtype=self.dtype, device=device, operations=operations)
-                    )
-                    ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
-
-        self.out = nn.Sequential(
-            operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
-            nn.SiLU(),
-            operations.conv_nd(dims, model_channels, out_channels, 3, padding=1, dtype=self.dtype, device=device),
-        )
-        if self.predict_codebook_ids:
-            self.id_predictor = nn.Sequential(
-            operations.GroupNorm(32, ch, dtype=self.dtype, device=device),
-            operations.conv_nd(dims, model_channels, n_embed, 1, dtype=self.dtype, device=device),
-            #nn.LogSoftmax(dim=1)  # change to cross_entropy and produce non-normalized logits
-        )
-
-    def forward(self, x, timesteps=None, context=None, y=None, control=None, transformer_options={}, **kwargs):
-        """
-        Apply the model to an input batch.
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param context: conditioning plugged in via crossattn
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
-        """
-        transformer_options["original_shape"] = list(x.shape)
-        transformer_options["transformer_index"] = 0
-        transformer_patches = transformer_options.get("patches", {})
-
-        num_video_frames = kwargs.get("num_video_frames", self.default_num_video_frames)
-        image_only_indicator = kwargs.get("image_only_indicator", None)
-        time_context = kwargs.get("time_context", None)
-
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-        hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False).to(x.dtype)
-        emb = self.time_embed(t_emb)
-
-        if "emb_patch" in transformer_patches:
-            patch = transformer_patches["emb_patch"]
-            for p in patch:
-                emb = p(emb, self.model_channels, transformer_options)
-
-        if self.num_classes is not None:
-            assert y.shape[0] == x.shape[0]
-            emb = emb + self.label_emb(y)
-
-        h = x
-        for id, module in enumerate(self.input_blocks):
-            transformer_options["block"] = ("input", id)
-            h = forward_timestep_embed(module, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-            h = apply_control(h, control, 'input')
-            if "input_block_patch" in transformer_patches:
-                patch = transformer_patches["input_block_patch"]
-                for p in patch:
-                    h = p(h, transformer_options)
-
-            hs.append(h)
-            if "input_block_patch_after_skip" in transformer_patches:
-                patch = transformer_patches["input_block_patch_after_skip"]
-                for p in patch:
-                    h = p(h, transformer_options)
-
-        transformer_options["block"] = ("middle", 0)
-        if self.middle_block is not None:
-            h = forward_timestep_embed(self.middle_block, h, emb, context, transformer_options, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-        h = apply_control(h, control, 'middle')
-
-
-        for id, module in enumerate(self.output_blocks):
-            transformer_options["block"] = ("output", id)
-            hsp = hs.pop()
-            hsp = apply_control(hsp, control, 'output')
-
-            if "output_block_patch" in transformer_patches:
-                patch = transformer_patches["output_block_patch"]
-                for p in patch:
-                    h, hsp = p(h, hsp, transformer_options)
-
-            h = th.cat([h, hsp], dim=1)
-            del hsp
-            if len(hs) > 0:
-                output_shape = hs[-1].shape
-            else:
-                output_shape = None
-            h = forward_timestep_embed(module, h, emb, context, transformer_options, output_shape, time_context=time_context, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
-        h = h.type(x.dtype)
-        if self.predict_codebook_ids:
-            return self.id_predictor(h)
-        else:
-            return self.out(h)
+        pass
 
 
 from typing import Union
@@ -4467,12 +4030,6 @@ class BaseModel(torch.nn.Module):
     def get_dtype(self):
         return self.diffusion_model.dtype
 
-    def is_adm(self):
-        return self.adm_channels > 0
-
-    def encode_adm(self, **kwargs):
-        return None
-
     def extra_conds(self, **kwargs):
         out = {}
         if len(self.concat_keys) > 0:
@@ -4550,43 +4107,8 @@ class BaseModel(torch.nn.Module):
         del to_load
         return self
 
-    def process_latent_in(self, latent):
-        return self.latent_format.process_in(latent)
-
     def process_latent_out(self, latent):
         return self.latent_format.process_out(latent)
-
-    def state_dict_for_saving(self, clip_state_dict=None, vae_state_dict=None, clip_vision_state_dict=None):
-        extra_sds = []
-        if clip_state_dict is not None:
-            extra_sds.append(self.model_config.process_clip_state_dict_for_saving(clip_state_dict))
-        if vae_state_dict is not None:
-            extra_sds.append(self.model_config.process_vae_state_dict_for_saving(vae_state_dict))
-        if clip_vision_state_dict is not None:
-            extra_sds.append(self.model_config.process_clip_vision_state_dict_for_saving(clip_vision_state_dict))
-
-        unet_state_dict = self.diffusion_model.state_dict()
-        unet_state_dict = self.model_config.process_unet_state_dict_for_saving(unet_state_dict)
-
-        if self.model_type == ModelType.V_PREDICTION:
-            unet_state_dict["v_pred"] = torch.tensor([])
-
-        for sd in extra_sds:
-            unet_state_dict.update(sd)
-
-        return unet_state_dict
-
-    def set_inpaint(self):
-        self.concat_keys = ("mask", "masked_image")
-        def blank_inpaint_image_like(latent_image):
-            blank_image = torch.ones_like(latent_image)
-            # these are the values for "zero" in pixel space translated to latent space
-            blank_image[:,0] *= 0.8223
-            blank_image[:,1] *= -0.6876
-            blank_image[:,2] *= 0.6364
-            blank_image[:,3] *= 0.1380
-            return blank_image
-        self.blank_inpaint_image_like = blank_inpaint_image_like
 
     def memory_required(self, input_shape):
         if xformers_enabled() or pytorch_attention_flash_attention():
@@ -4636,12 +4158,6 @@ class BASE:
                     return False
         return True
 
-    def model_type(self, state_dict, prefix=""):
-        return ModelType.EPS
-
-    def inpaint_model(self):
-        return self.unet_config["in_channels"] > 4
-
     def __init__(self, unet_config):
         self.unet_config = unet_config.copy()
         self.sampling_settings = self.sampling_settings.copy()
@@ -4649,55 +4165,18 @@ class BASE:
         for x in self.unet_extra_config:
             self.unet_config[x] = self.unet_extra_config[x]
 
-    def get_model(self, state_dict, prefix="", device=None):
-        if self.noise_aug_config is not None:
-            out = SD21UNCLIP(
-                self,
-                self.noise_aug_config,
-                model_type=self.model_type(state_dict, prefix),
-                device=device,
-            )
-        else:
-            out = BaseModel(
-                self, model_type=self.model_type(state_dict, prefix), device=device
-            )
-        if self.inpaint_model():
-            out.set_inpaint()
-        return out
-
-    def process_clip_state_dict(self, state_dict):
-        state_dict = state_dict_prefix_replace(
-            state_dict, {k: "" for k in self.text_encoder_key_prefix}, filter_keys=True
-        )
-        return state_dict
-
     def process_unet_state_dict(self, state_dict):
         return state_dict
-
-    def process_vae_state_dict(self, state_dict):
-        return state_dict
-
-    def process_clip_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": self.text_encoder_key_prefix[0]}
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_clip_vision_state_dict_for_saving(self, state_dict):
-        replace_prefix = {}
-        if self.clip_vision_prefix is not None:
-            replace_prefix[""] = self.clip_vision_prefix
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_unet_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": "model.diffusion_model."}
-        return state_dict_prefix_replace(state_dict, replace_prefix)
-
-    def process_vae_state_dict_for_saving(self, state_dict):
-        replace_prefix = {"": self.vae_key_prefix[0]}
-        return state_dict_prefix_replace(state_dict, replace_prefix)
 
     def set_inference_dtype(self, dtype, manual_cast_dtype):
         self.unet_config["dtype"] = dtype
         self.manual_cast_dtype = manual_cast_dtype
+
+    def model_type(self, state_dict, prefix=""):
+        return ModelType.EPS
+
+    def inpaint_model(self):
+        return self.unet_config["in_channels"] > 4
 
 
 
@@ -5094,20 +4573,6 @@ class CLIP:
                 load_device, offload_device, params["device"]
             )
         )
-
-    def clone(self):
-        n = CLIP(no_init=True)
-        n.patcher = self.patcher.clone()
-        n.cond_stage_model = self.cond_stage_model
-        n.tokenizer = self.tokenizer
-        n.layer_idx = self.layer_idx
-        return n
-
-    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        return self.patcher.add_patches(patches, strength_patch, strength_model)
-
-    def clip_layer(self, layer_idx):
-        self.layer_idx = layer_idx
 
     def tokenize(self, text, return_word_ids=False):
         return self.tokenizer.tokenize_with_weights(text, return_word_ids)
@@ -5942,19 +5407,6 @@ class ModelPatcher:
     def lowvram_patch_counter(self):
         return self.model.lowvram_patch_counter
 
-    def clone(self):
-        n = ModelPatcher(self.model, self.load_device, self.offload_device, self.size, weight_inplace_update=self.weight_inplace_update)
-        n.patches = {}
-        for k in self.patches:
-            n.patches[k] = self.patches[k][:]
-        n.patches_uuid = self.patches_uuid
-
-        n.object_patches = self.object_patches.copy()
-        n.model_options = copy.deepcopy(self.model_options)
-        n.backup = self.backup
-        n.object_patches_backup = self.object_patches_backup
-        return n
-
     def is_clone(self, other):
         if hasattr(other, 'model') and self.model is other.model:
             return True
@@ -5975,65 +5427,6 @@ class ModelPatcher:
 
     def memory_required(self, input_shape):
         return self.model.memory_required(input_shape=input_shape)
-
-    def set_model_sampler_cfg_function(self, sampler_cfg_function, disable_cfg1_optimization=False):
-        if len(inspect.signature(sampler_cfg_function).parameters) == 3:
-            self.model_options["sampler_cfg_function"] = lambda args: sampler_cfg_function(args["cond"], args["uncond"], args["cond_scale"]) #Old way
-        else:
-            self.model_options["sampler_cfg_function"] = sampler_cfg_function
-        if disable_cfg1_optimization:
-            self.model_options["disable_cfg1_optimization"] = True
-
-    def set_model_sampler_post_cfg_function(self, post_cfg_function, disable_cfg1_optimization=False):
-        self.model_options = set_model_options_post_cfg_function(self.model_options, post_cfg_function, disable_cfg1_optimization)
-
-    def set_model_sampler_pre_cfg_function(self, pre_cfg_function, disable_cfg1_optimization=False):
-        self.model_options = set_model_options_pre_cfg_function(self.model_options, pre_cfg_function, disable_cfg1_optimization)
-
-    def set_model_unet_function_wrapper(self, unet_wrapper_function: UnetWrapperFunction):
-        self.model_options["model_function_wrapper"] = unet_wrapper_function
-
-    def set_model_denoise_mask_function(self, denoise_mask_function):
-        self.model_options["denoise_mask_function"] = denoise_mask_function
-
-    def set_model_patch(self, patch, name):
-        to = self.model_options["transformer_options"]
-        if "patches" not in to:
-            to["patches"] = {}
-        to["patches"][name] = to["patches"].get(name, []) + [patch]
-
-    def set_model_patch_replace(self, patch, name, block_name, number, transformer_index=None):
-        self.model_options = set_model_options_patch_replace(self.model_options, patch, name, block_name, number, transformer_index=transformer_index)
-
-    def set_model_attn1_patch(self, patch):
-        self.set_model_patch(patch, "attn1_patch")
-
-    def set_model_attn2_patch(self, patch):
-        self.set_model_patch(patch, "attn2_patch")
-
-    def set_model_attn1_replace(self, patch, block_name, number, transformer_index=None):
-        self.set_model_patch_replace(patch, "attn1", block_name, number, transformer_index)
-
-    def set_model_attn2_replace(self, patch, block_name, number, transformer_index=None):
-        self.set_model_patch_replace(patch, "attn2", block_name, number, transformer_index)
-
-    def set_model_attn1_output_patch(self, patch):
-        self.set_model_patch(patch, "attn1_output_patch")
-
-    def set_model_attn2_output_patch(self, patch):
-        self.set_model_patch(patch, "attn2_output_patch")
-
-    def set_model_input_block_patch(self, patch):
-        self.set_model_patch(patch, "input_block_patch")
-
-    def set_model_input_block_patch_after_skip(self, patch):
-        self.set_model_patch(patch, "input_block_patch_after_skip")
-
-    def set_model_output_block_patch(self, patch):
-        self.set_model_patch(patch, "output_block_patch")
-
-    def add_object_patch(self, name, obj):
-        self.object_patches[name] = obj
 
     def get_model_object(self, name):
         if name in self.object_patches:
@@ -6068,56 +5461,6 @@ class ModelPatcher:
     def model_dtype(self):
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
-
-    def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
-        p = set()
-        model_sd = self.model.state_dict()
-        for k in patches:
-            offset = None
-            function = None
-            if isinstance(k, str):
-                key = k
-            else:
-                offset = k[1]
-                key = k[0]
-                if len(k) > 2:
-                    function = k[2]
-
-            if key in model_sd:
-                p.add(k)
-                current_patches = self.patches.get(key, [])
-                current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                self.patches[key] = current_patches
-
-        self.patches_uuid = uuid.uuid4()
-        return list(p)
-
-    def get_key_patches(self, filter_prefix=None):
-        model_sd = self.model_state_dict()
-        p = {}
-        for k in model_sd:
-            if filter_prefix is not None:
-                if not k.startswith(filter_prefix):
-                    continue
-            bk = self.backup.get(k, None)
-            if bk is not None:
-                weight = bk.weight
-            else:
-                weight = model_sd[k]
-            if k in self.patches:
-                p[k] = [weight] + self.patches[k]
-            else:
-                p[k] = (weight,)
-        return p
-
-    def model_state_dict(self, filter_prefix=None):
-        sd = self.model.state_dict()
-        keys = list(sd.keys())
-        if filter_prefix is not None:
-            for k in keys:
-                if not k.startswith(filter_prefix):
-                    sd.pop(k)
-        return sd
 
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
         if key not in self.patches:
@@ -8721,67 +8064,261 @@ import os
 import random
 from typing import Any, Union
 import torch
+import tkinter as tk
+import customtkinter as ctk
+from PIL import ImageTk
 
-def main():
-    with torch.inference_mode():
-        emptylatentimage = EmptyLatentImage()
-        emptylatentimage_5 = emptylatentimage.generate(
-            width=1024, height=1024, batch_size=1
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("LightDiffusion")
+        self.geometry("800x800")
+
+        self.changed = True
+
+        # Create a frame for the sidebar
+        self.sidebar = tk.Frame(self, width=200, bg="black")
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Text input for the prompt
+        self.prompt_entry = ctk.CTkTextbox(self.sidebar, width=400, height=200)
+        self.prompt_entry.pack(pady=10, padx=10)
+
+        self.neg = ctk.CTkTextbox(self.sidebar, width=400, height=50)
+        self.neg.pack(pady=10, padx=10)
+
+        # Sliders for the resolution
+        self.width_label = ctk.CTkLabel(self.sidebar, text="")
+        self.width_label.pack()
+        self.width_slider = ctk.CTkSlider(
+            self.sidebar, from_=1, to=2048, number_of_steps=16
         )
+        self.width_slider.pack()
 
-        unetloadergguf = UnetLoaderGGUF()
-        unetloadergguf_10 = unetloadergguf.load_unet(unet_name="flux1-dev-Q8_0.gguf")
-
-        vaeloader = VAELoader()
-        vaeloader_11 = vaeloader.load_vae(vae_name="flux_ae.safetensors")
-
-        dualcliploadergguf = DualCLIPLoaderGGUF()
-        dualcliploadergguf_19 = dualcliploadergguf.load_clip(
-            clip_name1="clip_l.safetensors",
-            clip_name2="t5-v1_1-xxl-encoder-Q8_0.gguf",
-            type="flux",
+        self.height_label = ctk.CTkLabel(self.sidebar, text="")
+        self.height_label.pack()
+        self.height_slider = ctk.CTkSlider(
+            self.sidebar,
+            from_=1,
+            to=2048,
+            number_of_steps=16,
         )
+        self.height_slider.pack()
 
-        cliptextencodeflux = CLIPTextEncodeFlux()
-        cliptextencodeflux_15 = cliptextencodeflux.encode(
-            clip_l="a russian bear",
-            t5xxl="a russian bear",
-            guidance=3.5,
-            clip=dualcliploadergguf_19[0],
+        self.enhancer_var = tk.BooleanVar()
+        self.enhancer_checkbox = ctk.CTkCheckBox(
+            self.sidebar,
+            text="Prompt enhancer",
+            variable=self.enhancer_var,
         )
+        self.enhancer_checkbox.pack(pady=5)
 
-        conditioningzeroout = ConditioningZeroOut()
-        ksampler = KSampler()
-        vaedecode = VAEDecode()
-        saveimage = SaveImage()
+        # Button to launch the generation
+        self.generate_button = ctk.CTkButton(
+            self.sidebar, text="Generate", command=self.generate_image
+        )
+        self.generate_button.pack(pady=20)
 
-        for q in range(1):
-            conditioningzeroout_16 = conditioningzeroout.zero_out(
-                conditioning=cliptextencodeflux_15[0]
+        # Create a frame for the image display, without border
+        self.display = tk.Frame(self, bg="black", border=0)
+        self.display.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
+
+        # centered Label to display the generated image
+        self.image_label = tk.Label(self.display, bg="black")
+        self.image_label.pack(expand=True, padx=10, pady=10)
+
+        self.ckpt = None
+
+        # load the checkpoint on an another thread
+        threading.Thread(target=self._prep, daemon=True).start()
+
+        prompt, neg, width, height, cfg = load_parameters_from_file()
+        self.prompt_entry.insert(tk.END, prompt)
+        self.neg.insert(tk.END, neg)
+        self.width_slider.set(width)
+        self.height_slider.set(height)
+
+        self.width_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.height_slider.bind("<B1-Motion>", lambda event: self.update_labels())
+        self.update_labels()
+        self.prompt_entry.bind(
+            "<KeyRelease>",
+            lambda event: write_parameters_to_file(
+                self.prompt_entry.get("1.0", tk.END),
+                self.neg.get("1.0", tk.END),
+                self.width_slider.get(),
+                self.height_slider.get(),
+                3.5,
+            ),
+        )
+        self.neg.bind(
+            "<KeyRelease>",
+            lambda event: write_parameters_to_file(
+                self.prompt_entry.get("1.0", tk.END),
+                self.neg.get("1.0", tk.END),
+                self.width_slider.get(),
+                self.height_slider.get(),
+                3.5,
+            ),
+        )
+        self.width_slider.bind(
+            "<ButtonRelease-1>",
+            lambda event: write_parameters_to_file(
+                self.prompt_entry.get("1.0", tk.END),
+                self.neg.get("1.0", tk.END),
+                self.width_slider.get(),
+                self.height_slider.get(),
+                3.5,
+            ),
+        )
+        self.height_slider.bind(
+            "<ButtonRelease-1>",
+            lambda event: write_parameters_to_file(
+                self.prompt_entry.get("1.0", tk.END),
+                self.neg.get("1.0", tk.END),
+                self.width_slider.get(),
+                self.height_slider.get(),
+                3.5,
+            ),
+        )#if the text changed, put the changed flag to True
+        self.prompt_entry.bind("<KeyRelease>", lambda event: self.changed_smt())
+        self.neg.bind("<KeyRelease>", lambda event: self.changed_smt())
+        self.enhancer_var.trace("w", lambda *args: self.changed_smt())
+        self.width_slider.bind("<ButtonRelease-1>", lambda event: self.changed_smt())
+        self.height_slider.bind("<ButtonRelease-1>", lambda event: self.changed_smt())
+        self.display_most_recent_image()
+
+    def generate_image(self):
+        threading.Thread(target=self._generate_image, daemon=True).start()
+        
+    def changed_smt(self):
+        self.changed = True
+
+    def _prep(self):
+        prompt = self.prompt_entry.get("1.0", tk.END)
+        if self.enhancer_var.get() == True:
+            prompt = enhance_prompt()
+            while prompt == None:
+                pass
+        neg = self.neg.get("1.0", tk.END)
+        w = int(self.width_slider.get())
+        h = int(self.height_slider.get())
+        if self.changed :
+            with torch.inference_mode():
+                    self.dualcliploadergguf = DualCLIPLoaderGGUF()
+                    self.emptylatentimage = EmptyLatentImage()
+                    self.vaeloader = VAELoader()
+                    self.unetloadergguf = UnetLoaderGGUF()
+                    self.cliptextencodeflux = CLIPTextEncodeFlux()
+                    self.conditioningzeroout = ConditioningZeroOut()
+                    self.ksampler = KSampler()
+                    self.vaedecode = VAEDecode()
+                    self.saveimage = SaveImage()
+                    self.unetloadergguf_10 = self.unetloadergguf.load_unet(unet_name="flux1-dev-Q8_0.gguf")
+                    self.vaeloader_11 = self.vaeloader.load_vae(vae_name="flux_ae.safetensors")
+                    
+                    self.dualcliploadergguf_19 = self.dualcliploadergguf.load_clip(
+                        clip_name1="clip_l.safetensors",
+                        clip_name2="t5-v1_1-xxl-encoder-Q8_0.gguf",
+                        type="flux",
+                    )
+                    
+                    self.emptylatentimage_5 = self.emptylatentimage.generate(
+                        width=w, height=h, batch_size=1
+                    )
+                    
+                    self.cliptextencodeflux_15 = self.cliptextencodeflux.encode(
+                        clip_l=prompt,
+                        t5xxl=prompt,
+                        guidance=3.5,
+                        clip=self.dualcliploadergguf_19[0],
+                    )
+
+                    self.conditioningzeroout_16 = self.conditioningzeroout.zero_out(
+                        conditioning=self.cliptextencodeflux_15[0]
+                    )
+                    self.changed = False
+        return (self.dualcliploadergguf, self.emptylatentimage, self.vaeloader, self.unetloadergguf, self.cliptextencodeflux, self.conditioningzeroout, self.ksampler, self.vaedecode, self.saveimage,)
+
+    def _generate_image(self):
+        with torch.inference_mode():
+            if self.changed :
+                self._prep()
+
+            ksampler_3 = self.ksampler.sample(
+                    seed=random.randint(1, 2**64),
+                    steps=20,
+                    cfg=1,
+                    sampler_name="euler",
+                    scheduler="simple",
+                    denoise=1,
+                    model=self.unetloadergguf_10[0],
+                    positive=self.cliptextencodeflux_15[0],
+                    negative=self.conditioningzeroout_16[0],
+                    latent_image=self.emptylatentimage_5[0],
             )
 
-            ksampler_3 = ksampler.sample(
-                seed=random.randint(1, 2**64),
-                steps=20,
-                cfg=1,
-                sampler_name="euler",
-                scheduler="simple",
-                denoise=1,
-                model=unetloadergguf_10[0],
-                positive=cliptextencodeflux_15[0],
-                negative=conditioningzeroout_16[0],
-                latent_image=emptylatentimage_5[0],
+            vaedecode_8 = self.vaedecode.decode(
+                    samples=ksampler_3[0],
+                    vae=self.vaeloader_11[0],
             )
 
-            vaedecode_8 = vaedecode.decode(
-                samples=ksampler_3[0],
-                vae=vaeloader_11[0],
+            saveimage_24 = self.saveimage.save_images(
+                    filename_prefix="Flux", images=vaedecode_8[0]
             )
+            for image in vaedecode_8[0]:
+                    i = 255.0 * image.cpu().numpy()
+                    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            
+            self.changed = False
+            
+        w = int(self.width_slider.get())
+        h = int(self.height_slider.get())
+        # Convert the image to PhotoImage and display it
+        img = img.resize((int(w / 2), int(h / 2)))
+        img = ImageTk.PhotoImage(img)
+        self.image_label.after(0, self._update_image_label, img)
 
-            saveimage_24 = saveimage.save_images(
-                filename_prefix="Flux", images=vaedecode_8[0]
-            )
+    def _update_image_label(self, img):
+        self.image_label.config(image=img)
+        self.image_label.image = img  # Keep a reference to prevent garbage collection
+
+    def update_labels(self):
+        self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
+        self.height_label.configure(text=f"Height: {int(self.height_slider.get())}")
+        self.changed = True
+
+    def display_most_recent_image(self):
+        # Get a list of all image files in the output directory
+        image_files = glob.glob(".\\_internal\\output\\*")
+
+        # Get the current size of the window
+        window_width = self.winfo_width() - 400
+        window_height = self.winfo_height()
+
+        # If there are no image files, return
+        if not image_files:
+            return
+
+        # Sort the files by modification time in descending order
+        image_files.sort(key=os.path.getmtime, reverse=True)
+
+        # Open the most recent image file
+        img = Image.open(image_files[0])
+
+        # resize the image to fit the window while keeping the aspect ratio
+        img.thumbnail([window_width, window_height])
+
+        # Convert the image to PhotoImage
+        img = ImageTk.PhotoImage(img)
+
+        # Display the image
+        self.image_label.config(image=img)
+        self.image_label.image = img
+        self.after(1000, self.display_most_recent_image)
 
 
 if __name__ == "__main__":
-    main()
+    app = App()
+    app.mainloop()
