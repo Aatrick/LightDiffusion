@@ -16,7 +16,7 @@ SDWebUI.
 - textual inversion (embeddings) support
 - Automatic Prompt-Enhancing with llama3.2 (ollama)
 
-![Screenshot 2024-06-10 140130](https://github.com/Aatrick/LightDiffusion/assets/113598245/711100ee-3af6-49aa-9de6-81361a64f3f9)
+![Screenshot 2024-11-04 195749](https://github.com/user-attachments/assets/34e48afb-126b-402b-b454-cfef8fcedcca)
 
 ## Installation
 
