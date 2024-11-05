@@ -9,10 +9,8 @@ import os
 import gguf
 import numpy as np
 import torch
-import tqdm
 from enum import Enum
 import safetensors
-import inspect
 import uuid
 import glob
 import numbers
@@ -20,7 +18,6 @@ import os
 import random
 import sys
 from tkinter import *
-from typing import Literal
 
 import safetensors.torch
 
@@ -36,19 +33,62 @@ import enum
 import os
 from typing import Optional
 
+if glob.glob(".\\_internal\\embeddings\\*.pt") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="EvilEngine/badhandv4",
+        filename="badhandv4.pt",
+        local_dir=".\\_internal\\embeddings",
+    )
+    hf_hub_download(
+        repo_id="gsdf/EasyNegative",
+        filename="EasyNegative.pt",
+        local_dir=".\\_internal\\embeddings",
+    )
+if glob.glob(".\\_internal\\unet\\*.gguf") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="city96/FLUX.1-dev-gguf",
+        filename="flux1-dev-Q8_0.gguf",
+        local_dir=".\\_internal\\unet",
+    )
+if glob.glob(".\\_internal\\clip\\*.gguf") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="city96/t5-v1_1-xxl-encoder-gguf",
+        filename="t5-v1_1-xxl-encoder-Q8_0.gguf",
+        local_dir=".\\_internal\\clip",
+    )
+    hf_hub_download(
+        repo_id="comfyanonymous/flux_text_encoders",
+        filename="clip_l.safetensors",
+        local_dir=".\\_internal\\clip",
+    )
+if glob.glob(".\\_internal\\vae\\*.safetensors") == []:
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(
+        repo_id="black-forest-labs/FLUX.1-schnell",
+        filename="ae.safetensors",
+        local_dir=".\\_internal\\vae",
+    )
 
 args_parsing = False
+
 
 def enable_args_parsing(enable=True):
     global args_parsing
     args_parsing = enable
 
 
-
 class EnumAction(argparse.Action):
     """
     Argparse action for handling Enums
     """
+
     def __init__(self, **kwargs):
         # Pop off the type value
         enum_type = kwargs.pop("type", None)
@@ -76,53 +116,170 @@ class EnumAction(argparse.Action):
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--listen", type=str, default="127.0.0.1", metavar="IP", nargs="?", const="0.0.0.0,::", help="Specify the IP address to listen on (default: 127.0.0.1). You can give a list of ip addresses by separating them with a comma like: 127.2.2.2,127.3.3.3 If --listen is provided without an argument, it defaults to 0.0.0.0,:: (listens on all ipv4 and ipv6)")
+parser.add_argument(
+    "--listen",
+    type=str,
+    default="127.0.0.1",
+    metavar="IP",
+    nargs="?",
+    const="0.0.0.0,::",
+    help="Specify the IP address to listen on (default: 127.0.0.1). You can give a list of ip addresses by separating them with a comma like: 127.2.2.2,127.3.3.3 If --listen is provided without an argument, it defaults to 0.0.0.0,:: (listens on all ipv4 and ipv6)",
+)
 parser.add_argument("--port", type=int, default=8188, help="Set the listen port.")
-parser.add_argument("--tls-keyfile", type=str, help="Path to TLS (SSL) key file. Enables TLS, makes app accessible at https://... requires --tls-certfile to function")
-parser.add_argument("--tls-certfile", type=str, help="Path to TLS (SSL) certificate file. Enables TLS, makes app accessible at https://... requires --tls-keyfile to function")
-parser.add_argument("--enable-cors-header", type=str, default=None, metavar="ORIGIN", nargs="?", const="*", help="Enable CORS (Cross-Origin Resource Sharing) with optional origin or allow all with default '*'.")
-parser.add_argument("--max-upload-size", type=float, default=100, help="Set the maximum upload size in MB.")
+parser.add_argument(
+    "--tls-keyfile",
+    type=str,
+    help="Path to TLS (SSL) key file. Enables TLS, makes app accessible at https://... requires --tls-certfile to function",
+)
+parser.add_argument(
+    "--tls-certfile",
+    type=str,
+    help="Path to TLS (SSL) certificate file. Enables TLS, makes app accessible at https://... requires --tls-keyfile to function",
+)
+parser.add_argument(
+    "--enable-cors-header",
+    type=str,
+    default=None,
+    metavar="ORIGIN",
+    nargs="?",
+    const="*",
+    help="Enable CORS (Cross-Origin Resource Sharing) with optional origin or allow all with default '*'.",
+)
+parser.add_argument(
+    "--max-upload-size",
+    type=float,
+    default=100,
+    help="Set the maximum upload size in MB.",
+)
 
-parser.add_argument("--extra-model-paths-config", type=str, default=None, metavar="PATH", nargs='+', action='append', help="Load one or more extra_model_paths.yaml files.")
-parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory.")
-parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (default is in the ComfyUI directory).")
-parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory.")
-parser.add_argument("--auto-launch", action="store_true", help="Automatically launch ComfyUI in the default browser.")
-parser.add_argument("--disable-auto-launch", action="store_true", help="Disable auto launching the browser.")
-parser.add_argument("--cuda-device", type=int, default=None, metavar="DEVICE_ID", help="Set the id of the cuda device this instance will use.")
+parser.add_argument(
+    "--extra-model-paths-config",
+    type=str,
+    default=None,
+    metavar="PATH",
+    nargs="+",
+    action="append",
+    help="Load one or more extra_model_paths.yaml files.",
+)
+parser.add_argument(
+    "--output-directory",
+    type=str,
+    default=None,
+    help="Set the ComfyUI output directory.",
+)
+parser.add_argument(
+    "--temp-directory",
+    type=str,
+    default=None,
+    help="Set the ComfyUI temp directory (default is in the ComfyUI directory).",
+)
+parser.add_argument(
+    "--input-directory", type=str, default=None, help="Set the ComfyUI input directory."
+)
+parser.add_argument(
+    "--auto-launch",
+    action="store_true",
+    help="Automatically launch ComfyUI in the default browser.",
+)
+parser.add_argument(
+    "--disable-auto-launch",
+    action="store_true",
+    help="Disable auto launching the browser.",
+)
+parser.add_argument(
+    "--cuda-device",
+    type=int,
+    default=None,
+    metavar="DEVICE_ID",
+    help="Set the id of the cuda device this instance will use.",
+)
 cm_group = parser.add_mutually_exclusive_group()
-cm_group.add_argument("--cuda-malloc", action="store_true", help="Enable cudaMallocAsync (enabled by default for torch 2.0 and up).")
-cm_group.add_argument("--disable-cuda-malloc", action="store_true", help="Disable cudaMallocAsync.")
+cm_group.add_argument(
+    "--cuda-malloc",
+    action="store_true",
+    help="Enable cudaMallocAsync (enabled by default for torch 2.0 and up).",
+)
+cm_group.add_argument(
+    "--disable-cuda-malloc", action="store_true", help="Disable cudaMallocAsync."
+)
 
 
 fp_group = parser.add_mutually_exclusive_group()
-fp_group.add_argument("--force-fp32", action="store_true", help="Force fp32 (If this makes your GPU work better please report it).")
+fp_group.add_argument(
+    "--force-fp32",
+    action="store_true",
+    help="Force fp32 (If this makes your GPU work better please report it).",
+)
 fp_group.add_argument("--force-fp16", action="store_true", help="Force fp16.")
 
 fpunet_group = parser.add_mutually_exclusive_group()
-fpunet_group.add_argument("--bf16-unet", action="store_true", help="Run the UNET in bf16. This should only be used for testing stuff.")
-fpunet_group.add_argument("--fp16-unet", action="store_true", help="Store unet weights in fp16.")
-fpunet_group.add_argument("--fp8_e4m3fn-unet", action="store_true", help="Store unet weights in fp8_e4m3fn.")
-fpunet_group.add_argument("--fp8_e5m2-unet", action="store_true", help="Store unet weights in fp8_e5m2.")
+fpunet_group.add_argument(
+    "--bf16-unet",
+    action="store_true",
+    help="Run the UNET in bf16. This should only be used for testing stuff.",
+)
+fpunet_group.add_argument(
+    "--fp16-unet", action="store_true", help="Store unet weights in fp16."
+)
+fpunet_group.add_argument(
+    "--fp8_e4m3fn-unet", action="store_true", help="Store unet weights in fp8_e4m3fn."
+)
+fpunet_group.add_argument(
+    "--fp8_e5m2-unet", action="store_true", help="Store unet weights in fp8_e5m2."
+)
 
 fpvae_group = parser.add_mutually_exclusive_group()
-fpvae_group.add_argument("--fp16-vae", action="store_true", help="Run the VAE in fp16, might cause black images.")
-fpvae_group.add_argument("--fp32-vae", action="store_true", help="Run the VAE in full precision fp32.")
+fpvae_group.add_argument(
+    "--fp16-vae",
+    action="store_true",
+    help="Run the VAE in fp16, might cause black images.",
+)
+fpvae_group.add_argument(
+    "--fp32-vae", action="store_true", help="Run the VAE in full precision fp32."
+)
 fpvae_group.add_argument("--bf16-vae", action="store_true", help="Run the VAE in bf16.")
 
 parser.add_argument("--cpu-vae", action="store_true", help="Run the VAE on the CPU.")
 
 fpte_group = parser.add_mutually_exclusive_group()
-fpte_group.add_argument("--fp8_e4m3fn-text-enc", action="store_true", help="Store text encoder weights in fp8 (e4m3fn variant).")
-fpte_group.add_argument("--fp8_e5m2-text-enc", action="store_true", help="Store text encoder weights in fp8 (e5m2 variant).")
-fpte_group.add_argument("--fp16-text-enc", action="store_true", help="Store text encoder weights in fp16.")
-fpte_group.add_argument("--fp32-text-enc", action="store_true", help="Store text encoder weights in fp32.")
+fpte_group.add_argument(
+    "--fp8_e4m3fn-text-enc",
+    action="store_true",
+    help="Store text encoder weights in fp8 (e4m3fn variant).",
+)
+fpte_group.add_argument(
+    "--fp8_e5m2-text-enc",
+    action="store_true",
+    help="Store text encoder weights in fp8 (e5m2 variant).",
+)
+fpte_group.add_argument(
+    "--fp16-text-enc", action="store_true", help="Store text encoder weights in fp16."
+)
+fpte_group.add_argument(
+    "--fp32-text-enc", action="store_true", help="Store text encoder weights in fp32."
+)
 
-parser.add_argument("--force-channels-last", action="store_true", help="Force channels last format when inferencing the models.")
+parser.add_argument(
+    "--force-channels-last",
+    action="store_true",
+    help="Force channels last format when inferencing the models.",
+)
 
-parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml.")
+parser.add_argument(
+    "--directml",
+    type=int,
+    nargs="?",
+    metavar="DIRECTML_DEVICE",
+    const=-1,
+    help="Use torch-directml.",
+)
 
-parser.add_argument("--disable-ipex-optimize", action="store_true", help="Disables ipex.optimize when loading models with Intel GPUs.")
+parser.add_argument(
+    "--disable-ipex-optimize",
+    action="store_true",
+    help="Disables ipex.optimize when loading models with Intel GPUs.",
+)
+
 
 class LatentPreviewMethod(enum.Enum):
     NoPreviews = "none"
@@ -130,51 +287,151 @@ class LatentPreviewMethod(enum.Enum):
     Latent2RGB = "latent2rgb"
     TAESD = "taesd"
 
-parser.add_argument("--preview-method", type=LatentPreviewMethod, default=LatentPreviewMethod.NoPreviews, help="Default preview method for sampler nodes.", action=EnumAction)
 
-parser.add_argument("--preview-size", type=int, default=512, help="Sets the maximum preview size for sampler nodes.")
+parser.add_argument(
+    "--preview-method",
+    type=LatentPreviewMethod,
+    default=LatentPreviewMethod.NoPreviews,
+    help="Default preview method for sampler nodes.",
+    action=EnumAction,
+)
+
+parser.add_argument(
+    "--preview-size",
+    type=int,
+    default=512,
+    help="Sets the maximum preview size for sampler nodes.",
+)
 
 cache_group = parser.add_mutually_exclusive_group()
-cache_group.add_argument("--cache-classic", action="store_true", help="Use the old style (aggressive) caching.")
-cache_group.add_argument("--cache-lru", type=int, default=0, help="Use LRU caching with a maximum of N node results cached. May use more RAM/VRAM.")
+cache_group.add_argument(
+    "--cache-classic",
+    action="store_true",
+    help="Use the old style (aggressive) caching.",
+)
+cache_group.add_argument(
+    "--cache-lru",
+    type=int,
+    default=0,
+    help="Use LRU caching with a maximum of N node results cached. May use more RAM/VRAM.",
+)
 
 attn_group = parser.add_mutually_exclusive_group()
-attn_group.add_argument("--use-split-cross-attention", action="store_true", help="Use the split cross attention optimization. Ignored when xformers is used.")
-attn_group.add_argument("--use-quad-cross-attention", action="store_true", help="Use the sub-quadratic cross attention optimization . Ignored when xformers is used.")
-attn_group.add_argument("--use-pytorch-cross-attention", action="store_true", help="Use the new pytorch 2.0 cross attention function.")
+attn_group.add_argument(
+    "--use-split-cross-attention",
+    action="store_true",
+    help="Use the split cross attention optimization. Ignored when xformers is used.",
+)
+attn_group.add_argument(
+    "--use-quad-cross-attention",
+    action="store_true",
+    help="Use the sub-quadratic cross attention optimization . Ignored when xformers is used.",
+)
+attn_group.add_argument(
+    "--use-pytorch-cross-attention",
+    action="store_true",
+    help="Use the new pytorch 2.0 cross attention function.",
+)
 
 parser.add_argument("--disable-xformers", action="store_true", help="Disable xformers.")
 
 upcast = parser.add_mutually_exclusive_group()
-upcast.add_argument("--force-upcast-attention", action="store_true", help="Force enable attention upcasting, please report if it fixes black images.")
-upcast.add_argument("--dont-upcast-attention", action="store_true", help="Disable all upcasting of attention. Should be unnecessary except for debugging.")
+upcast.add_argument(
+    "--force-upcast-attention",
+    action="store_true",
+    help="Force enable attention upcasting, please report if it fixes black images.",
+)
+upcast.add_argument(
+    "--dont-upcast-attention",
+    action="store_true",
+    help="Disable all upcasting of attention. Should be unnecessary except for debugging.",
+)
 
 
 vram_group = parser.add_mutually_exclusive_group()
-vram_group.add_argument("--gpu-only", action="store_true", help="Store and run everything (text encoders/CLIP models, etc... on the GPU).")
-vram_group.add_argument("--highvram", action="store_true", help="By default models will be unloaded to CPU memory after being used. This option keeps them in GPU memory.")
-vram_group.add_argument("--normalvram", action="store_true", help="Used to force normal vram use if lowvram gets automatically enabled.")
-vram_group.add_argument("--lowvram", action="store_true", help="Split the unet in parts to use less vram.")
-vram_group.add_argument("--novram", action="store_true", help="When lowvram isn't enough.")
-vram_group.add_argument("--cpu", action="store_true", help="To use the CPU for everything (slow).")
+vram_group.add_argument(
+    "--gpu-only",
+    action="store_true",
+    help="Store and run everything (text encoders/CLIP models, etc... on the GPU).",
+)
+vram_group.add_argument(
+    "--highvram",
+    action="store_true",
+    help="By default models will be unloaded to CPU memory after being used. This option keeps them in GPU memory.",
+)
+vram_group.add_argument(
+    "--normalvram",
+    action="store_true",
+    help="Used to force normal vram use if lowvram gets automatically enabled.",
+)
+vram_group.add_argument(
+    "--lowvram", action="store_true", help="Split the unet in parts to use less vram."
+)
+vram_group.add_argument(
+    "--novram", action="store_true", help="When lowvram isn't enough."
+)
+vram_group.add_argument(
+    "--cpu", action="store_true", help="To use the CPU for everything (slow)."
+)
 
-parser.add_argument("--reserve-vram", type=float, default=None, help="Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reverved depending on your OS.")
+parser.add_argument(
+    "--reserve-vram",
+    type=float,
+    default=None,
+    help="Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reverved depending on your OS.",
+)
 
 
-parser.add_argument("--default-hashing-function", type=str, choices=['md5', 'sha1', 'sha256', 'sha512'], default='sha256', help="Allows you to choose the hash function to use for duplicate filename / contents comparison. Default is sha256.")
+parser.add_argument(
+    "--default-hashing-function",
+    type=str,
+    choices=["md5", "sha1", "sha256", "sha512"],
+    default="sha256",
+    help="Allows you to choose the hash function to use for duplicate filename / contents comparison. Default is sha256.",
+)
 
-parser.add_argument("--disable-smart-memory", action="store_true", help="Force ComfyUI to agressively offload to regular ram instead of keeping models in vram when it can.")
-parser.add_argument("--deterministic", action="store_true", help="Make pytorch use slower deterministic algorithms when it can. Note that this might not make images deterministic in all cases.")
-parser.add_argument("--fast", action="store_true", help="Enable some untested and potentially quality deteriorating optimizations.")
+parser.add_argument(
+    "--disable-smart-memory",
+    action="store_true",
+    help="Force ComfyUI to agressively offload to regular ram instead of keeping models in vram when it can.",
+)
+parser.add_argument(
+    "--deterministic",
+    action="store_true",
+    help="Make pytorch use slower deterministic algorithms when it can. Note that this might not make images deterministic in all cases.",
+)
+parser.add_argument(
+    "--fast",
+    action="store_true",
+    help="Enable some untested and potentially quality deteriorating optimizations.",
+)
 
-parser.add_argument("--dont-print-server", action="store_true", help="Don't print server output.")
-parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI.")
-parser.add_argument("--windows-standalone-build", action="store_true", help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup).")
+parser.add_argument(
+    "--dont-print-server", action="store_true", help="Don't print server output."
+)
+parser.add_argument(
+    "--quick-test-for-ci", action="store_true", help="Quick test for CI."
+)
+parser.add_argument(
+    "--windows-standalone-build",
+    action="store_true",
+    help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup).",
+)
 
-parser.add_argument("--disable-metadata", action="store_true", help="Disable saving prompt metadata in files.")
-parser.add_argument("--disable-all-custom-nodes", action="store_true", help="Disable loading all custom nodes.")
+parser.add_argument(
+    "--disable-metadata",
+    action="store_true",
+    help="Disable saving prompt metadata in files.",
+)
+parser.add_argument(
+    "--disable-all-custom-nodes",
+    action="store_true",
+    help="Disable loading all custom nodes.",
+)
 
-parser.add_argument("--multi-user", action="store_true", help="Enables per-user storage.")
+parser.add_argument(
+    "--multi-user", action="store_true", help="Enables per-user storage."
+)
 
 parser.add_argument("--verbose", action="store_true", help="Enables more debug prints.")
 
@@ -195,6 +452,7 @@ parser.add_argument(
     """,
 )
 
+
 def is_valid_directory(path: Optional[str]) -> Optional[str]:
     """Validate if the given path is a directory."""
     if path is None:
@@ -204,6 +462,7 @@ def is_valid_directory(path: Optional[str]) -> Optional[str]:
         raise argparse.ArgumentTypeError(f"{path} is not a valid directory.")
     return path
 
+
 parser.add_argument(
     "--front-end-root",
     type=is_valid_directory,
@@ -211,7 +470,12 @@ parser.add_argument(
     help="The local filesystem path to the directory where the frontend is located. Overrides --front-end-version.",
 )
 
-parser.add_argument("--user-directory", type=is_valid_directory, default=None, help="Set the ComfyUI user directory with an absolute path.")
+parser.add_argument(
+    "--user-directory",
+    type=is_valid_directory,
+    default=None,
+    help="Set the ComfyUI user directory with an absolute path.",
+)
 
 if args_parsing:
     args = parser.parse_args()
@@ -269,7 +533,6 @@ class LatentFormat:
         return latent / self.scale_factor
 
 
-import re
 import pickle
 
 load = pickle.load
@@ -280,7 +543,6 @@ class Empty:
 
 
 # taken from https://github.com/TencentARC/T2I-Adapter
-from collections import OrderedDict
 
 import importlib
 
@@ -295,7 +557,6 @@ def append_dims(x, target_dims):
 
 
 import safetensors.torch
-
 
 
 def calculate_parameters(sd, prefix=""):
@@ -379,7 +640,11 @@ def repeat_to_batch_size(tensor, batch_size, dim=0):
     if tensor.shape[dim] > batch_size:
         return tensor.narrow(dim, 0, batch_size)
     elif tensor.shape[dim] < batch_size:
-        return tensor.repeat(dim * [1] + [math.ceil(batch_size / tensor.shape[dim])] + [1] * (len(tensor.shape) - 1 - dim)).narrow(dim, 0, batch_size)
+        return tensor.repeat(
+            dim * [1]
+            + [math.ceil(batch_size / tensor.shape[dim])]
+            + [1] * (len(tensor.shape) - 1 - dim)
+        ).narrow(dim, 0, batch_size)
     return tensor
 
 
@@ -388,6 +653,7 @@ def get_attr(obj, attr):
     for name in attrs:
         obj = getattr(obj, name)
     return obj
+
 
 PROGRESS_BAR_ENABLED = True
 PROGRESS_BAR_HOOK = None
@@ -414,34 +680,40 @@ class CONDRegular:
             conds.append(x.cond)
         return torch.cat(conds)
 
-class CONDCrossAttn(CONDRegular): 
-    def can_concat(self, other): 
-        s1 = self.cond.shape 
-        s2 = other.cond.shape 
-        if s1 != s2: 
-            if s1[0] != s2[0] or s1[2] != s2[2]: #these 2 cases should not happen 
-                return False 
 
-            mult_min = lcm(s1[1], s2[1]) 
-            diff = mult_min // min(s1[1], s2[1]) 
-            if diff > 4: #arbitrary limit on the padding because it's probably going to impact performance negatively if it's too much 
-                return False 
-        return True 
+class CONDCrossAttn(CONDRegular):
+    def can_concat(self, other):
+        s1 = self.cond.shape
+        s2 = other.cond.shape
+        if s1 != s2:
+            if s1[0] != s2[0] or s1[2] != s2[2]:  # these 2 cases should not happen
+                return False
 
-    def concat(self, others): 
-        conds = [self.cond] 
-        crossattn_max_len = self.cond.shape[1] 
-        for x in others: 
-            c = x.cond 
-            crossattn_max_len = lcm(crossattn_max_len, c.shape[1]) 
-            conds.append(c) 
+            mult_min = lcm(s1[1], s2[1])
+            diff = mult_min // min(s1[1], s2[1])
+            if (
+                diff > 4
+            ):  # arbitrary limit on the padding because it's probably going to impact performance negatively if it's too much
+                return False
+        return True
 
-        out = [] 
-        for c in conds: 
-            if c.shape[1] < crossattn_max_len: 
-                c = c.repeat(1, crossattn_max_len // c.shape[1], 1) #padding with repeat doesn't change result 
-            out.append(c) 
-        return torch.cat(out) 
+    def concat(self, others):
+        conds = [self.cond]
+        crossattn_max_len = self.cond.shape[1]
+        for x in others:
+            c = x.cond
+            crossattn_max_len = lcm(crossattn_max_len, c.shape[1])
+            conds.append(c)
+
+        out = []
+        for c in conds:
+            if c.shape[1] < crossattn_max_len:
+                c = c.repeat(
+                    1, crossattn_max_len // c.shape[1], 1
+                )  # padding with repeat doesn't change result
+            out.append(c)
+        return torch.cat(out)
+
 
 import logging
 
@@ -451,10 +723,8 @@ logging.basicConfig(format="%(message)s", level=logging_level)
 
 
 import torch
-import torchsde
 from torch import nn
-from tqdm.auto import trange, tqdm
-
+from tqdm.auto import trange
 
 
 def to_d(x, sigma, denoised):
@@ -462,13 +732,28 @@ def to_d(x, sigma, denoised):
 
 
 @torch.no_grad()
-def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
+def sample_euler(
+    model,
+    x,
+    sigmas,
+    extra_args=None,
+    callback=None,
+    disable=None,
+    s_churn=0.0,
+    s_tmin=0.0,
+    s_tmax=float("inf"),
+    s_noise=1.0,
+):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
         if s_churn > 0:
-            gamma = min(s_churn / (len(sigmas) - 1), 2 ** 0.5 - 1) if s_tmin <= sigmas[i] <= s_tmax else 0.
+            gamma = (
+                min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
+                if s_tmin <= sigmas[i] <= s_tmax
+                else 0.0
+            )
             sigma_hat = sigmas[i] * (gamma + 1)
         else:
             gamma = 0
@@ -476,15 +761,24 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
 
         if gamma > 0:
             eps = torch.randn_like(x) * s_noise
-            x = x + eps * (sigma_hat ** 2 - sigmas[i] ** 2) ** 0.5
+            x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
         denoised = model(x, sigma_hat * s_in, **extra_args)
         d = to_d(x, sigma_hat, denoised)
         if callback is not None:
-            callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigma_hat, 'denoised': denoised})
+            callback(
+                {
+                    "x": x,
+                    "i": i,
+                    "sigma": sigmas[i],
+                    "sigma_hat": sigma_hat,
+                    "denoised": denoised,
+                }
+            )
         dt = sigmas[i + 1] - sigma_hat
         # Euler method
         x = x + d * dt
     return x
+
 
 import torch
 
@@ -503,18 +797,21 @@ import torch
 import sys
 import platform
 
+
 class VRAMState(Enum):
-    DISABLED = 0    #No vram present: no need to move models to vram
-    NO_VRAM = 1     #Very low vram: enable all the options to save vram
+    DISABLED = 0  # No vram present: no need to move models to vram
+    NO_VRAM = 1  # Very low vram: enable all the options to save vram
     LOW_VRAM = 2
     NORMAL_VRAM = 3
     HIGH_VRAM = 4
-    SHARED = 5      #No dedicated vram: memory shared between CPU and GPU but models still need to be moved between both.
+    SHARED = 5  # No dedicated vram: memory shared between CPU and GPU but models still need to be moved between both.
+
 
 class CPUState(Enum):
     GPU = 0
     CPU = 1
     MPS = 2
+
 
 # Determine VRAM State
 vram_state = VRAMState.NORMAL_VRAM
@@ -527,7 +824,10 @@ xpu_available = False
 torch_version = ""
 try:
     torch_version = torch.version.__version__
-    xpu_available = (int(torch_version[0]) < 2 or (int(torch_version[0]) == 2 and int(torch_version[2]) <= 4)) and torch.xpu.is_available()
+    xpu_available = (
+        int(torch_version[0]) < 2
+        or (int(torch_version[0]) == 2 and int(torch_version[2]) <= 4)
+    ) and torch.xpu.is_available()
 except:
     pass
 
@@ -539,22 +839,30 @@ if args.deterministic:
 directml_enabled = False
 if args.directml is not None:
     import torch_directml
+
     directml_enabled = True
     device_index = args.directml
     if device_index < 0:
         directml_device = torch_directml.device()
     else:
         directml_device = torch_directml.device(device_index)
-    logging.info("Using directml with device: {}".format(torch_directml.device_name(device_index)))
+    logging.info(
+        "Using directml with device: {}".format(
+            torch_directml.device_name(device_index)
+        )
+    )
     # torch_directml.disable_tiled_resources(True)
-    lowvram_available = False #TODO: need to find a way to get free memory in directml before this can be enabled by default.
+    lowvram_available = False  # TODO: need to find a way to get free memory in directml before this can be enabled by default.
 
 try:
     import intel_extension_for_pytorch as ipex
+
     _ = torch.xpu.device_count()
     xpu_available = torch.xpu.is_available()
 except:
-    xpu_available = xpu_available or (hasattr(torch, "xpu") and torch.xpu.is_available())
+    xpu_available = xpu_available or (
+        hasattr(torch, "xpu") and torch.xpu.is_available()
+    )
 
 try:
     if torch.backends.mps.is_available():
@@ -566,6 +874,7 @@ except:
 if args.cpu:
     cpu_state = CPUState.CPU
 
+
 def is_intel_xpu():
     global cpu_state
     global xpu_available
@@ -573,6 +882,7 @@ def is_intel_xpu():
         if xpu_available:
             return True
     return False
+
 
 def get_torch_device():
     global directml_enabled
@@ -590,26 +900,27 @@ def get_torch_device():
         else:
             return torch.device(torch.cuda.current_device())
 
+
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
     if dev is None:
         dev = get_torch_device()
 
-    if hasattr(dev, 'type') and (dev.type == 'cpu' or dev.type == 'mps'):
+    if hasattr(dev, "type") and (dev.type == "cpu" or dev.type == "mps"):
         mem_total = psutil.virtual_memory().total
         mem_total_torch = mem_total
     else:
         if directml_enabled:
-            mem_total = 1024 * 1024 * 1024 #TODO
+            mem_total = 1024 * 1024 * 1024  # TODO
             mem_total_torch = mem_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
-            mem_reserved = stats['reserved_bytes.all.current']
+            mem_reserved = stats["reserved_bytes.all.current"]
             mem_total_torch = mem_reserved
             mem_total = torch.xpu.get_device_properties(dev).total_memory
         else:
             stats = torch.cuda.memory_stats(dev)
-            mem_reserved = stats['reserved_bytes.all.current']
+            mem_reserved = stats["reserved_bytes.all.current"]
             _, mem_total_cuda = torch.cuda.mem_get_info(dev)
             mem_total_torch = mem_reserved
             mem_total = mem_total_cuda
@@ -619,9 +930,12 @@ def get_total_memory(dev=None, torch_total_too=False):
     else:
         return mem_total
 
+
 total_vram = get_total_memory(get_torch_device()) / (1024 * 1024)
 total_ram = psutil.virtual_memory().total / (1024 * 1024)
-logging.info("Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, total_ram))
+logging.info(
+    "Total VRAM {:0.0f} MB, total RAM {:0.0f} MB".format(total_vram, total_ram)
+)
 
 try:
     logging.info("pytorch version: {}".format(torch.version.__version__))
@@ -641,6 +955,7 @@ else:
     try:
         import xformers
         import xformers.ops
+
         XFORMERS_IS_AVAILABLE = True
         try:
             XFORMERS_IS_AVAILABLE = xformers._has_cpp_library
@@ -650,13 +965,18 @@ else:
             XFORMERS_VERSION = xformers.version.__version__
             logging.info("xformers version: {}".format(XFORMERS_VERSION))
             if XFORMERS_VERSION.startswith("0.0.18"):
-                logging.warning("\nWARNING: This version of xformers has a major bug where you will get black images when generating high resolution images.")
-                logging.warning("Please downgrade or upgrade xformers to a different version.\n")
+                logging.warning(
+                    "\nWARNING: This version of xformers has a major bug where you will get black images when generating high resolution images."
+                )
+                logging.warning(
+                    "Please downgrade or upgrade xformers to a different version.\n"
+                )
                 XFORMERS_ENABLED_VAE = False
         except:
             pass
     except:
         XFORMERS_IS_AVAILABLE = False
+
 
 def is_nvidia():
     global cpu_state
@@ -664,6 +984,7 @@ def is_nvidia():
         if torch.version.cuda:
             return True
     return False
+
 
 ENABLE_PYTORCH_ATTENTION = False
 if args.use_pytorch_cross_attention:
@@ -675,12 +996,23 @@ VAE_DTYPES = [torch.float32]
 try:
     if is_nvidia():
         if int(torch_version[0]) >= 2:
-            if ENABLE_PYTORCH_ATTENTION == False and args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
+            if (
+                ENABLE_PYTORCH_ATTENTION == False
+                and args.use_split_cross_attention == False
+                and args.use_quad_cross_attention == False
+            ):
                 ENABLE_PYTORCH_ATTENTION = True
-            if torch.cuda.is_bf16_supported() and torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 8:
+            if (
+                torch.cuda.is_bf16_supported()
+                and torch.cuda.get_device_properties(torch.cuda.current_device()).major
+                >= 8
+            ):
                 VAE_DTYPES = [torch.bfloat16] + VAE_DTYPES
     if is_intel_xpu():
-        if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
+        if (
+            args.use_split_cross_attention == False
+            and args.use_quad_cross_attention == False
+        ):
             ENABLE_PYTORCH_ATTENTION = True
 except:
     pass
@@ -733,20 +1065,24 @@ DISABLE_SMART_MEMORY = args.disable_smart_memory
 if DISABLE_SMART_MEMORY:
     logging.info("Disabling smart memory management")
 
+
 def get_torch_device_name(device):
-    if hasattr(device, 'type'):
+    if hasattr(device, "type"):
         if device.type == "cuda":
             try:
                 allocator_backend = torch.cuda.get_allocator_backend()
             except:
                 allocator_backend = ""
-            return "{} {} : {}".format(device, torch.cuda.get_device_name(device), allocator_backend)
+            return "{} {} : {}".format(
+                device, torch.cuda.get_device_name(device), allocator_backend
+            )
         else:
             return "{}".format(device.type)
     elif is_intel_xpu():
         return "{} {}".format(device, torch.xpu.get_device_name(device))
     else:
         return "CUDA {}: {}".format(device, torch.cuda.get_device_name(device))
+
 
 try:
     logging.info("Device: {}".format(get_torch_device_name(get_torch_device())))
@@ -756,6 +1092,7 @@ except:
 
 current_loaded_models = []
 
+
 def module_size(module):
     module_mem = 0
     sd = module.state_dict()
@@ -763,6 +1100,7 @@ def module_size(module):
         t = sd[k]
         module_mem += t.nelement() * t.element_size()
     return module_mem
+
 
 class LoadedModel:
     def __init__(self, model):
@@ -799,15 +1137,30 @@ class LoadedModel:
             self.model_use_more_vram(use_more_vram)
         else:
             try:
-                self.real_model = self.model.patch_model(device_to=patch_model_to, lowvram_model_memory=lowvram_model_memory, load_weights=load_weights, force_patch_weights=force_patch_weights)
+                self.real_model = self.model.patch_model(
+                    device_to=patch_model_to,
+                    lowvram_model_memory=lowvram_model_memory,
+                    load_weights=load_weights,
+                    force_patch_weights=force_patch_weights,
+                )
             except Exception as e:
                 self.model.unpatch_model(self.model.offload_device)
                 self.model_unload()
                 raise e
 
-        if is_intel_xpu() and not args.disable_ipex_optimize and 'ipex' in globals() and self.real_model is not None:
+        if (
+            is_intel_xpu()
+            and not args.disable_ipex_optimize
+            and "ipex" in globals()
+            and self.real_model is not None
+        ):
             with torch.no_grad():
-                self.real_model = ipex.optimize(self.real_model.eval(), inplace=True, graph_mode=True, concat_linear=True)
+                self.real_model = ipex.optimize(
+                    self.real_model.eval(),
+                    inplace=True,
+                    graph_mode=True,
+                    concat_linear=True,
+                )
 
         self.weights_loaded = True
         return self.real_model
@@ -820,10 +1173,14 @@ class LoadedModel:
     def model_unload(self, memory_to_free=None, unpatch_weights=True):
         if memory_to_free is not None:
             if memory_to_free < self.model.loaded_size():
-                freed = self.model.partially_unload(self.model.offload_device, memory_to_free)
+                freed = self.model.partially_unload(
+                    self.model.offload_device, memory_to_free
+                )
                 if freed >= memory_to_free:
                     return False
-        self.model.unpatch_model(self.model.offload_device, unpatch_weights=unpatch_weights)
+        self.model.unpatch_model(
+            self.model.offload_device, unpatch_weights=unpatch_weights
+        )
         self.model.model_patches_to(self.model.offload_device)
         self.weights_loaded = self.weights_loaded and not unpatch_weights
         self.real_model = None
@@ -835,12 +1192,14 @@ class LoadedModel:
     def __eq__(self, other):
         return self.model is other.model
 
+
 def use_more_memory(extra_memory, loaded_models, device):
     for m in loaded_models:
         if m.device == device:
             extra_memory -= m.model_use_more_vram(extra_memory)
             if extra_memory <= 0:
                 break
+
 
 def offloaded_memory(loaded_models, device):
     offloaded_mem = 0
@@ -849,21 +1208,31 @@ def offloaded_memory(loaded_models, device):
             offloaded_mem += m.model_offloaded_memory()
     return offloaded_mem
 
+
 WINDOWS = any(platform.win32_ver())
 
 EXTRA_RESERVED_VRAM = 400 * 1024 * 1024
 if WINDOWS:
-    EXTRA_RESERVED_VRAM = 600 * 1024 * 1024 #Windows is higher because of the shared vram issue
+    EXTRA_RESERVED_VRAM = (
+        600 * 1024 * 1024
+    )  # Windows is higher because of the shared vram issue
 
 if args.reserve_vram is not None:
     EXTRA_RESERVED_VRAM = args.reserve_vram * 1024 * 1024 * 1024
-    logging.debug("Reserving {}MB vram for other applications.".format(EXTRA_RESERVED_VRAM / (1024 * 1024)))
+    logging.debug(
+        "Reserving {}MB vram for other applications.".format(
+            EXTRA_RESERVED_VRAM / (1024 * 1024)
+        )
+    )
+
 
 def extra_reserved_memory():
     return EXTRA_RESERVED_VRAM
 
+
 def minimum_inference_memory():
     return (1024 * 1024 * 1024) * 0.8 + extra_reserved_memory()
+
 
 def unload_model_clones(model, unload_weights_only=True, force_unload=True):
     to_unload = []
@@ -896,16 +1265,24 @@ def unload_model_clones(model, unload_weights_only=True, force_unload=True):
 
     return unload_weight
 
+
 def free_memory(memory_required, device, keep_loaded=[]):
     unloaded_model = []
     can_unload = []
     unloaded_models = []
 
-    for i in range(len(current_loaded_models) -1, -1, -1):
+    for i in range(len(current_loaded_models) - 1, -1, -1):
         shift_model = current_loaded_models[i]
         if shift_model.device == device:
             if shift_model not in keep_loaded:
-                can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
+                can_unload.append(
+                    (
+                        -shift_model.model_offloaded_memory(),
+                        sys.getrefcount(shift_model.model),
+                        shift_model.model_memory(),
+                        i,
+                    )
+                )
                 shift_model.currently_used = False
 
     for x in sorted(can_unload):
@@ -916,7 +1293,9 @@ def free_memory(memory_required, device, keep_loaded=[]):
             if free_mem > memory_required:
                 break
             memory_to_free = memory_required - free_mem
-        logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
+        logging.debug(
+            f"Unloading {current_loaded_models[i].model.model.__class__.__name__}"
+        )
         if current_loaded_models[i].model_unload(memory_to_free):
             unloaded_model.append(i)
 
@@ -927,12 +1306,21 @@ def free_memory(memory_required, device, keep_loaded=[]):
         soft_empty_cache()
     else:
         if vram_state != VRAMState.HIGH_VRAM:
-            mem_free_total, mem_free_torch = get_free_memory(device, torch_free_too=True)
+            mem_free_total, mem_free_torch = get_free_memory(
+                device, torch_free_too=True
+            )
             if mem_free_torch > mem_free_total * 0.25:
                 soft_empty_cache()
     return unloaded_models
 
-def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimum_memory_required=None, force_full_load=False):
+
+def load_models_gpu(
+    models,
+    memory_required=0,
+    force_patch_weights=False,
+    minimum_memory_required=None,
+    force_full_load=False,
+):
     global vram_state
 
     inference_memory = minimum_inference_memory()
@@ -940,7 +1328,9 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
     if minimum_memory_required is None:
         minimum_memory_required = extra_mem
     else:
-        minimum_memory_required = max(inference_memory, minimum_memory_required + extra_reserved_memory())
+        minimum_memory_required = max(
+            inference_memory, minimum_memory_required + extra_reserved_memory()
+        )
 
     models = set(models)
 
@@ -957,8 +1347,12 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
 
         if loaded_model_index is not None:
             loaded = current_loaded_models[loaded_model_index]
-            if loaded.should_reload_model(force_patch_weights=force_patch_weights): #TODO: cleanup this model reload logic
-                current_loaded_models.pop(loaded_model_index).model_unload(unpatch_weights=True)
+            if loaded.should_reload_model(
+                force_patch_weights=force_patch_weights
+            ):  # TODO: cleanup this model reload logic
+                current_loaded_models.pop(loaded_model_index).model_unload(
+                    unpatch_weights=True
+                )
                 loaded = None
             else:
                 loaded.currently_used = True
@@ -973,35 +1367,57 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         devs = set(map(lambda a: a.device, models_already_loaded))
         for d in devs:
             if d != torch.device("cpu"):
-                free_memory(extra_mem + offloaded_memory(models_already_loaded, d), d, models_already_loaded)
+                free_memory(
+                    extra_mem + offloaded_memory(models_already_loaded, d),
+                    d,
+                    models_already_loaded,
+                )
                 free_mem = get_free_memory(d)
                 if free_mem < minimum_memory_required:
-                    logging.info("Unloading models for lowram load.") #TODO: partial model unloading when this case happens, also handle the opposite case where models can be unlowvramed.
+                    logging.info(
+                        "Unloading models for lowram load."
+                    )  # TODO: partial model unloading when this case happens, also handle the opposite case where models can be unlowvramed.
                     models_to_load = free_memory(minimum_memory_required, d)
                     logging.info("{} models unloaded.".format(len(models_to_load)))
                 else:
-                    use_more_memory(free_mem - minimum_memory_required, models_already_loaded, d)
+                    use_more_memory(
+                        free_mem - minimum_memory_required, models_already_loaded, d
+                    )
         if len(models_to_load) == 0:
             return
 
-    logging.info(f"Loading {len(models_to_load)} new model{'s' if len(models_to_load) > 1 else ''}")
+    logging.info(
+        f"Loading {len(models_to_load)} new model{'s' if len(models_to_load) > 1 else ''}"
+    )
 
     total_memory_required = {}
     for loaded_model in models_to_load:
-        unload_model_clones(loaded_model.model, unload_weights_only=True, force_unload=False) #unload clones where the weights are different
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device, 0) + loaded_model.model_memory_required(loaded_model.device)
+        unload_model_clones(
+            loaded_model.model, unload_weights_only=True, force_unload=False
+        )  # unload clones where the weights are different
+        total_memory_required[loaded_model.device] = total_memory_required.get(
+            loaded_model.device, 0
+        ) + loaded_model.model_memory_required(loaded_model.device)
 
     for loaded_model in models_already_loaded:
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device, 0) + loaded_model.model_memory_required(loaded_model.device)
+        total_memory_required[loaded_model.device] = total_memory_required.get(
+            loaded_model.device, 0
+        ) + loaded_model.model_memory_required(loaded_model.device)
 
     for loaded_model in models_to_load:
-        weights_unloaded = unload_model_clones(loaded_model.model, unload_weights_only=False, force_unload=False) #unload the rest of the clones where the weights can stay loaded
+        weights_unloaded = unload_model_clones(
+            loaded_model.model, unload_weights_only=False, force_unload=False
+        )  # unload the rest of the clones where the weights can stay loaded
         if weights_unloaded is not None:
             loaded_model.weights_loaded = not weights_unloaded
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
-            free_memory(total_memory_required[device] * 1.1 + extra_mem, device, models_already_loaded)
+            free_memory(
+                total_memory_required[device] * 1.1 + extra_mem,
+                device,
+                models_already_loaded,
+            )
 
     for loaded_model in models_to_load:
         model = loaded_model.model
@@ -1011,31 +1427,51 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         else:
             vram_set_state = vram_state
         lowvram_model_memory = 0
-        if lowvram_available and (vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM) and not force_full_load:
+        if (
+            lowvram_available
+            and (
+                vram_set_state == VRAMState.LOW_VRAM
+                or vram_set_state == VRAMState.NORMAL_VRAM
+            )
+            and not force_full_load
+        ):
             model_size = loaded_model.model_memory_required(torch_dev)
             current_free_mem = get_free_memory(torch_dev)
-            lowvram_model_memory = max(64 * (1024 * 1024), (current_free_mem - minimum_memory_required), min(current_free_mem * 0.4, current_free_mem - minimum_inference_memory()))
-            if model_size <= lowvram_model_memory: #only switch to lowvram if really necessary
+            lowvram_model_memory = max(
+                64 * (1024 * 1024),
+                (current_free_mem - minimum_memory_required),
+                min(
+                    current_free_mem * 0.4,
+                    current_free_mem - minimum_inference_memory(),
+                ),
+            )
+            if (
+                model_size <= lowvram_model_memory
+            ):  # only switch to lowvram if really necessary
                 lowvram_model_memory = 0
 
         if vram_set_state == VRAMState.NO_VRAM:
             lowvram_model_memory = 64 * 1024 * 1024
 
-        cur_loaded_model = loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
+        cur_loaded_model = loaded_model.model_load(
+            lowvram_model_memory, force_patch_weights=force_patch_weights
+        )
         current_loaded_models.insert(0, loaded_model)
-
 
     devs = set(map(lambda a: a.device, models_already_loaded))
     for d in devs:
         if d != torch.device("cpu"):
             free_mem = get_free_memory(d)
             if free_mem > minimum_memory_required:
-                use_more_memory(free_mem - minimum_memory_required, models_already_loaded, d)
+                use_more_memory(
+                    free_mem - minimum_memory_required, models_already_loaded, d
+                )
     return
 
 
 def load_model_gpu(model):
     return load_models_gpu([model])
+
 
 def loaded_models(only_currently_used=False):
     output = []
@@ -1047,22 +1483,26 @@ def loaded_models(only_currently_used=False):
         output.append(m.model)
     return output
 
+
 def cleanup_models(keep_clone_weights_loaded=False):
     to_delete = []
     for i in range(len(current_loaded_models)):
-        #TODO: very fragile function needs improvement
+        # TODO: very fragile function needs improvement
         num_refs = sys.getrefcount(current_loaded_models[i].model)
         if num_refs <= 2:
             if not keep_clone_weights_loaded:
                 to_delete = [i] + to_delete
-            #TODO: find a less fragile way to do this.
-            elif sys.getrefcount(current_loaded_models[i].real_model) <= 3: #references from .real_model + the .model
+            # TODO: find a less fragile way to do this.
+            elif (
+                sys.getrefcount(current_loaded_models[i].real_model) <= 3
+            ):  # references from .real_model + the .model
                 to_delete = [i] + to_delete
 
     for i in to_delete:
         x = current_loaded_models.pop(i)
         x.model_unload()
         del x
+
 
 def dtype_size(dtype):
     dtype_size = 4
@@ -1073,15 +1513,17 @@ def dtype_size(dtype):
     else:
         try:
             dtype_size = dtype.itemsize
-        except: #Old pytorch doesn't have .itemsize
+        except:  # Old pytorch doesn't have .itemsize
             pass
     return dtype_size
+
 
 def unet_offload_device():
     if vram_state == VRAMState.HIGH_VRAM:
         return get_torch_device()
     else:
         return torch.device("cpu")
+
 
 def unet_inital_load_device(parameters, dtype):
     torch_dev = get_torch_device()
@@ -1101,10 +1543,16 @@ def unet_inital_load_device(parameters, dtype):
     else:
         return cpu_dev
 
-def maximum_vram_for_weights(device=None):
-    return (get_total_memory(device) * 0.88 - minimum_inference_memory())
 
-def unet_dtype(device=None, model_params=0, supported_dtypes=[torch.float16, torch.bfloat16, torch.float32]):
+def maximum_vram_for_weights(device=None):
+    return get_total_memory(device) * 0.88 - minimum_inference_memory()
+
+
+def unet_dtype(
+    device=None,
+    model_params=0,
+    supported_dtypes=[torch.float16, torch.bfloat16, torch.float32],
+):
     if model_params < 0:
         model_params = 1000000000000000000000
     if args.bf16_unet:
@@ -1131,7 +1579,9 @@ def unet_dtype(device=None, model_params=0, supported_dtypes=[torch.float16, tor
             return fp8_dtype
 
     for dt in supported_dtypes:
-        if dt == torch.float16 and should_use_fp16(device=device, model_params=model_params):
+        if dt == torch.float16 and should_use_fp16(
+            device=device, model_params=model_params
+        ):
             if torch.float16 in supported_dtypes:
                 return torch.float16
         if dt == torch.bfloat16 and should_use_bf16(device, model_params=model_params):
@@ -1139,17 +1589,26 @@ def unet_dtype(device=None, model_params=0, supported_dtypes=[torch.float16, tor
                 return torch.bfloat16
 
     for dt in supported_dtypes:
-        if dt == torch.float16 and should_use_fp16(device=device, model_params=model_params, manual_cast=True):
+        if dt == torch.float16 and should_use_fp16(
+            device=device, model_params=model_params, manual_cast=True
+        ):
             if torch.float16 in supported_dtypes:
                 return torch.float16
-        if dt == torch.bfloat16 and should_use_bf16(device, model_params=model_params, manual_cast=True):
+        if dt == torch.bfloat16 and should_use_bf16(
+            device, model_params=model_params, manual_cast=True
+        ):
             if torch.bfloat16 in supported_dtypes:
                 return torch.bfloat16
 
     return torch.float32
 
+
 # None means no manual cast
-def unet_manual_cast(weight_dtype, inference_device, supported_dtypes=[torch.float16, torch.bfloat16, torch.float32]):
+def unet_manual_cast(
+    weight_dtype,
+    inference_device,
+    supported_dtypes=[torch.float16, torch.bfloat16, torch.float32],
+):
     if weight_dtype == torch.float32:
         return None
 
@@ -1170,8 +1629,10 @@ def unet_manual_cast(weight_dtype, inference_device, supported_dtypes=[torch.flo
 
     return torch.float32
 
+
 def text_encoder_offload_device():
     return torch.device("cpu")
+
 
 def text_encoder_device():
     if args.gpu_only:
@@ -1183,6 +1644,7 @@ def text_encoder_device():
             return torch.device("cpu")
     else:
         return torch.device("cpu")
+
 
 def text_encoder_initial_device(load_device, offload_device, model_size=0):
     if load_device == offload_device or model_size <= 1024 * 1024 * 1024:
@@ -1197,6 +1659,7 @@ def text_encoder_initial_device(load_device, offload_device, model_size=0):
         return load_device
     else:
         return offload_device
+
 
 def text_encoder_dtype(device=None):
     if args.fp8_e4m3fn_text_enc:
@@ -1220,16 +1683,19 @@ def intermediate_device():
     else:
         return torch.device("cpu")
 
+
 def vae_device():
     if args.cpu_vae:
         return torch.device("cpu")
     return get_torch_device()
+
 
 def vae_offload_device():
     if args.gpu_only:
         return get_torch_device()
     else:
         return torch.device("cpu")
+
 
 def vae_dtype(device=None, allowed_dtypes=[]):
     global VAE_DTYPES
@@ -1248,12 +1714,14 @@ def vae_dtype(device=None, allowed_dtypes=[]):
 
     return VAE_DTYPES[0]
 
+
 def get_autocast_device(dev):
-    if hasattr(dev, 'type'):
+    if hasattr(dev, "type"):
         return dev.type
     return "cuda"
 
-def supports_dtype(device, dtype): #TODO
+
+def supports_dtype(device, dtype):  # TODO
     if dtype == torch.float32:
         return True
     if is_device_cpu(device):
@@ -1264,12 +1732,13 @@ def supports_dtype(device, dtype): #TODO
         return True
     return False
 
-def supports_cast(device, dtype): #TODO
+
+def supports_cast(device, dtype):  # TODO
     if dtype == torch.float32:
         return True
     if dtype == torch.float16:
         return True
-    if directml_enabled: #TODO: test this
+    if directml_enabled:  # TODO: test this
         return False
     if dtype == torch.bfloat16:
         return True
@@ -1280,6 +1749,7 @@ def supports_cast(device, dtype): #TODO
     if dtype == torch.float8_e5m2:
         return True
     return False
+
 
 def pick_weight_dtype(dtype, fallback_dtype, device=None):
     if dtype is None:
@@ -1292,16 +1762,20 @@ def pick_weight_dtype(dtype, fallback_dtype, device=None):
 
     return dtype
 
+
 def device_supports_non_blocking(device):
     if is_device_mps(device):
-        return False #pytorch bug? mps doesn't support non blocking
+        return False  # pytorch bug? mps doesn't support non blocking
     if is_intel_xpu():
         return False
-    if args.deterministic: #TODO: figure out why deterministic breaks non blocking from gpu to cpu (previews)
+    if (
+        args.deterministic
+    ):  # TODO: figure out why deterministic breaks non blocking from gpu to cpu (previews)
         return False
     if directml_enabled:
         return False
     return True
+
 
 def device_should_use_non_blocking(device):
     if not device_supports_non_blocking(device):
@@ -1309,19 +1783,21 @@ def device_should_use_non_blocking(device):
     return False
     # return True #TODO: figure out why this causes memory issues on Nvidia and possibly others
 
+
 def force_channels_last():
     if args.force_channels_last:
         return True
 
-    #TODO
+    # TODO
     return False
+
 
 def cast_to_device(tensor, device, dtype, copy=False):
     device_supports_cast = False
     if tensor.dtype == torch.float32 or tensor.dtype == torch.float16:
         device_supports_cast = True
     elif tensor.dtype == torch.bfloat16:
-        if hasattr(device, 'type') and device.type.startswith("cuda"):
+        if hasattr(device, "type") and device.type.startswith("cuda"):
             device_supports_cast = True
         elif is_intel_xpu():
             device_supports_cast = True
@@ -1332,11 +1808,16 @@ def cast_to_device(tensor, device, dtype, copy=False):
         if copy:
             if tensor.device == device:
                 return tensor.to(dtype, copy=copy, non_blocking=non_blocking)
-            return tensor.to(device, copy=copy, non_blocking=non_blocking).to(dtype, non_blocking=non_blocking)
+            return tensor.to(device, copy=copy, non_blocking=non_blocking).to(
+                dtype, non_blocking=non_blocking
+            )
         else:
-            return tensor.to(device, non_blocking=non_blocking).to(dtype, non_blocking=non_blocking)
+            return tensor.to(device, non_blocking=non_blocking).to(
+                dtype, non_blocking=non_blocking
+            )
     else:
         return tensor.to(device, dtype, copy=copy, non_blocking=non_blocking)
+
 
 def xformers_enabled():
     global directml_enabled
@@ -1357,25 +1838,30 @@ def xformers_enabled_vae():
 
     return XFORMERS_ENABLED_VAE
 
+
 def pytorch_attention_enabled():
     global ENABLE_PYTORCH_ATTENTION
     return ENABLE_PYTORCH_ATTENTION
 
+
 def pytorch_attention_flash_attention():
     global ENABLE_PYTORCH_ATTENTION
     if ENABLE_PYTORCH_ATTENTION:
-        #TODO: more reliable way of checking for flash attention?
-        if is_nvidia(): #pytorch flash attention only works on Nvidia
+        # TODO: more reliable way of checking for flash attention?
+        if is_nvidia():  # pytorch flash attention only works on Nvidia
             return True
         if is_intel_xpu():
             return True
     return False
 
+
 def force_upcast_attention_dtype():
     upcast = args.force_upcast_attention
     try:
         macos_version = tuple(int(n) for n in platform.mac_ver()[0].split("."))
-        if (14, 5) <= macos_version < (14, 7):  # black image bug on recent versions of MacOS
+        if (
+            (14, 5) <= macos_version < (14, 7)
+        ):  # black image bug on recent versions of MacOS
             upcast = True
     except:
         pass
@@ -1384,29 +1870,32 @@ def force_upcast_attention_dtype():
     else:
         return None
 
+
 def get_free_memory(dev=None, torch_free_too=False):
     global directml_enabled
     if dev is None:
         dev = get_torch_device()
 
-    if hasattr(dev, 'type') and (dev.type == 'cpu' or dev.type == 'mps'):
+    if hasattr(dev, "type") and (dev.type == "cpu" or dev.type == "mps"):
         mem_free_total = psutil.virtual_memory().available
         mem_free_torch = mem_free_total
     else:
         if directml_enabled:
-            mem_free_total = 1024 * 1024 * 1024 #TODO
+            mem_free_total = 1024 * 1024 * 1024  # TODO
             mem_free_torch = mem_free_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
-            mem_active = stats['active_bytes.all.current']
-            mem_reserved = stats['reserved_bytes.all.current']
+            mem_active = stats["active_bytes.all.current"]
+            mem_reserved = stats["reserved_bytes.all.current"]
             mem_free_torch = mem_reserved - mem_active
-            mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
+            mem_free_xpu = (
+                torch.xpu.get_device_properties(dev).total_memory - mem_reserved
+            )
             mem_free_total = mem_free_xpu + mem_free_torch
         else:
             stats = torch.cuda.memory_stats(dev)
-            mem_active = stats['active_bytes.all.current']
-            mem_reserved = stats['reserved_bytes.all.current']
+            mem_active = stats["active_bytes.all.current"]
+            mem_reserved = stats["reserved_bytes.all.current"]
             mem_free_cuda, _ = torch.cuda.mem_get_info(dev)
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_cuda + mem_free_torch
@@ -1416,30 +1905,39 @@ def get_free_memory(dev=None, torch_free_too=False):
     else:
         return mem_free_total
 
+
 def cpu_mode():
     global cpu_state
     return cpu_state == CPUState.CPU
+
 
 def mps_mode():
     global cpu_state
     return cpu_state == CPUState.MPS
 
+
 def is_device_type(device, type):
-    if hasattr(device, 'type'):
-        if (device.type == type):
+    if hasattr(device, "type"):
+        if device.type == type:
             return True
     return False
 
+
 def is_device_cpu(device):
-    return is_device_type(device, 'cpu')
+    return is_device_type(device, "cpu")
+
 
 def is_device_mps(device):
-    return is_device_type(device, 'mps')
+    return is_device_type(device, "mps")
+
 
 def is_device_cuda(device):
-    return is_device_type(device, 'cuda')
+    return is_device_type(device, "cuda")
 
-def should_use_fp16(device=None, model_params=0, prioritize_performance=True, manual_cast=False):
+
+def should_use_fp16(
+    device=None, model_params=0, prioritize_performance=True, manual_cast=False
+):
     global directml_enabled
 
     if device is not None:
@@ -1478,14 +1976,31 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
     if props.major < 6:
         return False
 
-    #FP16 is confirmed working on a 1080 (GP104) and on latest pytorch actually seems faster than fp32
-    nvidia_10_series = ["1080", "1070", "titan x", "p3000", "p3200", "p4000", "p4200", "p5000", "p5200", "p6000", "1060", "1050", "p40", "p100", "p6", "p4"]
+    # FP16 is confirmed working on a 1080 (GP104) and on latest pytorch actually seems faster than fp32
+    nvidia_10_series = [
+        "1080",
+        "1070",
+        "titan x",
+        "p3000",
+        "p3200",
+        "p4000",
+        "p4200",
+        "p5000",
+        "p5200",
+        "p6000",
+        "1060",
+        "1050",
+        "p40",
+        "p100",
+        "p6",
+        "p4",
+    ]
     for x in nvidia_10_series:
         if x in props.name.lower():
             if WINDOWS or manual_cast:
                 return True
             else:
-                return False #weird linux behavior where fp32 is faster
+                return False  # weird linux behavior where fp32 is faster
 
     if manual_cast:
         free_model_memory = maximum_vram_for_weights(device)
@@ -1495,17 +2010,33 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
     if props.major < 7:
         return False
 
-    #FP16 is just broken on these cards
-    nvidia_16_series = ["1660", "1650", "1630", "T500", "T550", "T600", "MX550", "MX450", "CMP 30HX", "T2000", "T1000", "T1200"]
+    # FP16 is just broken on these cards
+    nvidia_16_series = [
+        "1660",
+        "1650",
+        "1630",
+        "T500",
+        "T550",
+        "T600",
+        "MX550",
+        "MX450",
+        "CMP 30HX",
+        "T2000",
+        "T1000",
+        "T1200",
+    ]
     for x in nvidia_16_series:
         if x in props.name:
             return False
 
     return True
 
-def should_use_bf16(device=None, model_params=0, prioritize_performance=True, manual_cast=False):
+
+def should_use_bf16(
+    device=None, model_params=0, prioritize_performance=True, manual_cast=False
+):
     if device is not None:
-        if is_device_cpu(device): #TODO ? bf16 works on CPU but is extremely slow
+        if is_device_cpu(device):  # TODO ? bf16 works on CPU but is extremely slow
             return False
 
     if device is not None:
@@ -1540,6 +2071,7 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
 
     return False
 
+
 def supports_fp8_compute(device=None):
     props = torch.cuda.get_device_properties(device)
     if props.major >= 9:
@@ -1550,6 +2082,7 @@ def supports_fp8_compute(device=None):
         return False
     return True
 
+
 def soft_empty_cache(force=False):
     global cpu_state
     if cpu_state == CPUState.MPS:
@@ -1557,19 +2090,25 @@ def soft_empty_cache(force=False):
     elif is_intel_xpu():
         torch.xpu.empty_cache()
     elif torch.cuda.is_available():
-        if force or is_nvidia(): #This seems to make things worse on ROCm so I only do it for cuda
+        if (
+            force or is_nvidia()
+        ):  # This seems to make things worse on ROCm so I only do it for cuda
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
+
 
 def unload_all_models():
     free_memory(1e30, get_torch_device())
 
 
-def resolve_lowvram_weight(weight, model, key): #TODO: remove
-    print("WARNING: The comfy.model_management.resolve_lowvram_weight function will be removed soon, please stop using it.")
+def resolve_lowvram_weight(weight, model, key):  # TODO: remove
+    print(
+        "WARNING: The comfy.model_management.resolve_lowvram_weight function will be removed soon, please stop using it."
+    )
     return weight
 
-#TODO: might be cleaner to put this somewhere else
+
+# TODO: might be cleaner to put this somewhere else
 import threading
 import torch
 
@@ -1588,7 +2127,7 @@ def convert_cond(cond):
         temp = c[1].copy()
         model_conds = temp.get("model_conds", {})
         if c[0] is not None:
-            model_conds["c_crossattn"] = CONDCrossAttn(c[0]) #TODO: remove
+            model_conds["c_crossattn"] = CONDCrossAttn(c[0])  # TODO: remove
             temp["cross_attn"] = c[0]
         temp["model_conds"] = model_conds
         out.append(temp)
@@ -1621,9 +2160,19 @@ def prepare_sampling(model, noise_shape, conds):
     device = model.load_device
     real_model = None
     models, inference_memory = get_additional_models(conds, model.model_dtype())
-    memory_required = model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:])) + inference_memory
-    minimum_memory_required = model.memory_required([noise_shape[0]] + list(noise_shape[1:])) + inference_memory
-    load_models_gpu([model] + models, memory_required=memory_required, minimum_memory_required=minimum_memory_required)
+    memory_required = (
+        model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:]))
+        + inference_memory
+    )
+    minimum_memory_required = (
+        model.memory_required([noise_shape[0]] + list(noise_shape[1:]))
+        + inference_memory
+    )
+    load_models_gpu(
+        [model] + models,
+        memory_required=memory_required,
+        minimum_memory_required=minimum_memory_required,
+    )
     real_model = model.model
 
     return real_model, conds, models
@@ -1638,6 +2187,7 @@ def cleanup_models(conds, models):
 
     cleanup_additional_models(set(control_cleanup))
 
+
 def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False):
     if device is None or weight.device == device:
         if not copy:
@@ -1648,6 +2198,7 @@ def cast_to(weight, dtype=None, device=None, non_blocking=False, copy=False):
     r = torch.empty_like(weight, dtype=dtype, device=device)
     r.copy_(weight, non_blocking=non_blocking)
     return r
+
 
 def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
     if input is not None:
@@ -1662,15 +2213,20 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
     non_blocking = device_supports_non_blocking(device)
     if s.bias is not None:
         has_function = s.bias_function is not None
-        bias = cast_to(s.bias, bias_dtype, device, non_blocking=non_blocking, copy=has_function)
+        bias = cast_to(
+            s.bias, bias_dtype, device, non_blocking=non_blocking, copy=has_function
+        )
         if has_function:
             bias = s.bias_function(bias)
 
     has_function = s.weight_function is not None
-    weight = cast_to(s.weight, dtype, device, non_blocking=non_blocking, copy=has_function)
+    weight = cast_to(
+        s.weight, dtype, device, non_blocking=non_blocking, copy=has_function
+    )
     if has_function:
         weight = s.weight_function(weight)
     return weight, bias
+
 
 class CastWeightBiasOp:
     comfy_cast_weights = False
@@ -1917,18 +2473,18 @@ def get_area_and_mult(conds, x_in, timestep_in):
     area = None
     strength = 1.0
 
-    if 'timestep_start' in conds:
-        timestep_start = conds['timestep_start']
+    if "timestep_start" in conds:
+        timestep_start = conds["timestep_start"]
         if timestep_in[0] > timestep_start:
             return None
-    if 'timestep_end' in conds:
-        timestep_end = conds['timestep_end']
+    if "timestep_end" in conds:
+        timestep_end = conds["timestep_end"]
         if timestep_in[0] < timestep_end:
             return None
-    if 'area' in conds:
-        area = list(conds['area'])
-    if 'strength' in conds:
-        strength = conds['strength']
+    if "area" in conds:
+        area = list(conds["area"])
+    if "strength" in conds:
+        strength = conds["strength"]
 
     input_x = x_in
     if area is not None:
@@ -1936,60 +2492,69 @@ def get_area_and_mult(conds, x_in, timestep_in):
             area[i] = min(input_x.shape[i + 2] - area[len(dims) + i], area[i])
             input_x = input_x.narrow(i + 2, area[len(dims) + i], area[i])
 
-    if 'mask' in conds:
+    if "mask" in conds:
         # Scale the mask to the size of the input
         # The mask should have been resized as we began the sampling process
         mask_strength = 1.0
         if "mask_strength" in conds:
             mask_strength = conds["mask_strength"]
-        mask = conds['mask']
-        assert(mask.shape[1:] == x_in.shape[2:])
+        mask = conds["mask"]
+        assert mask.shape[1:] == x_in.shape[2:]
 
-        mask = mask[:input_x.shape[0]]
+        mask = mask[: input_x.shape[0]]
         if area is not None:
             for i in range(len(dims)):
                 mask = mask.narrow(i + 1, area[len(dims) + i], area[i])
 
         mask = mask * mask_strength
-        mask = mask.unsqueeze(1).repeat(input_x.shape[0] // mask.shape[0], input_x.shape[1], 1, 1)
+        mask = mask.unsqueeze(1).repeat(
+            input_x.shape[0] // mask.shape[0], input_x.shape[1], 1, 1
+        )
     else:
         mask = torch.ones_like(input_x)
     mult = mask * strength
 
-    if 'mask' not in conds and area is not None:
+    if "mask" not in conds and area is not None:
         rr = 8
         for i in range(len(dims)):
             if area[len(dims) + i] != 0:
                 for t in range(rr):
                     m = mult.narrow(i + 2, t, 1)
-                    m *= ((1.0/rr) * (t + 1))
+                    m *= (1.0 / rr) * (t + 1)
             if (area[i] + area[len(dims) + i]) < x_in.shape[i + 2]:
                 for t in range(rr):
                     m = mult.narrow(i + 2, area[i] - 1 - t, 1)
-                    m *= ((1.0/rr) * (t + 1))
+                    m *= (1.0 / rr) * (t + 1)
 
     conditioning = {}
     model_conds = conds["model_conds"]
     for c in model_conds:
-        conditioning[c] = model_conds[c].process_cond(batch_size=x_in.shape[0], device=x_in.device, area=area)
+        conditioning[c] = model_conds[c].process_cond(
+            batch_size=x_in.shape[0], device=x_in.device, area=area
+        )
 
-    control = conds.get('control', None)
+    control = conds.get("control", None)
 
     patches = None
-    if 'gligen' in conds:
-        gligen = conds['gligen']
+    if "gligen" in conds:
+        gligen = conds["gligen"]
         patches = {}
         gligen_type = gligen[0]
         gligen_model = gligen[1]
         if gligen_type == "position":
-            gligen_patch = gligen_model.model.set_position(input_x.shape, gligen[2], input_x.device)
+            gligen_patch = gligen_model.model.set_position(
+                input_x.shape, gligen[2], input_x.device
+            )
         else:
             gligen_patch = gligen_model.model.set_empty(input_x.shape, input_x.device)
 
-        patches['middle_patch'] = [gligen_patch]
+        patches["middle_patch"] = [gligen_patch]
 
-    cond_obj = collections.namedtuple('cond_obj', ['input_x', 'mult', 'conditioning', 'area', 'control', 'patches'])
+    cond_obj = collections.namedtuple(
+        "cond_obj", ["input_x", "mult", "conditioning", "area", "control", "patches"]
+    )
     return cond_obj(input_x, mult, conditioning, area, control, patches)
+
 
 def cond_equal_size(c1, c2):
     if c1 is c2:
@@ -2075,7 +2640,7 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
 
         free_memory = get_free_memory(x_in.device)
         for i in range(1, len(to_batch_temp) + 1):
-            batch_amount = to_batch_temp[:len(to_batch_temp)//i]
+            batch_amount = to_batch_temp[: len(to_batch_temp) // i]
             input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
             if model.memory_required(input_shape) * 1.5 < free_memory:
                 to_batch = batch_amount
@@ -2105,11 +2670,13 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
         timestep_ = torch.cat([timestep] * batch_chunks)
 
         if control is not None:
-            c['control'] = control.get_control(input_x, timestep_, c, len(cond_or_uncond))
+            c["control"] = control.get_control(
+                input_x, timestep_, c, len(cond_or_uncond)
+            )
 
         transformer_options = {}
-        if 'transformer_options' in model_options:
-            transformer_options = model_options['transformer_options'].copy()
+        if "transformer_options" in model_options:
+            transformer_options = model_options["transformer_options"].copy()
 
         if patches is not None:
             if "patches" in transformer_options:
@@ -2126,10 +2693,18 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
         transformer_options["cond_or_uncond"] = cond_or_uncond[:]
         transformer_options["sigmas"] = timestep
 
-        c['transformer_options'] = transformer_options
+        c["transformer_options"] = transformer_options
 
-        if 'model_function_wrapper' in model_options:
-            output = model_options['model_function_wrapper'](model.apply_model, {"input": input_x, "timestep": timestep_, "c": c, "cond_or_uncond": cond_or_uncond}).chunk(batch_chunks)
+        if "model_function_wrapper" in model_options:
+            output = model_options["model_function_wrapper"](
+                model.apply_model,
+                {
+                    "input": input_x,
+                    "timestep": timestep_,
+                    "c": c,
+                    "cond_or_uncond": cond_or_uncond,
+                },
+            ).chunk(batch_chunks)
         else:
             output = model.apply_model(input_x, timestep_, **c).chunk(batch_chunks)
 
@@ -2154,23 +2729,59 @@ def calc_cond_batch(model, conds, x_in, timestep, model_options):
 
     return out_conds
 
-def cfg_function(model, cond_pred, uncond_pred, cond_scale, x, timestep, model_options={}, cond=None, uncond=None):
+
+def cfg_function(
+    model,
+    cond_pred,
+    uncond_pred,
+    cond_scale,
+    x,
+    timestep,
+    model_options={},
+    cond=None,
+    uncond=None,
+):
     if "sampler_cfg_function" in model_options:
-        args = {"cond": x - cond_pred, "uncond": x - uncond_pred, "cond_scale": cond_scale, "timestep": timestep, "input": x, "sigma": timestep,
-                "cond_denoised": cond_pred, "uncond_denoised": uncond_pred, "model": model, "model_options": model_options}
+        args = {
+            "cond": x - cond_pred,
+            "uncond": x - uncond_pred,
+            "cond_scale": cond_scale,
+            "timestep": timestep,
+            "input": x,
+            "sigma": timestep,
+            "cond_denoised": cond_pred,
+            "uncond_denoised": uncond_pred,
+            "model": model,
+            "model_options": model_options,
+        }
         cfg_result = x - model_options["sampler_cfg_function"](args)
     else:
         cfg_result = uncond_pred + (cond_pred - uncond_pred) * cond_scale
 
     for fn in model_options.get("sampler_post_cfg_function", []):
-        args = {"denoised": cfg_result, "cond": cond, "uncond": uncond, "model": model, "uncond_denoised": uncond_pred, "cond_denoised": cond_pred,
-                "sigma": timestep, "model_options": model_options, "input": x}
+        args = {
+            "denoised": cfg_result,
+            "cond": cond,
+            "uncond": uncond,
+            "model": model,
+            "uncond_denoised": uncond_pred,
+            "cond_denoised": cond_pred,
+            "sigma": timestep,
+            "model_options": model_options,
+            "input": x,
+        }
         cfg_result = fn(args)
 
     return cfg_result
 
-def sampling_function(model, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None):
-    if math.isclose(cond_scale, 1.0) and model_options.get("disable_cfg1_optimization", False) == False:
+
+def sampling_function(
+    model, x, timestep, uncond, cond, cond_scale, model_options={}, seed=None
+):
+    if (
+        math.isclose(cond_scale, 1.0)
+        and model_options.get("disable_cfg1_optimization", False) == False
+    ):
         uncond_ = None
     else:
         uncond_ = uncond
@@ -2179,28 +2790,58 @@ def sampling_function(model, x, timestep, uncond, cond, cond_scale, model_option
     out = calc_cond_batch(model, conds, x, timestep, model_options)
 
     for fn in model_options.get("sampler_pre_cfg_function", []):
-        args = {"conds":conds, "conds_out": out, "cond_scale": cond_scale, "timestep": timestep,
-                "input": x, "sigma": timestep, "model": model, "model_options": model_options}
-        out  = fn(args)
+        args = {
+            "conds": conds,
+            "conds_out": out,
+            "cond_scale": cond_scale,
+            "timestep": timestep,
+            "input": x,
+            "sigma": timestep,
+            "model": model,
+            "model_options": model_options,
+        }
+        out = fn(args)
 
-    return cfg_function(model, out[0], out[1], cond_scale, x, timestep, model_options=model_options, cond=cond, uncond=uncond_)
+    return cfg_function(
+        model,
+        out[0],
+        out[1],
+        cond_scale,
+        x,
+        timestep,
+        model_options=model_options,
+        cond=cond,
+        uncond=uncond_,
+    )
 
 
 class KSamplerX0Inpaint:
     def __init__(self, model, sigmas):
         self.inner_model = model
         self.sigmas = sigmas
+
     def __call__(self, x, sigma, denoise_mask, model_options={}, seed=None):
         if denoise_mask is not None:
             if "denoise_mask_function" in model_options:
-                denoise_mask = model_options["denoise_mask_function"](sigma, denoise_mask, extra_options={"model": self.inner_model, "sigmas": self.sigmas})
-            latent_mask = 1. - denoise_mask
-            x = x * denoise_mask + self.inner_model.inner_model.model_sampling.noise_scaling(sigma.reshape([sigma.shape[0]] + [1] * (len(self.noise.shape) - 1)), self.noise, self.latent_image) * latent_mask
+                denoise_mask = model_options["denoise_mask_function"](
+                    sigma,
+                    denoise_mask,
+                    extra_options={"model": self.inner_model, "sigmas": self.sigmas},
+                )
+            latent_mask = 1.0 - denoise_mask
+            x = (
+                x * denoise_mask
+                + self.inner_model.inner_model.model_sampling.noise_scaling(
+                    sigma.reshape([sigma.shape[0]] + [1] * (len(self.noise.shape) - 1)),
+                    self.noise,
+                    self.latent_image,
+                )
+                * latent_mask
+            )
         out = self.inner_model(x, sigma, model_options=model_options, seed=seed)
         if denoise_mask is not None:
             out = out * denoise_mask + self.latent_image * latent_mask
         return out
-
 
 
 def simple_scheduler(model_sampling, steps):
@@ -2213,36 +2854,38 @@ def simple_scheduler(model_sampling, steps):
     return torch.FloatTensor(sigs)
 
 
-def create_cond_with_same_area_if_none(conds, c): #TODO: handle dim != 2
-    if 'area' not in c:
+def create_cond_with_same_area_if_none(conds, c):  # TODO: handle dim != 2
+    if "area" not in c:
         return
 
-    c_area = c['area']
+    c_area = c["area"]
     smallest = None
     for x in conds:
-        if 'area' in x:
-            a = x['area']
+        if "area" in x:
+            a = x["area"]
             if c_area[2] >= a[2] and c_area[3] >= a[3]:
                 if a[0] + a[2] >= c_area[0] + c_area[2]:
                     if a[1] + a[3] >= c_area[1] + c_area[3]:
                         if smallest is None:
                             smallest = x
-                        elif 'area' not in smallest:
+                        elif "area" not in smallest:
                             smallest = x
                         else:
-                            if smallest['area'][0] * smallest['area'][1] > a[0] * a[1]:
+                            if smallest["area"][0] * smallest["area"][1] > a[0] * a[1]:
                                 smallest = x
         else:
             if smallest is None:
                 smallest = x
     if smallest is None:
         return
-    if 'area' in smallest:
-        if smallest['area'] == c_area:
+    if "area" in smallest:
+        if smallest["area"] == c_area:
             return
 
     out = c.copy()
-    out['model_conds'] = smallest['model_conds'].copy() #TODO: which fields should be copied?
+    out["model_conds"] = smallest[
+        "model_conds"
+    ].copy()  # TODO: which fields should be copied?
     conds += [out]
 
 
@@ -2253,17 +2896,17 @@ def calculate_start_end_timesteps(model, conds):
 
         timestep_start = None
         timestep_end = None
-        if 'start_percent' in x:
-            timestep_start = s.percent_to_sigma(x['start_percent'])
-        if 'end_percent' in x:
-            timestep_end = s.percent_to_sigma(x['end_percent'])
+        if "start_percent" in x:
+            timestep_start = s.percent_to_sigma(x["start_percent"])
+        if "end_percent" in x:
+            timestep_end = s.percent_to_sigma(x["end_percent"])
 
         if (timestep_start is not None) or (timestep_end is not None):
             n = x.copy()
-            if (timestep_start is not None):
-                n['timestep_start'] = timestep_start
-            if (timestep_end is not None):
-                n['timestep_end'] = timestep_end
+            if timestep_start is not None:
+                n["timestep_start"] = timestep_start
+            if timestep_end is not None:
+                n["timestep_end"] = timestep_end
             conds[t] = n
 
 
@@ -2275,8 +2918,8 @@ def pre_run_control(model, conds):
         timestep_start = None
         timestep_end = None
         percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
-        if 'control' in x:
-            x['control'].pre_run(model, percent_to_timestep_function)
+        if "control" in x:
+            x["control"].pre_run(model, percent_to_timestep_function)
 
 
 def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
@@ -2286,14 +2929,14 @@ def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
     uncond_other = []
     for t in range(len(conds)):
         x = conds[t]
-        if 'area' not in x:
+        if "area" not in x:
             if name in x and x[name] is not None:
                 cond_cnets.append(x[name])
             else:
                 cond_other.append((x, t))
     for t in range(len(uncond)):
         x = uncond[t]
-        if 'area' not in x:
+        if "area" not in x:
             if name in x and x[name] is not None:
                 uncond_cnets.append(x[name])
             else:
@@ -2322,7 +2965,7 @@ def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwar
         params["device"] = device
         params["noise"] = noise
         default_width = None
-        if len(noise.shape) >= 4: #TODO: 8 multiple should be set by the model
+        if len(noise.shape) >= 4:  # TODO: 8 multiple should be set by the model
             default_width = noise.shape[3] * 8
         params["width"] = params.get("width", default_width)
         params["height"] = params.get("height", noise.shape[2] * 8)
@@ -2333,10 +2976,10 @@ def encode_model_conds(model_function, conds, noise, device, prompt_type, **kwar
 
         out = model_function(**params)
         x = x.copy()
-        model_conds = x['model_conds'].copy()
+        model_conds = x["model_conds"].copy()
         for k in out:
             model_conds[k] = out[k]
-        x['model_conds'] = model_conds
+        x["model_conds"] = model_conds
         conds[t] = x
     return conds
 
@@ -2361,25 +3004,53 @@ class KSAMPLER(Sampler):
         self.extra_options = extra_options
         self.inpaint_options = inpaint_options
 
-    def sample(self, model_wrap, sigmas, extra_args, callback, noise, latent_image=None, denoise_mask=None, disable_pbar=False):
+    def sample(
+        self,
+        model_wrap,
+        sigmas,
+        extra_args,
+        callback,
+        noise,
+        latent_image=None,
+        denoise_mask=None,
+        disable_pbar=False,
+    ):
         extra_args["denoise_mask"] = denoise_mask
         model_k = KSamplerX0Inpaint(model_wrap, sigmas)
         model_k.latent_image = latent_image
-        if self.inpaint_options.get("random", False): #TODO: Should this be the default?
+        if self.inpaint_options.get(
+            "random", False
+        ):  # TODO: Should this be the default?
             generator = torch.manual_seed(extra_args.get("seed", 41) + 1)
-            model_k.noise = torch.randn(noise.shape, generator=generator, device="cpu").to(noise.dtype).to(noise.device)
+            model_k.noise = (
+                torch.randn(noise.shape, generator=generator, device="cpu")
+                .to(noise.dtype)
+                .to(noise.device)
+            )
         else:
             model_k.noise = noise
 
-        noise = model_wrap.inner_model.model_sampling.noise_scaling(sigmas[0], noise, latent_image, self.max_denoise(model_wrap, sigmas))
+        noise = model_wrap.inner_model.model_sampling.noise_scaling(
+            sigmas[0], noise, latent_image, self.max_denoise(model_wrap, sigmas)
+        )
 
         k_callback = None
         total_steps = len(sigmas) - 1
         if callback is not None:
             k_callback = lambda x: callback(x["i"], x["denoised"], x["x"], total_steps)
 
-        samples = self.sampler_function(model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar, **self.extra_options)
-        samples = model_wrap.inner_model.model_sampling.inverse_noise_scaling(sigmas[-1], samples)
+        samples = self.sampler_function(
+            model_k,
+            noise,
+            sigmas,
+            extra_args=extra_args,
+            callback=k_callback,
+            disable=disable_pbar,
+            **self.extra_options,
+        )
+        samples = model_wrap.inner_model.model_sampling.inverse_noise_scaling(
+            sigmas[-1], samples
+        )
         return samples
 
 
@@ -2444,9 +3115,7 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
         sampler_function = euler_ancestral_function
     elif sampler_name == "euler":
 
-        def euler_function(
-            model, noise, sigmas, extra_args, callback, disable
-        ):
+        def euler_function(model, noise, sigmas, extra_args, callback, disable):
             return sample_euler(
                 model,
                 noise,
@@ -2462,7 +3131,9 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
     return KSAMPLER(sampler_function, extra_options, inpaint_options)
 
 
-def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=None, seed=None):
+def process_conds(
+    model, noise, conds, device, latent_image=None, denoise_mask=None, seed=None
+):
     for k in conds:
         conds[k] = conds[k][:]
         resolve_areas_and_cond_masks_multidim(conds[k], noise.shape[2:], device)
@@ -2470,11 +3141,20 @@ def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=N
     for k in conds:
         calculate_start_end_timesteps(model, conds[k])
 
-    if hasattr(model, 'extra_conds'):
+    if hasattr(model, "extra_conds"):
         for k in conds:
-            conds[k] = encode_model_conds(model.extra_conds, conds[k], noise, device, k, latent_image=latent_image, denoise_mask=denoise_mask, seed=seed)
+            conds[k] = encode_model_conds(
+                model.extra_conds,
+                conds[k],
+                noise,
+                device,
+                k,
+                latent_image=latent_image,
+                denoise_mask=denoise_mask,
+                seed=seed,
+            )
 
-    #make sure each cond area has an opposite one with the same area
+    # make sure each cond area has an opposite one with the same area
     for k in conds:
         for c in conds[k]:
             for kk in conds:
@@ -2488,8 +3168,20 @@ def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=N
         positive = conds["positive"]
         for k in conds:
             if k != "positive":
-                apply_empty_x_to_equal_area(list(filter(lambda c: c.get('control_apply_to_uncond', False) == True, positive)), conds[k], 'control', lambda cond_cnets, x: cond_cnets[x])
-                apply_empty_x_to_equal_area(positive, conds[k], 'gligen', lambda cond_cnets, x: cond_cnets[x])
+                apply_empty_x_to_equal_area(
+                    list(
+                        filter(
+                            lambda c: c.get("control_apply_to_uncond", False) == True,
+                            positive,
+                        )
+                    ),
+                    conds[k],
+                    "control",
+                    lambda cond_cnets, x: cond_cnets[x],
+                )
+                apply_empty_x_to_equal_area(
+                    positive, conds[k], "gligen", lambda cond_cnets, x: cond_cnets[x]
+                )
 
     return conds
 
@@ -2610,10 +3302,52 @@ class CFGGuider:
         return output
 
 
-def sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
-    sampler = KSampler1(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
+def sample(
+    model,
+    noise,
+    steps,
+    cfg,
+    sampler_name,
+    scheduler,
+    positive,
+    negative,
+    latent_image,
+    denoise=1.0,
+    disable_noise=False,
+    start_step=None,
+    last_step=None,
+    force_full_denoise=False,
+    noise_mask=None,
+    sigmas=None,
+    callback=None,
+    disable_pbar=False,
+    seed=None,
+):
+    sampler = KSampler1(
+        model,
+        steps=steps,
+        device=model.load_device,
+        sampler=sampler_name,
+        scheduler=scheduler,
+        denoise=denoise,
+        model_options=model.model_options,
+    )
 
-    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed)
+    samples = sampler.sample(
+        noise,
+        positive,
+        negative,
+        cfg=cfg,
+        latent_image=latent_image,
+        start_step=start_step,
+        last_step=last_step,
+        force_full_denoise=force_full_denoise,
+        denoise_mask=noise_mask,
+        sigmas=sigmas,
+        callback=callback,
+        disable_pbar=disable_pbar,
+        seed=seed,
+    )
     samples = samples.to(intermediate_device())
     return samples
 
@@ -2633,11 +3367,29 @@ def sampler_object(name):
     sampler = ksampler(name)
     return sampler
 
-def sample1(model, noise, positive, negative, cfg, device, sampler, sigmas, model_options={}, latent_image=None, denoise_mask=None, callback=None, disable_pbar=False, seed=None):
+
+def sample1(
+    model,
+    noise,
+    positive,
+    negative,
+    cfg,
+    device,
+    sampler,
+    sigmas,
+    model_options={},
+    latent_image=None,
+    denoise_mask=None,
+    callback=None,
+    disable_pbar=False,
+    seed=None,
+):
     cfg_guider = CFGGuider(model)
     cfg_guider.set_conds(positive, negative)
     cfg_guider.set_cfg(cfg)
-    return cfg_guider.sample(noise, latent_image, sampler, sigmas, denoise_mask, callback, disable_pbar, seed)
+    return cfg_guider.sample(
+        noise, latent_image, sampler, sigmas, denoise_mask, callback, disable_pbar, seed
+    )
 
 
 def prepare_noise(latent_image, seed, noise_inds=None):
@@ -2647,12 +3399,24 @@ def prepare_noise(latent_image, seed, noise_inds=None):
     """
     generator = torch.manual_seed(seed)
     if noise_inds is None:
-        return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
-    
+        return torch.randn(
+            latent_image.size(),
+            dtype=latent_image.dtype,
+            layout=latent_image.layout,
+            generator=generator,
+            device="cpu",
+        )
+
     unique_inds, inverse = np.unique(noise_inds, return_inverse=True)
     noises = []
-    for i in range(unique_inds[-1]+1):
-        noise = torch.randn([1] + list(latent_image.size())[1:], dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
+    for i in range(unique_inds[-1] + 1):
+        noise = torch.randn(
+            [1] + list(latent_image.size())[1:],
+            dtype=latent_image.dtype,
+            layout=latent_image.layout,
+            generator=generator,
+            device="cpu",
+        )
         if i in unique_inds:
             noises.append(noise)
     noises = [noises[i] for i in inverse]
@@ -2684,14 +3448,32 @@ class Upsample(nn.Module):
                  upsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=ops):
+    def __init__(
+        self,
+        channels,
+        use_conv,
+        dims=2,
+        out_channels=None,
+        padding=1,
+        dtype=None,
+        device=None,
+        operations=ops,
+    ):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
         self.use_conv = use_conv
         self.dims = dims
         if use_conv:
-            self.conv = operations.conv_nd(dims, self.channels, self.out_channels, 3, padding=padding, dtype=dtype, device=device)
+            self.conv = operations.conv_nd(
+                dims,
+                self.channels,
+                self.out_channels,
+                3,
+                padding=padding,
+                dtype=dtype,
+                device=device,
+            )
 
     def forward(self, x, output_shape=None):
         assert x.shape[1] == self.channels
@@ -2711,6 +3493,7 @@ class Upsample(nn.Module):
             x = self.conv(x)
         return x
 
+
 class Downsample(nn.Module):
     """
     A downsampling layer with an optional convolution.
@@ -2720,7 +3503,17 @@ class Downsample(nn.Module):
                  downsampling occurs in the inner-two dimensions.
     """
 
-    def __init__(self, channels, use_conv, dims=2, out_channels=None, padding=1, dtype=None, device=None, operations=ops):
+    def __init__(
+        self,
+        channels,
+        use_conv,
+        dims=2,
+        out_channels=None,
+        padding=1,
+        dtype=None,
+        device=None,
+        operations=ops,
+    ):
         super().__init__()
         self.channels = channels
         self.out_channels = out_channels or channels
@@ -2729,7 +3522,14 @@ class Downsample(nn.Module):
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = operations.conv_nd(
-                dims, self.channels, self.out_channels, 3, stride=stride, padding=padding, dtype=dtype, device=device
+                dims,
+                self.channels,
+                self.out_channels,
+                3,
+                stride=stride,
+                padding=padding,
+                dtype=dtype,
+                device=device,
             )
         else:
             assert self.channels == self.out_channels
@@ -3116,6 +3916,8 @@ def Normalize(in_channels, dtype=None, device=None):
         dtype=dtype,
         device=device,
     )
+
+
 BROKEN_XFORMERS = False
 try:
     x_vers = xformers.__version__
@@ -3124,7 +3926,10 @@ try:
 except:
     pass
 
-def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False):
+
+def attention_xformers(
+    q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False
+):
     if skip_reshape:
         b, _, _, dim_head = q.shape
     else:
@@ -3145,7 +3950,7 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
         return attention_pytorch(q, k, v, heads, mask, skip_reshape=skip_reshape)
 
     if skip_reshape:
-         q, k, v = map(
+        q, k, v = map(
             lambda t: t.reshape(b * heads, -1, dim_head),
             (q, k, v),
         )
@@ -3157,9 +3962,11 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
 
     if mask is not None:
         pad = 8 - q.shape[1] % 8
-        mask_out = torch.empty([q.shape[0], q.shape[1], q.shape[1] + pad], dtype=q.dtype, device=q.device)
-        mask_out[:, :, :mask.shape[-1]] = mask
-        mask = mask_out[:, :, :mask.shape[-1]]
+        mask_out = torch.empty(
+            [q.shape[0], q.shape[1], q.shape[1] + pad], dtype=q.dtype, device=q.device
+        )
+        mask_out[:, :, : mask.shape[-1]] = mask
+        mask = mask_out[:, :, : mask.shape[-1]]
 
     out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=mask)
 
@@ -3171,13 +3978,14 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
             .reshape(b, -1, heads * dim_head)
         )
     else:
-        out = (
-            out.reshape(b, -1, heads * dim_head)
-        )
+        out = out.reshape(b, -1, heads * dim_head)
 
     return out
 
-def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False):
+
+def attention_pytorch(
+    q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False
+):
     if skip_reshape:
         b, _, _, dim_head = q.shape
     else:
@@ -3188,10 +3996,10 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
             (q, k, v),
         )
 
-    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
-    out = (
-        out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    out = torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False
     )
+    out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
     return out
 
 
@@ -3207,7 +4015,6 @@ optimized_attention_masked = optimized_attention
 
 def optimized_attention_for_device(device, mask=False, small_input=False):
     return attention_pytorch
-
 
 
 import torch
@@ -3343,13 +4150,27 @@ class CLIPEncoder(torch.nn.Module):
 
 
 class CLIPEmbeddings(torch.nn.Module):
-    def __init__(self, embed_dim, vocab_size=49408, num_positions=77, dtype=None, device=None, operations=None):
+    def __init__(
+        self,
+        embed_dim,
+        vocab_size=49408,
+        num_positions=77,
+        dtype=None,
+        device=None,
+        operations=None,
+    ):
         super().__init__()
-        self.token_embedding = operations.Embedding(vocab_size, embed_dim, dtype=dtype, device=device)
-        self.position_embedding = operations.Embedding(num_positions, embed_dim, dtype=dtype, device=device)
+        self.token_embedding = operations.Embedding(
+            vocab_size, embed_dim, dtype=dtype, device=device
+        )
+        self.position_embedding = operations.Embedding(
+            num_positions, embed_dim, dtype=dtype, device=device
+        )
 
     def forward(self, input_tokens, dtype=torch.float32):
-        return self.token_embedding(input_tokens, out_dtype=dtype) + cast_to(self.position_embedding.weight, dtype=dtype, device=input_tokens.device)
+        return self.token_embedding(input_tokens, out_dtype=dtype) + cast_to(
+            self.position_embedding.weight, dtype=dtype, device=input_tokens.device
+        )
 
 
 class CLIPTextModel_(torch.nn.Module):
@@ -3363,18 +4184,53 @@ class CLIPTextModel_(torch.nn.Module):
         self.eos_token_id = config_dict["eos_token_id"]
 
         super().__init__()
-        self.embeddings = CLIPEmbeddings(embed_dim, num_positions=num_positions, dtype=dtype, device=device, operations=operations)
-        self.encoder = CLIPEncoder(num_layers, embed_dim, heads, intermediate_size, intermediate_activation, dtype, device, operations)
-        self.final_layer_norm = operations.LayerNorm(embed_dim, dtype=dtype, device=device)
+        self.embeddings = CLIPEmbeddings(
+            embed_dim,
+            num_positions=num_positions,
+            dtype=dtype,
+            device=device,
+            operations=operations,
+        )
+        self.encoder = CLIPEncoder(
+            num_layers,
+            embed_dim,
+            heads,
+            intermediate_size,
+            intermediate_activation,
+            dtype,
+            device,
+            operations,
+        )
+        self.final_layer_norm = operations.LayerNorm(
+            embed_dim, dtype=dtype, device=device
+        )
 
-    def forward(self, input_tokens, attention_mask=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=torch.float32):
+    def forward(
+        self,
+        input_tokens,
+        attention_mask=None,
+        intermediate_output=None,
+        final_layer_norm_intermediate=True,
+        dtype=torch.float32,
+    ):
         x = self.embeddings(input_tokens, dtype=dtype)
         mask = None
         if attention_mask is not None:
-            mask = 1.0 - attention_mask.to(x.dtype).reshape((attention_mask.shape[0], 1, -1, attention_mask.shape[-1])).expand(attention_mask.shape[0], 1, attention_mask.shape[-1], attention_mask.shape[-1])
+            mask = 1.0 - attention_mask.to(x.dtype).reshape(
+                (attention_mask.shape[0], 1, -1, attention_mask.shape[-1])
+            ).expand(
+                attention_mask.shape[0],
+                1,
+                attention_mask.shape[-1],
+                attention_mask.shape[-1],
+            )
             mask = mask.masked_fill(mask.to(torch.bool), float("-inf"))
 
-        causal_mask = torch.empty(x.shape[1], x.shape[1], dtype=x.dtype, device=x.device).fill_(float("-inf")).triu_(1)
+        causal_mask = (
+            torch.empty(x.shape[1], x.shape[1], dtype=x.dtype, device=x.device)
+            .fill_(float("-inf"))
+            .triu_(1)
+        )
         if mask is not None:
             mask += causal_mask
         else:
@@ -3385,8 +4241,17 @@ class CLIPTextModel_(torch.nn.Module):
         if i is not None and final_layer_norm_intermediate:
             i = self.final_layer_norm(i)
 
-        pooled_output = x[torch.arange(x.shape[0], device=x.device), (torch.round(input_tokens).to(dtype=torch.int, device=x.device) == self.eos_token_id).int().argmax(dim=-1),]
+        pooled_output = x[
+            torch.arange(x.shape[0], device=x.device),
+            (
+                torch.round(input_tokens).to(dtype=torch.int, device=x.device)
+                == self.eos_token_id
+            )
+            .int()
+            .argmax(dim=-1),
+        ]
         return x, i, pooled_output
+
 
 class CLIPTextModel(torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
@@ -3394,7 +4259,9 @@ class CLIPTextModel(torch.nn.Module):
         self.num_layers = config_dict["num_hidden_layers"]
         self.text_model = CLIPTextModel_(config_dict, dtype, device, operations)
         embed_dim = config_dict["hidden_size"]
-        self.text_projection = operations.Linear(embed_dim, embed_dim, bias=False, dtype=dtype, device=device)
+        self.text_projection = operations.Linear(
+            embed_dim, embed_dim, bias=False, dtype=dtype, device=device
+        )
         self.dtype = dtype
 
     def get_input_embeddings(self):
@@ -3409,14 +4276,11 @@ class CLIPTextModel(torch.nn.Module):
         return (x[0], x[1], out, x[2])
 
 
-from inspect import isfunction
-
 from torch import nn
 
 ops = manual_cast
 
 import json
-import traceback
 
 import torch
 from transformers import CLIPTokenizer
@@ -3447,7 +4311,7 @@ class ClipTokenWeightEncoder:
 
         output = []
         for k in range(0, sections):
-            z = out[k:k+1]
+            z = out[k : k + 1]
             if has_weights:
                 z_empty = out[-1]
                 for i in range(len(z)):
@@ -3457,7 +4321,7 @@ class ClipTokenWeightEncoder:
                             z[i][j] = (z[i][j] - z_empty[j]) * weight + z_empty[j]
             output.append(z)
 
-        if (len(output) == 0):
+        if len(output) == 0:
             r = (out[-1:].to(intermediate_device()), first_pooled)
         else:
             r = (torch.cat(output, dim=-2).to(intermediate_device()), first_pooled)
@@ -3467,30 +4331,54 @@ class ClipTokenWeightEncoder:
             for k in o[2]:
                 v = o[2][k]
                 if k == "attention_mask":
-                    v = v[:sections].flatten().unsqueeze(dim=0).to(intermediate_device())
+                    v = (
+                        v[:sections]
+                        .flatten()
+                        .unsqueeze(dim=0)
+                        .to(intermediate_device())
+                    )
                 extra[k] = v
 
             r = r + (extra,)
         return r
 
+
 def cast_to_input(weight, input, non_blocking=False, copy=True):
-    return cast_to(weight, input.dtype, input.device, non_blocking=non_blocking, copy=copy)
+    return cast_to(
+        weight, input.dtype, input.device, non_blocking=non_blocking, copy=copy
+    )
+
 
 class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
-    LAYERS = [
-        "last",
-        "pooled",
-        "hidden"
-    ]
-    def __init__(self, version="openai/clip-vit-large-patch14", device="cpu", max_length=77,
-                 freeze=True, layer="last", layer_idx=None, textmodel_json_config=None, dtype=None, model_class=CLIPTextModel,
-                 special_tokens={"start": 49406, "end": 49407, "pad": 49407}, layer_norm_hidden_state=True, enable_attention_masks=False, zero_out_masked=False,
-                 return_projected_pooled=True, return_attention_masks=False, model_options={}):  # clip-vit-base-patch32
+    LAYERS = ["last", "pooled", "hidden"]
+
+    def __init__(
+        self,
+        version="openai/clip-vit-large-patch14",
+        device="cpu",
+        max_length=77,
+        freeze=True,
+        layer="last",
+        layer_idx=None,
+        textmodel_json_config=None,
+        dtype=None,
+        model_class=CLIPTextModel,
+        special_tokens={"start": 49406, "end": 49407, "pad": 49407},
+        layer_norm_hidden_state=True,
+        enable_attention_masks=False,
+        zero_out_masked=False,
+        return_projected_pooled=True,
+        return_attention_masks=False,
+        model_options={},
+    ):  # clip-vit-base-patch32
         super().__init__()
         assert layer in self.LAYERS
 
         if textmodel_json_config is None:
-            textmodel_json_config = os.path.join(os.path.dirname(os.path.realpath(__file__)), ".\\_internal\\sd1_clip_config.json")
+            textmodel_json_config = os.path.join(
+                os.path.dirname(os.path.realpath(__file__)),
+                ".\\_internal\\sd1_clip_config.json",
+            )
 
         with open(textmodel_json_config) as f:
             config = json.load(f)
@@ -3522,17 +4410,23 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
             assert layer_idx is not None
             assert abs(layer_idx) < self.num_layers
             self.set_clip_options({"layer": layer_idx})
-        self.options_default = (self.layer, self.layer_idx, self.return_projected_pooled)
+        self.options_default = (
+            self.layer,
+            self.layer_idx,
+            self.return_projected_pooled,
+        )
 
     def freeze(self):
         self.transformer = self.transformer.eval()
-        #self.train = disabled_train
+        # self.train = disabled_train
         for param in self.parameters():
             param.requires_grad = False
 
     def set_clip_options(self, options):
         layer_idx = options.get("layer", self.layer_idx)
-        self.return_projected_pooled = options.get("projected_pooled", self.return_projected_pooled)
+        self.return_projected_pooled = options.get(
+            "projected_pooled", self.return_projected_pooled
+        )
         if layer_idx is None or abs(layer_idx) > self.num_layers:
             self.layer = "last"
         else:
@@ -3560,14 +4454,23 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                         tokens_temp += [next_new_token]
                         next_new_token += 1
                     else:
-                        logging.warning("WARNING: shape mismatch when trying to apply embedding, embedding will be ignored {} != {}".format(y.shape[0], current_embeds.weight.shape[1]))
+                        logging.warning(
+                            "WARNING: shape mismatch when trying to apply embedding, embedding will be ignored {} != {}".format(
+                                y.shape[0], current_embeds.weight.shape[1]
+                            )
+                        )
             while len(tokens_temp) < len(x):
                 tokens_temp += [self.special_tokens["pad"]]
             out_tokens += [tokens_temp]
 
         n = token_dict_size
         if len(embedding_weights) > 0:
-            new_embedding = self.operations.Embedding(next_new_token + 1, current_embeds.weight.shape[1], device=current_embeds.weight.device, dtype=current_embeds.weight.dtype)
+            new_embedding = self.operations.Embedding(
+                next_new_token + 1,
+                current_embeds.weight.shape[1],
+                device=current_embeds.weight.device,
+                dtype=current_embeds.weight.dtype,
+            )
             new_embedding.weight[:token_dict_size] = current_embeds.weight
             for x in embedding_weights:
                 new_embedding.weight[n] = x
@@ -3576,7 +4479,9 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
 
         processed_tokens = []
         for x in out_tokens:
-            processed_tokens += [list(map(lambda a: n if a == -1 else a, x))] #The EOS token should always be the largest one
+            processed_tokens += [
+                list(map(lambda a: n if a == -1 else a, x))
+            ]  # The EOS token should always be the largest one
 
         return processed_tokens
 
@@ -3587,7 +4492,11 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         tokens = torch.LongTensor(tokens).to(device)
 
         attention_mask = None
-        if self.enable_attention_masks or self.zero_out_masked or self.return_attention_masks:
+        if (
+            self.enable_attention_masks
+            or self.zero_out_masked
+            or self.return_attention_masks
+        ):
             attention_mask = torch.zeros_like(tokens)
             end_token = self.special_tokens.get("end", -1)
             for x in range(attention_mask.shape[0]):
@@ -3600,7 +4509,13 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         if self.enable_attention_masks:
             attention_mask_model = attention_mask
 
-        outputs = self.transformer(tokens, attention_mask_model, intermediate_output=self.layer_idx, final_layer_norm_intermediate=self.layer_norm_hidden_state, dtype=torch.float32)
+        outputs = self.transformer(
+            tokens,
+            attention_mask_model,
+            intermediate_output=self.layer_idx,
+            final_layer_norm_intermediate=self.layer_norm_hidden_state,
+            dtype=torch.float32,
+        )
         self.transformer.set_input_embeddings(backup_embeds)
 
         if self.layer == "last":
@@ -3613,7 +4528,11 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
 
         pooled_output = None
         if len(outputs) >= 3:
-            if not self.return_projected_pooled and len(outputs) >= 4 and outputs[3] is not None:
+            if (
+                not self.return_projected_pooled
+                and len(outputs) >= 4
+                and outputs[3] is not None
+            ):
                 pooled_output = outputs[3].float()
             elif outputs[2] is not None:
                 pooled_output = outputs[2].float()
@@ -3910,10 +4829,10 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
-        use_spatial_transformer=False,    # custom transformer support
-        transformer_depth=1,              # custom transformer support
-        context_dim=None,                 # custom transformer support
-        n_embed=None,                     # custom support for prediction of discrete ids into codebook of first stage vq model
+        use_spatial_transformer=False,  # custom transformer support
+        transformer_depth=1,  # custom transformer support
+        context_dim=None,  # custom transformer support
+        n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
         legacy=True,
         disable_self_attentions=None,
         num_attention_blocks=None,
@@ -3970,7 +4889,9 @@ def model_sampling(model_config, model_type):
 
 
 class BaseModel(torch.nn.Module):
-    def __init__(self, model_config, model_type=ModelType.EPS, device=None, unet_model=UNetModel):
+    def __init__(
+        self, model_config, model_type=ModelType.EPS, device=None, unet_model=UNetModel
+    ):
         super().__init__()
 
         unet_config = model_config.unet_config
@@ -3981,14 +4902,22 @@ class BaseModel(torch.nn.Module):
 
         if not unet_config.get("disable_unet_model_creation", False):
             if model_config.custom_operations is None:
-                operations = pick_operations(unet_config.get("dtype", None), self.manual_cast_dtype)
+                operations = pick_operations(
+                    unet_config.get("dtype", None), self.manual_cast_dtype
+                )
             else:
                 operations = model_config.custom_operations
-            self.diffusion_model = unet_model(**unet_config, device=device, operations=operations)
+            self.diffusion_model = unet_model(
+                **unet_config, device=device, operations=operations
+            )
             if force_channels_last():
                 self.diffusion_model.to(memory_format=torch.channels_last)
                 logging.debug("using channels last mode for diffusion model")
-            logging.info("model weight dtype {}, manual cast: {}".format(self.get_dtype(), self.manual_cast_dtype))
+            logging.info(
+                "model weight dtype {}, manual cast: {}".format(
+                    self.get_dtype(), self.manual_cast_dtype
+                )
+            )
         self.model_type = model_type
         self.model_sampling = model_sampling(model_config, model_type)
 
@@ -4001,7 +4930,16 @@ class BaseModel(torch.nn.Module):
         logging.debug("adm {}".format(self.adm_channels))
         self.memory_usage_factor = model_config.memory_usage_factor
 
-    def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
+    def apply_model(
+        self,
+        x,
+        t,
+        c_concat=None,
+        c_crossattn=None,
+        control=None,
+        transformer_options={},
+        **kwargs,
+    ):
         sigma = t
         xc = self.model_sampling.calculate_input(sigma, x)
         if c_concat is not None:
@@ -4024,7 +4962,14 @@ class BaseModel(torch.nn.Module):
                     extra = extra.to(dtype)
             extra_conds[o] = extra
 
-        model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds).float()
+        model_output = self.diffusion_model(
+            xc,
+            t,
+            context=context,
+            control=control,
+            transformer_options=transformer_options,
+            **extra_conds,
+        ).float()
         return self.model_sampling.calculate_denoised(sigma, model_output, x)
 
     def get_dtype(self):
@@ -4045,48 +4990,68 @@ class BaseModel(torch.nn.Module):
             device = kwargs["device"]
 
             if concat_latent_image.shape[1:] != noise.shape[1:]:
-                concat_latent_image = common_upscale(concat_latent_image, noise.shape[-1], noise.shape[-2], "bilinear", "center")
+                concat_latent_image = common_upscale(
+                    concat_latent_image,
+                    noise.shape[-1],
+                    noise.shape[-2],
+                    "bilinear",
+                    "center",
+                )
 
-            concat_latent_image = resize_to_batch_size(concat_latent_image, noise.shape[0])
+            concat_latent_image = resize_to_batch_size(
+                concat_latent_image, noise.shape[0]
+            )
 
             if denoise_mask is not None:
                 if len(denoise_mask.shape) == len(noise.shape):
-                    denoise_mask = denoise_mask[:,:1]
+                    denoise_mask = denoise_mask[:, :1]
 
-                denoise_mask = denoise_mask.reshape((-1, 1, denoise_mask.shape[-2], denoise_mask.shape[-1]))
+                denoise_mask = denoise_mask.reshape(
+                    (-1, 1, denoise_mask.shape[-2], denoise_mask.shape[-1])
+                )
                 if denoise_mask.shape[-2:] != noise.shape[-2:]:
-                    denoise_mask = common_upscale(denoise_mask, noise.shape[-1], noise.shape[-2], "bilinear", "center")
-                denoise_mask = resize_to_batch_size(denoise_mask.round(), noise.shape[0])
+                    denoise_mask = common_upscale(
+                        denoise_mask,
+                        noise.shape[-1],
+                        noise.shape[-2],
+                        "bilinear",
+                        "center",
+                    )
+                denoise_mask = resize_to_batch_size(
+                    denoise_mask.round(), noise.shape[0]
+                )
 
             for ck in self.concat_keys:
                 if denoise_mask is not None:
                     if ck == "mask":
                         cond_concat.append(denoise_mask.to(device))
                     elif ck == "masked_image":
-                        cond_concat.append(concat_latent_image.to(device)) #NOTE: the latent_image should be masked by the mask in pixel space
+                        cond_concat.append(
+                            concat_latent_image.to(device)
+                        )  # NOTE: the latent_image should be masked by the mask in pixel space
                 else:
                     if ck == "mask":
-                        cond_concat.append(torch.ones_like(noise)[:,:1])
+                        cond_concat.append(torch.ones_like(noise)[:, :1])
                     elif ck == "masked_image":
                         cond_concat.append(self.blank_inpaint_image_like(noise))
             data = torch.cat(cond_concat, dim=1)
-            out['c_concat'] = CONDNoiseShape(data)
+            out["c_concat"] = CONDNoiseShape(data)
 
         adm = self.encode_adm(**kwargs)
         if adm is not None:
-            out['y'] = CONDRegular(adm)
+            out["y"] = CONDRegular(adm)
 
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
-            out['c_crossattn'] = CONDCrossAttn(cross_attn)
+            out["c_crossattn"] = CONDCrossAttn(cross_attn)
 
         cross_attn_cnet = kwargs.get("cross_attn_controlnet", None)
         if cross_attn_cnet is not None:
-            out['crossattn_controlnet'] = CONDCrossAttn(cross_attn_cnet)
+            out["crossattn_controlnet"] = CONDCrossAttn(cross_attn_cnet)
 
         c_concat = kwargs.get("noise_concat", None)
         if c_concat is not None:
-            out['c_concat'] = CONDNoiseShape(c_concat)
+            out["c_concat"] = CONDNoiseShape(c_concat)
 
         return out
 
@@ -4095,7 +5060,7 @@ class BaseModel(torch.nn.Module):
         keys = list(sd.keys())
         for k in keys:
             if k.startswith(unet_prefix):
-                to_load[k[len(unet_prefix):]] = sd.pop(k)
+                to_load[k[len(unet_prefix) :]] = sd.pop(k)
 
         to_load = self.model_config.process_unet_state_dict(to_load)
         m, u = self.diffusion_model.load_state_dict(to_load, strict=False)
@@ -4115,11 +5080,13 @@ class BaseModel(torch.nn.Module):
             dtype = self.get_dtype()
             if self.manual_cast_dtype is not None:
                 dtype = self.manual_cast_dtype
-            #TODO: this needs to be tweaked
+            # TODO: this needs to be tweaked
             area = input_shape[0] * math.prod(input_shape[2:])
-            return (area * dtype_size(dtype) * 0.01 * self.memory_usage_factor) * (1024 * 1024)
+            return (area * dtype_size(dtype) * 0.01 * self.memory_usage_factor) * (
+                1024 * 1024
+            )
         else:
-            #TODO: this formula might be too aggressive since I tweaked the sub-quad and split algorithms to use less memory.
+            # TODO: this formula might be too aggressive since I tweaked the sub-quad and split algorithms to use less memory.
             area = input_shape[0] * math.prod(input_shape[2:])
             return (area * 0.15 * self.memory_usage_factor) * (1024 * 1024)
 
@@ -4177,7 +5144,6 @@ class BASE:
 
     def inpaint_model(self):
         return self.unet_config["in_channels"] > 4
-
 
 
 def count_blocks(state_dict_keys, prefix_string):
@@ -4514,6 +5480,7 @@ import os
 from enum import Enum
 
 import torch
+
 
 class CLIP:
     def __init__(
@@ -5031,7 +5998,6 @@ class VAEDecode:
         return (vae.decode(samples["samples"]),)
 
 
-
 class EmptyLatentImage:
     def __init__(self):
         self.device = intermediate_device()
@@ -5042,20 +6008,45 @@ class EmptyLatentImage:
         )
         return ({"samples": latent},)
 
-    
+
 def fix_empty_latent_channels(model, latent_image):
-    latent_channels = model.get_model_object("latent_format").latent_channels #Resize the empty latent image so it has the right number of channels
-    if latent_channels != latent_image.shape[1] and torch.count_nonzero(latent_image) == 0:
+    latent_channels = model.get_model_object(
+        "latent_format"
+    ).latent_channels  # Resize the empty latent image so it has the right number of channels
+    if (
+        latent_channels != latent_image.shape[1]
+        and torch.count_nonzero(latent_image) == 0
+    ):
         latent_image = repeat_to_batch_size(latent_image, latent_channels, dim=1)
     return latent_image
 
 
-def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False):
+def common_ksampler(
+    model,
+    seed,
+    steps,
+    cfg,
+    sampler_name,
+    scheduler,
+    positive,
+    negative,
+    latent,
+    denoise=1.0,
+    disable_noise=False,
+    start_step=None,
+    last_step=None,
+    force_full_denoise=False,
+):
     latent_image = latent["samples"]
     latent_image = fix_empty_latent_channels(model, latent_image)
 
     if disable_noise:
-        noise = torch.zeros(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
+        noise = torch.zeros(
+            latent_image.size(),
+            dtype=latent_image.dtype,
+            layout=latent_image.layout,
+            device="cpu",
+        )
     else:
         batch_inds = latent["batch_index"] if "batch_index" in latent else None
         noise = prepare_noise(latent_image, seed, batch_inds)
@@ -5063,12 +6054,27 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
     noise_mask = None
     if "noise_mask" in latent:
         noise_mask = latent["noise_mask"]
-    samples = sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image,
-                                  denoise=denoise, disable_noise=disable_noise, start_step=start_step, last_step=last_step,
-                                  force_full_denoise=force_full_denoise, noise_mask=noise_mask, seed=seed)
+    samples = sample(
+        model,
+        noise,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise=denoise,
+        disable_noise=disable_noise,
+        start_step=start_step,
+        last_step=last_step,
+        force_full_denoise=force_full_denoise,
+        noise_mask=noise_mask,
+        seed=seed,
+    )
     out = latent.copy()
     out["samples"] = samples
-    return (out, )
+    return (out,)
 
 
 class KSampler2:
@@ -5085,8 +6091,18 @@ class KSampler2:
         latent_image,
         denoise=1.0,
     ):
-        return common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
-
+        return common_ksampler(
+            model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_image,
+            denoise=denoise,
+        )
 
 
 class SaveImage:
@@ -5125,8 +6141,7 @@ class SaveImage:
 
         return {"ui": {"images": results}}
 
-import logging as logger
-    
+
 import numpy as np
 import torch.nn.functional as F
 from PIL import Image
@@ -5135,37 +6150,27 @@ if not hasattr(Image, "Resampling"):  # For older versions of Pillow
     Image.Resampling = Image
 
 
-from PIL import ImageFilter
-
 from enum import Enum
 
-from PIL import ImageDraw
 import math
 
 from PIL import Image
 
 
-from collections import namedtuple
 import math
 import os
 import re
 import numpy as np
 import torch
-from segment_anything import SamPredictor, sam_model_registry
 
 from PIL import Image
-import cv2
 import numpy as np
 import torch
 
 
-
-
 LANCZOS = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
 
-        
-import contextlib
-import functools
+
 import logging
 from dataclasses import dataclass
 
@@ -5259,22 +6264,6 @@ def load_parameters_from_file():
     return prompt, neg, width, height, cfg
 
 
-if glob.glob(".\\_internal\\embeddings\\*.pt") == None :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="EvilEngine/badhandv4", filename="badhandv4.pt")
-    hf_hub_download(repo_id="gsdf/EasyNegative", filename="EasyNegative.pt")
-if glob.glob(".\\_internal\\unet\\*.gguf") == None :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="city96/FLUX.1-dev-gguf", filename="flux1-dev-Q8_0.gguf")
-if glob.glob(".\\_internal\\clip\\*.gguf") == None :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="city96/t5-v1_1-xxl-encoder-gguf", filename="t5-v1_1-xxl-encoder-Q8_0.gguf")
-    hf_hub_download(repo_id="comfyanonymous/flux_text_encoders", filename="clip_l.safetensors")
-if glob.glob(".\\_internal\\vae\\*.safetensors") == None :
-    from huggingface_hub import hf_hub_download
-    hf_hub_download(repo_id="black-forest-labs/FLUX.1-schnell", filename="ae.safetensors")
-
-
 import pickle
 
 load = pickle.load
@@ -5364,12 +6353,13 @@ class UnetParams(TypedDict):
 UnetWrapperFunction = Callable[[UnetApplyFunction, UnetParams], torch.Tensor]
 
 
-
 class ModelPatcher:
-    def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False):
+    def __init__(
+        self, model, load_device, offload_device, size=0, weight_inplace_update=False
+    ):
         self.size = size
         self.model = model
-        if not hasattr(self.model, 'device'):
+        if not hasattr(self.model, "device"):
             logging.debug("Model doesn't have a device attribute.")
             self.model.device = offload_device
         elif self.model.device is None:
@@ -5379,20 +6369,20 @@ class ModelPatcher:
         self.backup = {}
         self.object_patches = {}
         self.object_patches_backup = {}
-        self.model_options = {"transformer_options":{}}
+        self.model_options = {"transformer_options": {}}
         self.model_size()
         self.load_device = load_device
         self.offload_device = offload_device
         self.weight_inplace_update = weight_inplace_update
         self.patches_uuid = uuid.uuid4()
 
-        if not hasattr(self.model, 'model_loaded_weight_memory'):
+        if not hasattr(self.model, "model_loaded_weight_memory"):
             self.model.model_loaded_weight_memory = 0
 
-        if not hasattr(self.model, 'lowvram_patch_counter'):
+        if not hasattr(self.model, "lowvram_patch_counter"):
             self.model.lowvram_patch_counter = 0
 
-        if not hasattr(self.model, 'model_lowvram'):
+        if not hasattr(self.model, "model_lowvram"):
             self.model.model_lowvram = False
 
     def model_size(self):
@@ -5408,7 +6398,7 @@ class ModelPatcher:
         return self.model.lowvram_patch_counter
 
     def is_clone(self, other):
-        if hasattr(other, 'model') and self.model is other.model:
+        if hasattr(other, "model") and self.model is other.model:
             return True
         return False
 
@@ -5421,7 +6411,9 @@ class ModelPatcher:
 
         if self.patches_uuid == clone.patches_uuid:
             if len(self.patches) != len(clone.patches):
-                logging.warning("WARNING: something went wrong, same patch uuid but different length of patches.")
+                logging.warning(
+                    "WARNING: something went wrong, same patch uuid but different length of patches."
+                )
             else:
                 return True
 
@@ -5471,20 +6463,33 @@ class ModelPatcher:
         inplace_update = self.weight_inplace_update or inplace_update
 
         if key not in self.backup:
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
+            self.backup[key] = collections.namedtuple(
+                "Dimension", ["weight", "inplace_update"]
+            )(
+                weight.to(device=self.offload_device, copy=inplace_update),
+                inplace_update,
+            )
 
         if device_to is not None:
             temp_weight = cast_to_device(weight, device_to, torch.float32, copy=True)
         else:
             temp_weight = weight.to(torch.float32, copy=True)
         out_weight = calculate_weight(self.patches[key], temp_weight, key)
-        out_weight = stochastic_rounding(out_weight, weight.dtype, seed=string_to_seed(key))
+        out_weight = stochastic_rounding(
+            out_weight, weight.dtype, seed=string_to_seed(key)
+        )
         if inplace_update:
             copy_to_param(self.model, key, out_weight)
         else:
             set_attr_param(self.model, key, out_weight)
 
-    def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
+    def load(
+        self,
+        device_to=None,
+        lowvram_model_memory=0,
+        force_patch_weights=False,
+        full_load=False,
+    ):
         mem_counter = 0
         patch_counter = 0
         lowvram_counter = 0
@@ -5506,7 +6511,7 @@ class ModelPatcher:
                 if mem_counter + module_mem >= lowvram_model_memory:
                     lowvram_weight = True
                     lowvram_counter += 1
-                    if hasattr(m, "prev_comfy_cast_weights"): #Already lowvramed
+                    if hasattr(m, "prev_comfy_cast_weights"):  # Already lowvramed
                         continue
 
             weight_key = "{}.weight".format(n)
@@ -5556,10 +6561,22 @@ class ModelPatcher:
             x[2].to(device_to)
 
         if lowvram_counter > 0:
-            logging.info("loaded partially {} {} {}".format(lowvram_model_memory / (1024 * 1024), mem_counter / (1024 * 1024), patch_counter))
+            logging.info(
+                "loaded partially {} {} {}".format(
+                    lowvram_model_memory / (1024 * 1024),
+                    mem_counter / (1024 * 1024),
+                    patch_counter,
+                )
+            )
             self.model.model_lowvram = True
         else:
-            logging.info("loaded completely {} {} {}".format(lowvram_model_memory / (1024 * 1024), mem_counter / (1024 * 1024), full_load))
+            logging.info(
+                "loaded completely {} {} {}".format(
+                    lowvram_model_memory / (1024 * 1024),
+                    mem_counter / (1024 * 1024),
+                    full_load,
+                )
+            )
             self.model.model_lowvram = False
             if full_load:
                 self.model.to(device_to)
@@ -5569,7 +6586,13 @@ class ModelPatcher:
         self.model.device = device_to
         self.model.model_loaded_weight_memory = mem_counter
 
-    def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):
+    def patch_model(
+        self,
+        device_to=None,
+        lowvram_model_memory=0,
+        load_weights=True,
+        force_patch_weights=False,
+    ):
         for k in self.object_patches:
             old = set_attr(self.model, k, self.object_patches[k])
             if k not in self.object_patches_backup:
@@ -5581,7 +6604,12 @@ class ModelPatcher:
             full_load = False
 
         if load_weights:
-            self.load(device_to, lowvram_model_memory=lowvram_model_memory, force_patch_weights=force_patch_weights, full_load=full_load)
+            self.load(
+                device_to,
+                lowvram_model_memory=lowvram_model_memory,
+                force_patch_weights=force_patch_weights,
+                full_load=full_load,
+            )
         return self.model
 
     def unpatch_model(self, device_to=None, unpatch_weights=True):
@@ -5678,22 +6706,29 @@ class ModelPatcher:
         if self.model.model_loaded_weight_memory + extra_memory > self.model_size():
             full_load = True
         current_used = self.model.model_loaded_weight_memory
-        self.load(device_to, lowvram_model_memory=current_used + extra_memory, full_load=full_load)
+        self.load(
+            device_to,
+            lowvram_model_memory=current_used + extra_memory,
+            full_load=full_load,
+        )
         return self.model.model_loaded_weight_memory - current_used
 
     def current_loaded_device(self):
         return self.model.device
 
     def calculate_weight(self, patches, weight, key, intermediate_dtype=torch.float32):
-        print("WARNING the ModelPatcher.calculate_weight function is deprecated, please use: comfy.lora.calculate_weight instead")
-        return calculate_weight(patches, weight, key, intermediate_dtype=intermediate_dtype)
+        print(
+            "WARNING the ModelPatcher.calculate_weight function is deprecated, please use: comfy.lora.calculate_weight instead"
+        )
+        return calculate_weight(
+            patches, weight, key, intermediate_dtype=intermediate_dtype
+        )
 
 
 # import pytorch_lightning as pl
 from typing import Dict, Tuple
 
 import torch
-
 
 
 class DiagonalGaussianRegularizer(torch.nn.Module):
@@ -5832,7 +6867,7 @@ class AutoencodingEngine(AbstractAutoencoder):
         dec = self.decode(z, **additional_decode_kwargs)
         return z, dec, reg_log
 
-    
+
 def unet_prefix_from_state_dict(state_dict):
     candidates = [
         "model.diffusion_model.",  # ldm/sgm models
@@ -5868,6 +6903,7 @@ def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
             w = state_dict.pop(x[0])
             out[x[1]] = w
     return out
+
 
 class SD3(LatentFormat):
     latent_channels = 16
@@ -5934,6 +6970,7 @@ class Flux1(SD3):
     def process_out(self, latent):
         return (latent / self.scale_factor) + self.shift_factor
 
+
 class CONST:
     def calculate_input(self, sigma, noise):
         return noise
@@ -5952,6 +6989,7 @@ class CONST:
 def flux_time_shift(mu: float, sigma: float, t):
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
+
 class ModelSamplingFlux(torch.nn.Module):
     def __init__(self, model_config=None):
         super().__init__()
@@ -5965,7 +7003,7 @@ class ModelSamplingFlux(torch.nn.Module):
     def set_parameters(self, shift=1.15, timesteps=10000):
         self.shift = shift
         ts = self.sigma((torch.arange(1, timesteps + 1, 1) / timesteps))
-        self.register_buffer('sigmas', ts)
+        self.register_buffer("sigmas", ts)
 
     @property
     def sigma_max(self):
@@ -5987,6 +7025,7 @@ from einops import rearrange
 
 ops = disable_weight_init
 
+
 class TimestepBlock(nn.Module):
     """
     Any module where forward() takes timestep embeddings as a second argument.
@@ -5998,7 +7037,8 @@ class TimestepBlock(nn.Module):
         Apply the module to `x` given `emb` timestep embeddings.
         """
 
-#Original code can be found on: https://github.com/black-forest-labs/flux
+
+# Original code can be found on: https://github.com/black-forest-labs/flux
 
 from dataclasses import dataclass
 import math
@@ -6007,6 +7047,7 @@ import torch
 from torch import Tensor, nn
 
 from einops import rearrange, repeat
+
 
 def attention(q: Tensor, k: Tensor, v: Tensor, pe: Tensor) -> Tensor:
     q, k = apply_rope(q, k, pe)
@@ -6023,10 +7064,16 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     else:
         device = pos.device
 
-    scale = torch.linspace(0, (dim - 2) / dim, steps=dim//2, dtype=torch.float64, device=device)
+    scale = torch.linspace(
+        0, (dim - 2) / dim, steps=dim // 2, dtype=torch.float64, device=device
+    )
     omega = 1.0 / (theta**scale)
-    out = torch.einsum("...n,d->...nd", pos.to(dtype=torch.float32, device=device), omega)
-    out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
+    out = torch.einsum(
+        "...n,d->...nd", pos.to(dtype=torch.float32, device=device), omega
+    )
+    out = torch.stack(
+        [torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1
+    )
     out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
     return out.to(dtype=torch.float32, device=pos.device)
 
@@ -6037,6 +7084,7 @@ def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor):
     xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
     xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
     return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
+
 
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim: list):
@@ -6066,7 +7114,11 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
     """
     t = time_factor * t
     half = dim // 2
-    freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device) / half)
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device)
+        / half
+    )
 
     args = t[:, None].float() * freqs[None]
     embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -6076,12 +7128,19 @@ def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 10
         embedding = embedding.to(t)
     return embedding
 
+
 class MLPEmbedder(nn.Module):
-    def __init__(self, in_dim: int, hidden_dim: int, dtype=None, device=None, operations=None):
+    def __init__(
+        self, in_dim: int, hidden_dim: int, dtype=None, device=None, operations=None
+    ):
         super().__init__()
-        self.in_layer = operations.Linear(in_dim, hidden_dim, bias=True, dtype=dtype, device=device)
+        self.in_layer = operations.Linear(
+            in_dim, hidden_dim, bias=True, dtype=dtype, device=device
+        )
         self.silu = nn.SiLU()
-        self.out_layer = operations.Linear(hidden_dim, hidden_dim, bias=True, dtype=dtype, device=device)
+        self.out_layer = operations.Linear(
+            hidden_dim, hidden_dim, bias=True, dtype=dtype, device=device
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
@@ -6099,7 +7158,9 @@ class RMSNorm(torch.nn.Module):
 class QKNorm(torch.nn.Module):
     def __init__(self, dim: int, dtype=None, device=None, operations=None):
         super().__init__()
-        self.query_norm = RMSNorm(dim, dtype=dtype, device=device, operations=operations)
+        self.query_norm = RMSNorm(
+            dim, dtype=dtype, device=device, operations=operations
+        )
         self.key_norm = RMSNorm(dim, dtype=dtype, device=device, operations=operations)
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple:
@@ -6109,12 +7170,22 @@ class QKNorm(torch.nn.Module):
 
 
 class SelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = False, dtype=None, device=None, operations=None):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        dtype=None,
+        device=None,
+        operations=None,
+    ):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
 
-        self.qkv = operations.Linear(dim, dim * 3, bias=qkv_bias, dtype=dtype, device=device)
+        self.qkv = operations.Linear(
+            dim, dim * 3, bias=qkv_bias, dtype=dtype, device=device
+        )
         self.norm = QKNorm(head_dim, dtype=dtype, device=device, operations=operations)
         self.proj = operations.Linear(dim, dim, dtype=dtype, device=device)
 
@@ -6127,14 +7198,20 @@ class ModulationOut:
 
 
 class Modulation(nn.Module):
-    def __init__(self, dim: int, double: bool, dtype=None, device=None, operations=None):
+    def __init__(
+        self, dim: int, double: bool, dtype=None, device=None, operations=None
+    ):
         super().__init__()
         self.is_double = double
         self.multiplier = 6 if double else 3
-        self.lin = operations.Linear(dim, self.multiplier * dim, bias=True, dtype=dtype, device=device)
+        self.lin = operations.Linear(
+            dim, self.multiplier * dim, bias=True, dtype=dtype, device=device
+        )
 
     def forward(self, vec: Tensor) -> tuple:
-        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(self.multiplier, dim=-1)
+        out = self.lin(nn.functional.silu(vec))[:, None, :].chunk(
+            self.multiplier, dim=-1
+        )
 
         return (
             ModulationOut(*out[:3]),
@@ -6143,32 +7220,75 @@ class Modulation(nn.Module):
 
 
 class DoubleStreamBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, dtype=None, device=None, operations=None):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float,
+        qkv_bias: bool = False,
+        dtype=None,
+        device=None,
+        operations=None,
+    ):
         super().__init__()
 
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.num_heads = num_heads
         self.hidden_size = hidden_size
-        self.img_mod = Modulation(hidden_size, double=True, dtype=dtype, device=device, operations=operations)
-        self.img_norm1 = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device)
-        self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, dtype=dtype, device=device, operations=operations)
-
-        self.img_norm2 = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device)
-        self.img_mlp = nn.Sequential(
-            operations.Linear(hidden_size, mlp_hidden_dim, bias=True, dtype=dtype, device=device),
-            nn.GELU(approximate="tanh"),
-            operations.Linear(mlp_hidden_dim, hidden_size, bias=True, dtype=dtype, device=device),
+        self.img_mod = Modulation(
+            hidden_size, double=True, dtype=dtype, device=device, operations=operations
+        )
+        self.img_norm1 = operations.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device
+        )
+        self.img_attn = SelfAttention(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            dtype=dtype,
+            device=device,
+            operations=operations,
         )
 
-        self.txt_mod = Modulation(hidden_size, double=True, dtype=dtype, device=device, operations=operations)
-        self.txt_norm1 = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device)
-        self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, dtype=dtype, device=device, operations=operations)
-
-        self.txt_norm2 = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device)
-        self.txt_mlp = nn.Sequential(
-            operations.Linear(hidden_size, mlp_hidden_dim, bias=True, dtype=dtype, device=device),
+        self.img_norm2 = operations.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device
+        )
+        self.img_mlp = nn.Sequential(
+            operations.Linear(
+                hidden_size, mlp_hidden_dim, bias=True, dtype=dtype, device=device
+            ),
             nn.GELU(approximate="tanh"),
-            operations.Linear(mlp_hidden_dim, hidden_size, bias=True, dtype=dtype, device=device),
+            operations.Linear(
+                mlp_hidden_dim, hidden_size, bias=True, dtype=dtype, device=device
+            ),
+        )
+
+        self.txt_mod = Modulation(
+            hidden_size, double=True, dtype=dtype, device=device, operations=operations
+        )
+        self.txt_norm1 = operations.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device
+        )
+        self.txt_attn = SelfAttention(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            dtype=dtype,
+            device=device,
+            operations=operations,
+        )
+
+        self.txt_norm2 = operations.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device
+        )
+        self.txt_mlp = nn.Sequential(
+            operations.Linear(
+                hidden_size, mlp_hidden_dim, bias=True, dtype=dtype, device=device
+            ),
+            nn.GELU(approximate="tanh"),
+            operations.Linear(
+                mlp_hidden_dim, hidden_size, bias=True, dtype=dtype, device=device
+            ),
         )
 
     def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor):
@@ -6179,30 +7299,41 @@ class DoubleStreamBlock(nn.Module):
         img_modulated = self.img_norm1(img)
         img_modulated = (1 + img_mod1.scale) * img_modulated + img_mod1.shift
         img_qkv = self.img_attn.qkv(img_modulated)
-        img_q, img_k, img_v = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        img_q, img_k, img_v = img_qkv.view(
+            img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1
+        ).permute(2, 0, 3, 1, 4)
         img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
 
         # prepare txt for attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1.scale) * txt_modulated + txt_mod1.shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
-        txt_q, txt_k, txt_v = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        txt_q, txt_k, txt_v = txt_qkv.view(
+            txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1
+        ).permute(2, 0, 3, 1, 4)
         txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
 
         # run actual attention
-        attn = attention(torch.cat((txt_q, img_q), dim=2),
-                         torch.cat((txt_k, img_k), dim=2),
-                         torch.cat((txt_v, img_v), dim=2), pe=pe)
+        attn = attention(
+            torch.cat((txt_q, img_q), dim=2),
+            torch.cat((txt_k, img_k), dim=2),
+            torch.cat((txt_v, img_v), dim=2),
+            pe=pe,
+        )
 
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img bloks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)
-        img = img + img_mod2.gate * self.img_mlp((1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift)
+        img = img + img_mod2.gate * self.img_mlp(
+            (1 + img_mod2.scale) * self.img_norm2(img) + img_mod2.shift
+        )
 
         # calculate the txt bloks
         txt += txt_mod1.gate * self.txt_attn.proj(txt_attn)
-        txt += txt_mod2.gate * self.txt_mlp((1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift)
+        txt += txt_mod2.gate * self.txt_mlp(
+            (1 + txt_mod2.scale) * self.txt_norm2(txt) + txt_mod2.shift
+        )
 
         if txt.dtype == torch.float16:
             txt = torch.nan_to_num(txt, nan=0.0, posinf=65504, neginf=-65504)
@@ -6224,7 +7355,7 @@ class SingleStreamBlock(nn.Module):
         qk_scale: float = None,
         dtype=None,
         device=None,
-        operations=None
+        operations=None,
     ):
         super().__init__()
         self.hidden_dim = hidden_size
@@ -6234,24 +7365,39 @@ class SingleStreamBlock(nn.Module):
 
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         # qkv and mlp_in
-        self.linear1 = operations.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim, dtype=dtype, device=device)
+        self.linear1 = operations.Linear(
+            hidden_size,
+            hidden_size * 3 + self.mlp_hidden_dim,
+            dtype=dtype,
+            device=device,
+        )
         # proj and mlp_out
-        self.linear2 = operations.Linear(hidden_size + self.mlp_hidden_dim, hidden_size, dtype=dtype, device=device)
+        self.linear2 = operations.Linear(
+            hidden_size + self.mlp_hidden_dim, hidden_size, dtype=dtype, device=device
+        )
 
         self.norm = QKNorm(head_dim, dtype=dtype, device=device, operations=operations)
 
         self.hidden_size = hidden_size
-        self.pre_norm = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device)
+        self.pre_norm = operations.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device
+        )
 
         self.mlp_act = nn.GELU(approximate="tanh")
-        self.modulation = Modulation(hidden_size, double=False, dtype=dtype, device=device, operations=operations)
+        self.modulation = Modulation(
+            hidden_size, double=False, dtype=dtype, device=device, operations=operations
+        )
 
     def forward(self, x: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
         mod, _ = self.modulation(vec)
         x_mod = (1 + mod.scale) * self.pre_norm(x) + mod.shift
-        qkv, mlp = torch.split(self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1)
+        qkv, mlp = torch.split(
+            self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim], dim=-1
+        )
 
-        q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(
+            2, 0, 3, 1, 4
+        )
         q, k = self.norm(q, k, v)
 
         # compute attention
@@ -6265,11 +7411,32 @@ class SingleStreamBlock(nn.Module):
 
 
 class LastLayer(nn.Module):
-    def __init__(self, hidden_size: int, patch_size: int, out_channels: int, dtype=None, device=None, operations=None):
+    def __init__(
+        self,
+        hidden_size: int,
+        patch_size: int,
+        out_channels: int,
+        dtype=None,
+        device=None,
+        operations=None,
+    ):
         super().__init__()
-        self.norm_final = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device)
-        self.linear = operations.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True, dtype=dtype, device=device)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), operations.Linear(hidden_size, 2 * hidden_size, bias=True, dtype=dtype, device=device))
+        self.norm_final = operations.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6, dtype=dtype, device=device
+        )
+        self.linear = operations.Linear(
+            hidden_size,
+            patch_size * patch_size * out_channels,
+            bias=True,
+            dtype=dtype,
+            device=device,
+        )
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            operations.Linear(
+                hidden_size, 2 * hidden_size, bias=True, dtype=dtype, device=device
+            ),
+        )
 
     def forward(self, x: Tensor, vec: Tensor) -> Tensor:
         shift, scale = self.adaLN_modulation(vec).chunk(2, dim=1)
@@ -6277,21 +7444,35 @@ class LastLayer(nn.Module):
         x = self.linear(x)
         return x
 
+
 def pad_to_patch_size(img, patch_size=(2, 2), padding_mode="circular"):
-    if padding_mode == "circular" and torch.jit.is_tracing() or torch.jit.is_scripting():
+    if (
+        padding_mode == "circular"
+        and torch.jit.is_tracing()
+        or torch.jit.is_scripting()
+    ):
         padding_mode = "reflect"
     pad_h = (patch_size[0] - img.shape[-2] % patch_size[0]) % patch_size[0]
     pad_w = (patch_size[1] - img.shape[-1] % patch_size[1]) % patch_size[1]
     return torch.nn.functional.pad(img, (0, pad_w, 0, pad_h), mode=padding_mode)
+
 
 try:
     rms_norm_torch = torch.nn.functional.rms_norm
 except:
     rms_norm_torch = None
 
+
 def rms_norm(x, weight, eps=1e-6):
-    if rms_norm_torch is not None and not (torch.jit.is_tracing() or torch.jit.is_scripting()):
-        return rms_norm_torch(x, weight.shape, weight=cast_to(weight, dtype=x.dtype, device=x.device), eps=eps)
+    if rms_norm_torch is not None and not (
+        torch.jit.is_tracing() or torch.jit.is_scripting()
+    ):
+        return rms_norm_torch(
+            x,
+            weight.shape,
+            weight=cast_to(weight, dtype=x.dtype, device=x.device),
+            eps=eps,
+        )
     else:
         rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + eps)
         return (x * rrms) * cast_to(weight, dtype=x.dtype, device=x.device)
@@ -6318,7 +7499,15 @@ class Flux3(nn.Module):
     Transformer model for flow matching on sequences.
     """
 
-    def __init__(self, image_model=None, final_layer=True, dtype=None, device=None, operations=None, **kwargs):
+    def __init__(
+        self,
+        image_model=None,
+        final_layer=True,
+        dtype=None,
+        device=None,
+        operations=None,
+        **kwargs,
+    ):
         super().__init__()
         self.dtype = dtype
         params = FluxParams(**kwargs)
@@ -6331,17 +7520,45 @@ class Flux3(nn.Module):
             )
         pe_dim = params.hidden_size // params.num_heads
         if sum(params.axes_dim) != pe_dim:
-            raise ValueError(f"Got {params.axes_dim} but expected positional dim {pe_dim}")
+            raise ValueError(
+                f"Got {params.axes_dim} but expected positional dim {pe_dim}"
+            )
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
-        self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
-        self.img_in = operations.Linear(self.in_channels, self.hidden_size, bias=True, dtype=dtype, device=device)
-        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, dtype=dtype, device=device, operations=operations)
-        self.vector_in = MLPEmbedder(params.vec_in_dim, self.hidden_size, dtype=dtype, device=device, operations=operations)
-        self.guidance_in = (
-            MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, dtype=dtype, device=device, operations=operations) if params.guidance_embed else nn.Identity()
+        self.pe_embedder = EmbedND(
+            dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim
         )
-        self.txt_in = operations.Linear(params.context_in_dim, self.hidden_size, dtype=dtype, device=device)
+        self.img_in = operations.Linear(
+            self.in_channels, self.hidden_size, bias=True, dtype=dtype, device=device
+        )
+        self.time_in = MLPEmbedder(
+            in_dim=256,
+            hidden_dim=self.hidden_size,
+            dtype=dtype,
+            device=device,
+            operations=operations,
+        )
+        self.vector_in = MLPEmbedder(
+            params.vec_in_dim,
+            self.hidden_size,
+            dtype=dtype,
+            device=device,
+            operations=operations,
+        )
+        self.guidance_in = (
+            MLPEmbedder(
+                in_dim=256,
+                hidden_dim=self.hidden_size,
+                dtype=dtype,
+                device=device,
+                operations=operations,
+            )
+            if params.guidance_embed
+            else nn.Identity()
+        )
+        self.txt_in = operations.Linear(
+            params.context_in_dim, self.hidden_size, dtype=dtype, device=device
+        )
 
         self.double_blocks = nn.ModuleList(
             [
@@ -6350,7 +7567,9 @@ class Flux3(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
-                    dtype=dtype, device=device, operations=operations
+                    dtype=dtype,
+                    device=device,
+                    operations=operations,
                 )
                 for _ in range(params.depth)
             ]
@@ -6358,13 +7577,27 @@ class Flux3(nn.Module):
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio, dtype=dtype, device=device, operations=operations)
+                SingleStreamBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    dtype=dtype,
+                    device=device,
+                    operations=operations,
+                )
                 for _ in range(params.depth_single_blocks)
             ]
         )
 
         if final_layer:
-            self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels, dtype=dtype, device=device, operations=operations)
+            self.final_layer = LastLayer(
+                self.hidden_size,
+                1,
+                self.out_channels,
+                dtype=dtype,
+                device=device,
+                operations=operations,
+            )
 
     def forward_orig(
         self,
@@ -6385,8 +7618,12 @@ class Flux3(nn.Module):
         vec = self.time_in(timestep_embedding(timesteps, 256).to(img.dtype))
         if self.params.guidance_embed:
             if guidance is None:
-                raise ValueError("Didn't get guidance strength for guidance distilled model.")
-            vec = vec + self.guidance_in(timestep_embedding(guidance, 256).to(img.dtype))
+                raise ValueError(
+                    "Didn't get guidance strength for guidance distilled model."
+                )
+            vec = vec + self.guidance_in(
+                timestep_embedding(guidance, 256).to(img.dtype)
+            )
 
         vec = vec + self.vector_in(y)
         txt = self.txt_in(txt)
@@ -6397,7 +7634,7 @@ class Flux3(nn.Module):
         for i, block in enumerate(self.double_blocks):
             img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-            if control is not None: # Controlnet
+            if control is not None:  # Controlnet
                 control_i = control.get("input")
                 if i < len(control_i):
                     add = control_i[i]
@@ -6409,7 +7646,7 @@ class Flux3(nn.Module):
         for i, block in enumerate(self.single_blocks):
             img = block(img, vec=vec, pe=pe)
 
-            if control is not None: # Controlnet
+            if control is not None:  # Controlnet
                 control_o = control.get("output")
                 if i < len(control_o):
                     add = control_o[i]
@@ -6426,18 +7663,34 @@ class Flux3(nn.Module):
         patch_size = 2
         x = pad_to_patch_size(x, (patch_size, patch_size))
 
-        img = rearrange(x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size)
+        img = rearrange(
+            x, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch_size, pw=patch_size
+        )
 
-        h_len = ((h + (patch_size // 2)) // patch_size)
-        w_len = ((w + (patch_size // 2)) // patch_size)
+        h_len = (h + (patch_size // 2)) // patch_size
+        w_len = (w + (patch_size // 2)) // patch_size
         img_ids = torch.zeros((h_len, w_len, 3), device=x.device, dtype=x.dtype)
-        img_ids[..., 1] = img_ids[..., 1] + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype)[:, None]
-        img_ids[..., 2] = img_ids[..., 2] + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype)[None, :]
+        img_ids[..., 1] = (
+            img_ids[..., 1]
+            + torch.linspace(0, h_len - 1, steps=h_len, device=x.device, dtype=x.dtype)[
+                :, None
+            ]
+        )
+        img_ids[..., 2] = (
+            img_ids[..., 2]
+            + torch.linspace(0, w_len - 1, steps=w_len, device=x.device, dtype=x.dtype)[
+                None, :
+            ]
+        )
         img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
         txt_ids = torch.zeros((bs, context.shape[1], 3), device=x.device, dtype=x.dtype)
-        out = self.forward_orig(img, img_ids, context, txt_ids, timestep, y, guidance, control)
-        return rearrange(out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=2, pw=2)[:,:,:h,:w]
+        out = self.forward_orig(
+            img, img_ids, context, txt_ids, timestep, y, guidance, control
+        )
+        return rearrange(
+            out, "b (h w) (c ph pw) -> b c (h ph) (w pw)", h=h_len, w=w_len, ph=2, pw=2
+        )[:, :, :h, :w]
 
 
 class Flux2(BaseModel):
@@ -6451,8 +7704,8 @@ class Flux2(BaseModel):
         out = super().extra_conds(**kwargs)
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
-            out['c_crossattn'] = CONDRegular(cross_attn)
-        out['guidance'] = CONDRegular(torch.FloatTensor([kwargs.get("guidance", 3.5)]))
+            out["c_crossattn"] = CONDRegular(cross_attn)
+        out["guidance"] = CONDRegular(torch.FloatTensor([kwargs.get("guidance", 3.5)]))
         return out
 
 
@@ -6595,6 +7848,7 @@ vae_conversion_map_attn = [
     ("proj_out.", "proj_attn."),
 ]
 
+
 def get_obj_from_str(string, reload=False):
     module, cls = string.rsplit(".", 1)
     if reload:
@@ -6612,6 +7866,7 @@ def instantiate_from_config(config):
         raise KeyError("Expected key `target` to instantiate.")
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
+
 def model_options_long_clip(sd, tokenizer_data, model_options):
     w = sd.get("clip_l.text_model.embeddings.position_embedding.weight", None)
     if w is None:
@@ -6624,7 +7879,8 @@ class T5XXLModel(SDClipModel):
         self, device="cpu", layer="last", layer_idx=None, dtype=None, model_options={}
     ):
         textmodel_json_config = os.path.join(
-            os.path.dirname(os.path.realpath(__file__)), ".\\_internal\\t5_config_xxl.json"
+            os.path.dirname(os.path.realpath(__file__)),
+            ".\\_internal\\t5_config_xxl.json",
         )
         super().__init__(
             device=device,
@@ -6636,7 +7892,6 @@ class T5XXLModel(SDClipModel):
             model_class=T5,
             model_options=model_options,
         )
-
 
 
 class T5XXLTokenizer(SDTokenizer):
@@ -7201,6 +8456,7 @@ def load_text_encoder_state_dicts(
             logging.debug("clip unexpected: {}".format(u))
     return clip
 
+
 TORCH_COMPATIBLE_QTYPES = {
     None,
     gguf.GGMLQuantizationType.F32,
@@ -7233,10 +8489,12 @@ def dequantize(data, qtype, oshape, dtype=None):
     blocks = dequantize_blocks(blocks, block_size, type_size, dtype)
     return blocks.reshape(oshape)
 
+
 def split_block_dims(blocks, *args):
     n_max = blocks.shape[1]
     dims = list(args) + [n_max - sum(args)]
     return torch.split(blocks, dims, dim=1)
+
 
 # Legacy Quants #
 def dequantize_blocks_Q8_0(blocks, block_size, type_size, dtype=None):
@@ -7249,7 +8507,6 @@ def dequantize_blocks_Q8_0(blocks, block_size, type_size, dtype=None):
 # K Quants #
 QK_K = 256
 K_SCALE_SIZE = 12
-
 
 
 dequantize_functions = {
@@ -7381,9 +8638,7 @@ class GGMLLayer(torch.nn.Module):
             )
 
         weight = s.get_weight(s.weight.to(device), dtype)
-        weight = cast_to(
-            weight, dtype, device, non_blocking=non_blocking, copy=False
-        )
+        weight = cast_to(weight, dtype, device, non_blocking=non_blocking, copy=False)
         return weight, bias
 
     def forward_comfy_cast_weights(self, input, *args, **kwargs):
@@ -7413,7 +8668,7 @@ class GGMLOps(manual_cast):
         def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.linear(input, weight, bias)
-        
+
     class Embedding(GGMLLayer, manual_cast.Embedding):
         def forward_ggml_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype
@@ -7434,6 +8689,7 @@ class GGMLOps(manual_cast):
                 self.scale_grad_by_freq,
                 self.sparse,
             ).to(dtype=output_dtype)
+
 
 MODEL_DETECTION = (
     (
@@ -7475,6 +8731,7 @@ MODEL_DETECTION = (
         ),
     ),
 )
+
 
 def gguf_sd_loader_get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
@@ -7917,12 +9174,44 @@ class ConditioningZeroOut:
             c.append(n)
         return (c,)
 
-KSAMPLER_NAMES = ["euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_cfg_pp", "heun", "heunpp2","dpm_2", "dpm_2_ancestral",
-                  "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp", "dpmpp_sde", "dpmpp_sde_gpu",
-                  "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_3m_sde", "dpmpp_3m_sde_gpu", "ddpm", "lcm",
-                  "ipndm", "ipndm_v", "deis"]
 
-SCHEDULER_NAMES = ["normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform", "beta"]
+KSAMPLER_NAMES = [
+    "euler",
+    "euler_cfg_pp",
+    "euler_ancestral",
+    "euler_ancestral_cfg_pp",
+    "heun",
+    "heunpp2",
+    "dpm_2",
+    "dpm_2_ancestral",
+    "lms",
+    "dpm_fast",
+    "dpm_adaptive",
+    "dpmpp_2s_ancestral",
+    "dpmpp_2s_ancestral_cfg_pp",
+    "dpmpp_sde",
+    "dpmpp_sde_gpu",
+    "dpmpp_2m",
+    "dpmpp_2m_sde",
+    "dpmpp_2m_sde_gpu",
+    "dpmpp_3m_sde",
+    "dpmpp_3m_sde_gpu",
+    "ddpm",
+    "lcm",
+    "ipndm",
+    "ipndm_v",
+    "deis",
+]
+
+SCHEDULER_NAMES = [
+    "normal",
+    "karras",
+    "exponential",
+    "sgm_uniform",
+    "simple",
+    "ddim_uniform",
+    "beta",
+]
 SAMPLER_NAMES = KSAMPLER_NAMES + ["ddim", "uni_pc", "uni_pc_bh2"]
 
 
@@ -7933,13 +9222,14 @@ def calculate_sigmas1(model_sampling, scheduler_name, steps):
         logging.error("error invalid scheduler {}".format(scheduler_name))
     return sigmas
 
+
 def resolve_areas_and_cond_masks_multidim(conditions, dims, device):
     # We need to decide on an area outside the sampling loop in order to properly generate opposite areas of equal sizes.
     # While we're doing this, we can also resolve the mask device and scaling for performance reasons
     for i in range(len(conditions)):
         c = conditions[i]
-        if 'area' in c:
-            area = c['area']
+        if "area" in c:
+            area = c["area"]
             if area[0] == "percentage":
                 modified = c.copy()
                 a = area[1:]
@@ -7950,48 +9240,68 @@ def resolve_areas_and_cond_masks_multidim(conditions, dims, device):
                 for d in range(len(dims)):
                     area += (round(a[d + a_len] * dims[d]),)
 
-                modified['area'] = area
+                modified["area"] = area
                 c = modified
                 conditions[i] = c
 
-        if 'mask' in c:
-            mask = c['mask']
+        if "mask" in c:
+            mask = c["mask"]
             mask = mask.to(device=device)
             modified = c.copy()
             if len(mask.shape) == len(dims):
                 mask = mask.unsqueeze(0)
             if mask.shape[1:] != dims:
-                mask = torch.nn.functional.interpolate(mask.unsqueeze(1), size=dims, mode='bilinear', align_corners=False).squeeze(1)
+                mask = torch.nn.functional.interpolate(
+                    mask.unsqueeze(1), size=dims, mode="bilinear", align_corners=False
+                ).squeeze(1)
 
-            if modified.get("set_area_to_bounds", False): #TODO: handle dim != 2
-                bounds = torch.max(torch.abs(mask),dim=0).values.unsqueeze(0)
+            if modified.get("set_area_to_bounds", False):  # TODO: handle dim != 2
+                bounds = torch.max(torch.abs(mask), dim=0).values.unsqueeze(0)
                 boxes, is_empty = get_mask_aabb(bounds)
                 if is_empty[0]:
                     # Use the minimum possible size for efficiency reasons. (Since the mask is all-0, this becomes a noop anyway)
-                    modified['area'] = (8, 8, 0, 0)
+                    modified["area"] = (8, 8, 0, 0)
                 else:
                     box = boxes[0]
-                    H, W, Y, X = (box[3] - box[1] + 1, box[2] - box[0] + 1, box[1], box[0])
+                    H, W, Y, X = (
+                        box[3] - box[1] + 1,
+                        box[2] - box[0] + 1,
+                        box[1],
+                        box[0],
+                    )
                     H = max(8, H)
                     W = max(8, W)
                     area = (int(H), int(W), int(Y), int(X))
-                    modified['area'] = area
+                    modified["area"] = area
 
-            modified['mask'] = mask
+            modified["mask"] = mask
             conditions[i] = modified
 
-def cleanup_additional_models(models): 
-    """cleanup additional models that were loaded""" 
-    for m in models: 
-        if hasattr(m, 'cleanup'): 
-            m.cleanup() 
+
+def cleanup_additional_models(models):
+    """cleanup additional models that were loaded"""
+    for m in models:
+        if hasattr(m, "cleanup"):
+            m.cleanup()
+
 
 class KSampler1:
     SCHEDULERS = SCHEDULER_NAMES
     SAMPLERS = SAMPLER_NAMES
-    DISCARD_PENULTIMATE_SIGMA_SAMPLERS = set(('dpm_2', 'dpm_2_ancestral', 'uni_pc', 'uni_pc_bh2'))
+    DISCARD_PENULTIMATE_SIGMA_SAMPLERS = set(
+        ("dpm_2", "dpm_2_ancestral", "uni_pc", "uni_pc_bh2")
+    )
 
-    def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
+    def __init__(
+        self,
+        model,
+        steps,
+        device,
+        sampler=None,
+        scheduler=None,
+        denoise=None,
+        model_options={},
+    ):
         self.model = model
         self.device = device
         if scheduler not in self.SCHEDULERS:
@@ -8012,7 +9322,9 @@ class KSampler1:
             steps += 1
             discard_penultimate_sigma = True
 
-        sigmas = calculate_sigmas1(self.model.get_model_object("model_sampling"), self.scheduler, steps)
+        sigmas = calculate_sigmas1(
+            self.model.get_model_object("model_sampling"), self.scheduler, steps
+        )
 
         if discard_penultimate_sigma:
             sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
@@ -8026,16 +9338,31 @@ class KSampler1:
             if denoise <= 0.0:
                 self.sigmas = torch.FloatTensor([])
             else:
-                new_steps = int(steps/denoise)
+                new_steps = int(steps / denoise)
                 sigmas = self.calculate_sigmas(new_steps).to(self.device)
-                self.sigmas = sigmas[-(steps + 1):]
+                self.sigmas = sigmas[-(steps + 1) :]
 
-    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
+    def sample(
+        self,
+        noise,
+        positive,
+        negative,
+        cfg,
+        latent_image=None,
+        start_step=None,
+        last_step=None,
+        force_full_denoise=False,
+        denoise_mask=None,
+        sigmas=None,
+        callback=None,
+        disable_pbar=False,
+        seed=None,
+    ):
         if sigmas is None:
             sigmas = self.sigmas
 
         if last_step is not None and last_step < (len(sigmas) - 1):
-            sigmas = sigmas[:last_step + 1]
+            sigmas = sigmas[: last_step + 1]
             if force_full_denoise:
                 sigmas[-1] = 0
 
@@ -8050,14 +9377,50 @@ class KSampler1:
 
         sampler = sampler_object(self.sampler)
 
-        return sample1(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed)
-
+        return sample1(
+            self.model,
+            noise,
+            positive,
+            negative,
+            cfg,
+            self.device,
+            sampler,
+            sigmas,
+            self.model_options,
+            latent_image=latent_image,
+            denoise_mask=denoise_mask,
+            callback=callback,
+            disable_pbar=disable_pbar,
+            seed=seed,
+        )
 
 
 class KSampler:
-    def sample(self, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0):
-        return common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
-
+    def sample(
+        self,
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent_image,
+        denoise=1.0,
+    ):
+        return common_ksampler(
+            model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_image,
+            denoise=denoise,
+        )
 
 
 import os
@@ -8068,12 +9431,13 @@ import tkinter as tk
 import customtkinter as ctk
 from PIL import ImageTk
 
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
 
         self.title("LightDiffusion")
-        self.geometry("800x800")
+        self.geometry("800x500")
 
         self.changed = True
 
@@ -8181,7 +9545,7 @@ class App(tk.Tk):
                 self.height_slider.get(),
                 3.5,
             ),
-        )#if the text changed, put the changed flag to True
+        )  # if the text changed, put the changed flag to True
         self.prompt_entry.bind("<KeyRelease>", lambda event: self.changed_smt())
         self.neg.bind("<KeyRelease>", lambda event: self.changed_smt())
         self.enhancer_var.trace("w", lambda *args: self.changed_smt())
@@ -8191,7 +9555,7 @@ class App(tk.Tk):
 
     def generate_image(self):
         threading.Thread(target=self._generate_image, daemon=True).start()
-        
+
     def changed_smt(self):
         self.changed = True
 
@@ -8204,75 +9568,87 @@ class App(tk.Tk):
         neg = self.neg.get("1.0", tk.END)
         w = int(self.width_slider.get())
         h = int(self.height_slider.get())
-        if self.changed :
+        if self.changed:
             with torch.inference_mode():
-                    self.dualcliploadergguf = DualCLIPLoaderGGUF()
-                    self.emptylatentimage = EmptyLatentImage()
-                    self.vaeloader = VAELoader()
-                    self.unetloadergguf = UnetLoaderGGUF()
-                    self.cliptextencodeflux = CLIPTextEncodeFlux()
-                    self.conditioningzeroout = ConditioningZeroOut()
-                    self.ksampler = KSampler()
-                    self.vaedecode = VAEDecode()
-                    self.saveimage = SaveImage()
-                    self.unetloadergguf_10 = self.unetloadergguf.load_unet(unet_name="flux1-dev-Q8_0.gguf")
-                    self.vaeloader_11 = self.vaeloader.load_vae(vae_name="flux_ae.safetensors")
-                    
-                    self.dualcliploadergguf_19 = self.dualcliploadergguf.load_clip(
-                        clip_name1="clip_l.safetensors",
-                        clip_name2="t5-v1_1-xxl-encoder-Q8_0.gguf",
-                        type="flux",
-                    )
-                    
-                    self.emptylatentimage_5 = self.emptylatentimage.generate(
-                        width=w, height=h, batch_size=1
-                    )
-                    
-                    self.cliptextencodeflux_15 = self.cliptextencodeflux.encode(
-                        clip_l=prompt,
-                        t5xxl=prompt,
-                        guidance=3.5,
-                        clip=self.dualcliploadergguf_19[0],
-                    )
+                self.dualcliploadergguf = DualCLIPLoaderGGUF()
+                self.emptylatentimage = EmptyLatentImage()
+                self.vaeloader = VAELoader()
+                self.unetloadergguf = UnetLoaderGGUF()
+                self.cliptextencodeflux = CLIPTextEncodeFlux()
+                self.conditioningzeroout = ConditioningZeroOut()
+                self.ksampler = KSampler()
+                self.vaedecode = VAEDecode()
+                self.saveimage = SaveImage()
+                self.unetloadergguf_10 = self.unetloadergguf.load_unet(
+                    unet_name="flux1-dev-Q8_0.gguf"
+                )
+                self.vaeloader_11 = self.vaeloader.load_vae(vae_name="ae.safetensors")
 
-                    self.conditioningzeroout_16 = self.conditioningzeroout.zero_out(
-                        conditioning=self.cliptextencodeflux_15[0]
-                    )
-                    self.changed = False
-        return (self.dualcliploadergguf, self.emptylatentimage, self.vaeloader, self.unetloadergguf, self.cliptextencodeflux, self.conditioningzeroout, self.ksampler, self.vaedecode, self.saveimage,)
+                self.dualcliploadergguf_19 = self.dualcliploadergguf.load_clip(
+                    clip_name1="clip_l.safetensors",
+                    clip_name2="t5-v1_1-xxl-encoder-Q8_0.gguf",
+                    type="flux",
+                )
+
+                self.emptylatentimage_5 = self.emptylatentimage.generate(
+                    width=w, height=h, batch_size=1
+                )
+
+                self.cliptextencodeflux_15 = self.cliptextencodeflux.encode(
+                    clip_l=prompt,
+                    t5xxl=prompt,
+                    guidance=3.5,
+                    clip=self.dualcliploadergguf_19[0],
+                )
+
+                self.conditioningzeroout_16 = self.conditioningzeroout.zero_out(
+                    conditioning=self.cliptextencodeflux_15[0]
+                )
+                self.changed = False
+        return (
+            self.dualcliploadergguf,
+            self.emptylatentimage,
+            self.vaeloader,
+            self.unetloadergguf,
+            self.cliptextencodeflux,
+            self.conditioningzeroout,
+            self.ksampler,
+            self.vaedecode,
+            self.saveimage,
+        )
 
     def _generate_image(self):
         with torch.inference_mode():
-            if self.changed :
+            if self.changed:
                 self._prep()
 
             ksampler_3 = self.ksampler.sample(
-                    seed=random.randint(1, 2**64),
-                    steps=20,
-                    cfg=1,
-                    sampler_name="euler",
-                    scheduler="simple",
-                    denoise=1,
-                    model=self.unetloadergguf_10[0],
-                    positive=self.cliptextencodeflux_15[0],
-                    negative=self.conditioningzeroout_16[0],
-                    latent_image=self.emptylatentimage_5[0],
+                seed=random.randint(1, 2**64),
+                steps=20,
+                cfg=1,
+                sampler_name="euler",
+                scheduler="simple",
+                denoise=1,
+                model=self.unetloadergguf_10[0],
+                positive=self.cliptextencodeflux_15[0],
+                negative=self.conditioningzeroout_16[0],
+                latent_image=self.emptylatentimage_5[0],
             )
 
             vaedecode_8 = self.vaedecode.decode(
-                    samples=ksampler_3[0],
-                    vae=self.vaeloader_11[0],
+                samples=ksampler_3[0],
+                vae=self.vaeloader_11[0],
             )
 
             saveimage_24 = self.saveimage.save_images(
-                    filename_prefix="Flux", images=vaedecode_8[0]
+                filename_prefix="Flux", images=vaedecode_8[0]
             )
             for image in vaedecode_8[0]:
-                    i = 255.0 * image.cpu().numpy()
-                    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            
+                i = 255.0 * image.cpu().numpy()
+                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+
             self.changed = False
-            
+
         w = int(self.width_slider.get())
         h = int(self.height_slider.get())
         # Convert the image to PhotoImage and display it

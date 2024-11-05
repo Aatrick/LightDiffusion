@@ -1,4 +1,4 @@
-prompt: a stormy ocean with a fisher boat 
+prompt: an all black lamborghini speeding through the night, rear lights traces
 neg: (embedding:easynegative), (embedding:ng_deepnegative)
 w: 1152
 h: 896

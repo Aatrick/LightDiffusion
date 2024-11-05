@@ -20,7 +20,7 @@ SDWebUI.
 
 ## Installation
 
-To install, please clone this repo and execute the run.bat file and you should be good to go.
+To install, please clone this repo and execute in cmd the run.bat file and you should be good to go. Be aware that you need at least 25GB of free space on your hard drive to run this program (40-50GB is recommended to offload the model out of RAM and into the drive).
 
 #### From Source
 
@@ -33,3 +33,9 @@ After doing that, add your Q8 Flux Dev model to the Unet directory and you shoul
 To use the Prompt enhancer refer to this [guide](https://github.com/ollama/ollama?tab=readme-ov-file) to install and run those commands
 `ollama run llama3.2`
 `pip install ollama`
+
+### Tips and Tricks
+
+Be aware that the prompt enhancer is not perfect and might not work as expected. If you have any issues, uncheck and rechek the prompt enhancer checkbox in the GUI.
+
+Flux works best with resolutions corresponding to megapixel sizes, refer to this [guide](https://www.reddit.com/r/StableDiffusion/comments/1enxdga/flux_recommended_resolutions_from_01_to_20/) for more information.
