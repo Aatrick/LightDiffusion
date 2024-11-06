@@ -103,11 +103,11 @@ if glob.glob(".\\_internal\\embeddings\\*.pt") == []:
         filename="badhandv4.pt",
         local_dir=".\\_internal\\embeddings\\",
     )
-    hf_hub_download(
-        repo_id="segments-arnaud/sam_vit_b",
-        filename="EasyNegative.safetensors",
-        local_dir=".\\_internal\\embeddings\\",
-    )
+    # hf_hub_download(
+    #     repo_id="segments-arnaud/sam_vit_b",
+    #     filename="EasyNegative.safetensors",
+    #     local_dir=".\\_internal\\embeddings\\",
+    # )
 
 args_parsing = False
 
