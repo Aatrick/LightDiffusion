@@ -28,7 +28,7 @@ There's also a LightDiffusion version using Flux Dev available in releases and F
 
 ## Installation
 
-To install, please download a release or clone this repo and execute the run.bat file and you should be good to go.
+To install, please download a release or clone this repo and execute the run.bat file in a cmd and you should be good to go.
 
 #### From Source
 
