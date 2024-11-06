@@ -20,7 +20,7 @@ SDWebUI.
 
 ## Installation
 
-To install, please clone this repo and execute in cmd the run.bat file and you should be good to go. Be aware that you need at least 25GB of free space on your hard drive to run this program (40-50GB is recommended to offload the model out of RAM and into the drive).
+To install, please clone this repo or download the release and execute in cmd the run.bat file and you should be good to go. Be aware that you need at least 25GB of free space on your hard drive to run this program (40-50GB is recommended to offload the model out of RAM and into the drive).
 
 #### From Source
 
