@@ -9759,7 +9759,7 @@ def enhance_prompt(p=None):
         prompt = p
     print(prompt)
     response = ollama.chat(
-        model="llama3.1",
+        model="llama3.2",
         messages=[
             {
                 "role": "user",
