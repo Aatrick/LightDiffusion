@@ -33,47 +33,42 @@ import enum
 import os
 from typing import Optional
 
-if glob.glob(".\\_internal\\embeddings\\*.pt") == []:
+if glob.glob("./_internal/embeddings/*.pt") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="EvilEngine/badhandv4",
         filename="badhandv4.pt",
-        local_dir=".\\_internal\\embeddings",
+        local_dir="./_internal/embeddings",
     )
-    hf_hub_download(
-        repo_id="gsdf/EasyNegative",
-        filename="EasyNegative.pt",
-        local_dir=".\\_internal\\embeddings",
-    )
-if glob.glob(".\\_internal\\unet\\*.gguf") == []:
+if glob.glob("./_internal/unet/*.gguf") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="city96/FLUX.1-dev-gguf",
         filename="flux1-dev-Q8_0.gguf",
-        local_dir=".\\_internal\\unet",
+        local_dir="./_internal/unet",
     )
-if glob.glob(".\\_internal\\clip\\*.gguf") == []:
+if glob.glob("./_internal/clip/*.gguf") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="city96/t5-v1_1-xxl-encoder-gguf",
         filename="t5-v1_1-xxl-encoder-Q8_0.gguf",
-        local_dir=".\\_internal\\clip",
+        local_dir="./_internal/clip",
     )
     hf_hub_download(
         repo_id="comfyanonymous/flux_text_encoders",
         filename="clip_l.safetensors",
-        local_dir=".\\_internal\\clip",
+        local_dir="./_internal/clip",
     )
-if glob.glob(".\\_internal\\vae\\*.safetensors") == []:
+if glob.glob("./_internal/vae/*.safetensors") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="black-forest-labs/FLUX.1-schnell",
         filename="ae.safetensors",
-        local_dir=".\\_internal\\vae",
+        local_dir="./_internal/vae",
     )
 
 args_parsing = False
@@ -512,7 +507,7 @@ folder_names_and_paths["ERSGAN"] = (
     supported_pt_extensions,
 )
 
-output_directory = ".\\_internal\\output"
+output_directory = "./_internal/output"
 
 filename_list_cache = {}
 
@@ -4377,7 +4372,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         if textmodel_json_config is None:
             textmodel_json_config = os.path.join(
                 os.path.dirname(os.path.realpath(__file__)),
-                ".\\_internal\\sd1_clip_config.json",
+                "./_internal/sd1_clip_config.json",
             )
 
         with open(textmodel_json_config) as f:
@@ -4630,7 +4625,7 @@ class SDTokenizer:
         min_length=None,
     ):
         if tokenizer_path is None:
-            tokenizer_path = ".\\_internal\\sd1_tokenizer\\"
+            tokenizer_path = "./_internal/sd1_tokenizer/"
         self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path)
         self.max_length = max_length
         self.min_length = min_length
@@ -6238,7 +6233,7 @@ def enhance_prompt(p=None):
 
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
-    with open(".\\_internal\\prompt.txt", "w") as f:
+    with open("./_internal/prompt.txt", "w") as f:
         f.write(f"prompt: {prompt_entry}")
         f.write(f"neg: {neg}")
         f.write(f"w: {int(width)}\n")
@@ -6247,7 +6242,7 @@ def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
 
 
 def load_parameters_from_file():
-    with open(".\\_internal\\prompt.txt", "r") as f:
+    with open("./_internal/prompt.txt", "r") as f:
         lines = f.readlines()
         parameters = {}
         for line in lines:
@@ -7880,7 +7875,7 @@ class T5XXLModel(SDClipModel):
     ):
         textmodel_json_config = os.path.join(
             os.path.dirname(os.path.realpath(__file__)),
-            ".\\_internal\\t5_config_xxl.json",
+            "./_internal/t5_config_xxl.json",
         )
         super().__init__(
             device=device,
@@ -7897,7 +7892,7 @@ class T5XXLModel(SDClipModel):
 class T5XXLTokenizer(SDTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         tokenizer_path = os.path.join(
-            os.path.dirname(os.path.realpath(__file__)), ".\\_internal\\t5_tokenizer"
+            os.path.dirname(os.path.realpath(__file__)), "./_internal/t5_tokenizer"
         )
         super().__init__(
             tokenizer_path,
@@ -9015,7 +9010,7 @@ class UnetLoaderGGUF:
             ops.Linear.patch_dtype = getattr(torch, patch_dtype)
 
         # init model
-        unet_path = ".\\_internal\\unet\\" + unet_name
+        unet_path = "./_internal/unet/" + unet_name
         sd = gguf_sd_loader(unet_path)
         model = load_diffusion_model_state_dict(
             sd, model_options={"custom_operations": ops}
@@ -9036,7 +9031,7 @@ class VAELoader:
         if vae_name in ["taesd", "taesdxl", "taesd3", "taef1"]:
             sd = self.load_taesd(vae_name)
         else:
-            vae_path = ".\\_internal\\vae\\" + vae_name
+            vae_path = "./_internal/vae/" + vae_name
             sd = load_torch_file(vae_path)
         vae = VAE(sd=sd)
         return (vae,)
@@ -9108,7 +9103,7 @@ class CLIPLoaderGGUF:
                 "custom_operations": GGMLOps,
                 "initial_device": text_encoder_offload_device(),
             },
-            embedding_directory="models\\embeddings",
+            embedding_directory="models/embeddings",
         )
         clip.patcher = GGUFModelPatcher.clone(clip.patcher)
 
@@ -9143,8 +9138,8 @@ class CLIPLoaderGGUF:
 
 class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
     def load_clip(self, clip_name1, clip_name2, type):
-        clip_path1 = ".\\_internal\\clip\\" + clip_name1
-        clip_path2 = ".\\_internal\\clip\\" + clip_name2
+        clip_path1 = "./_internal/clip/" + clip_name1
+        clip_path2 = "./_internal/clip/" + clip_name2
         clip_paths = (clip_path1, clip_path2)
         clip_type = clip_name_dict.get(type, CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
@@ -9667,7 +9662,7 @@ class App(tk.Tk):
 
     def display_most_recent_image(self):
         # Get a list of all image files in the output directory
-        image_files = glob.glob(".\\_internal\\output\\*")
+        image_files = glob.glob("./_internal/output/*")
 
         # Get the current size of the window
         window_width = self.winfo_width() - 400
