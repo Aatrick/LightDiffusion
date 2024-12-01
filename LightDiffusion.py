@@ -44,69 +44,69 @@ folder_names_and_paths["ERSGAN"] = (
     supported_pt_extensions,
 )
 
-output_directory = ".\\_internal\\output"
+output_directory = "./_internal/output"
 
 filename_list_cache = {}
 
-if glob.glob(".\\_internal\\checkpoints\\*.safetensors") == []:
+if glob.glob("./_internal/checkpoints/*.safetensors") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="Meina/MeinaMix",
         filename="Meina V10 - baked VAE.safetensors",
-        local_dir=".\\_internal\\checkpoints\\",
+        local_dir="./_internal/checkpoints/",
     )
-if glob.glob(".\\_internal\\yolos\\*.pt") == []:
+if glob.glob("./_internal/yolos/*.pt") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="Bingsu/adetailer",
         filename="hand_yolov9c.pt",
-        local_dir=".\\_internal\\yolos\\",
+        local_dir="./_internal/yolos/",
     )
     hf_hub_download(
         repo_id="Bingsu/adetailer",
         filename="face_yolov9c.pt",
-        local_dir=".\\_internal\\yolos\\",
+        local_dir="./_internal/yolos/",
     )
     hf_hub_download(
         repo_id="Bingsu/adetailer",
         filename="person_yolov8m-seg.pt",
-        local_dir=".\\_internal\\yolos\\",
+        local_dir="./_internal/yolos/",
     )
     hf_hub_download(
         repo_id="segments-arnaud/sam_vit_b",
         filename="sam_vit_b_01ec64.pth",
-        local_dir=".\\_internal\\yolos\\",
+        local_dir="./_internal/yolos/",
     )
-if glob.glob(".\\_internal\\ERSGAN\\*.pth") == []:
+if glob.glob("./_internal/ERSGAN/*.pth") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="ximso/RealESRGAN_x4plus_anime_6B",
         filename="RealESRGAN_x4plus_anime_6B.pth",
-        local_dir=".\\_internal\\ERSGAN\\",
+        local_dir="./_internal/ERSGAN/",
     )
-if glob.glob(".\\_internal\\loras\\*.safetensors") == []:
+if glob.glob("./_internal/loras/*.safetensors") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="EvilEngine/add_detail",
         filename="add_detail.safetensors",
-        local_dir=".\\_internal\\loras\\",
+        local_dir="./_internal/loras/",
     )
-if glob.glob(".\\_internal\\embeddings\\*.pt") == []:
+if glob.glob("./_internal/embeddings/*.pt") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
         repo_id="EvilEngine/badhandv4",
         filename="badhandv4.pt",
-        local_dir=".\\_internal\\embeddings\\",
+        local_dir="./_internal/embeddings/",
     )
     # hf_hub_download(
     #     repo_id="segments-arnaud/sam_vit_b",
     #     filename="EasyNegative.safetensors",
-    #     local_dir=".\\_internal\\embeddings\\",
+    #     local_dir="./_internal/embeddings/",
     # )
 
 args_parsing = False
@@ -4400,7 +4400,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         assert layer in self.LAYERS
 
         if textmodel_json_config is None:
-            textmodel_json_config = ".\\_internal\\clip\\sd1_clip_config.json"
+            textmodel_json_config = "./_internal/clip/sd1_clip_config.json"
 
         with open(textmodel_json_config) as f:
             config = json.load(f)
@@ -4695,7 +4695,7 @@ class SDTokenizer:
         min_length=None,
     ):
         if tokenizer_path is None:
-            tokenizer_path = "_internal\\sd1_tokenizer\\"
+            tokenizer_path = "_internal/sd1_tokenizer/"
         self.tokenizer = tokenizer_class.from_pretrained(tokenizer_path)
         self.max_length = max_length
         self.min_length = min_length
@@ -6401,7 +6401,7 @@ class CheckpointLoaderSimple:
             ckpt_path,
             output_vae=True,
             output_clip=True,
-            embedding_directory=".\\_internal\\embeddings\\",
+            embedding_directory="./_internal/embeddings/",
         )
         print("loading", ckpt_path)
         return out[:3]
@@ -7070,7 +7070,7 @@ class UpscaleModelLoader:
     CATEGORY = "loaders"
 
     def load_model(self, model_name):
-        model_path = f"_internal\\ERSGAN\\{model_name}"
+        model_path = f"_internal/ERSGAN/{model_name}"
         sd = load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
             sd = state_dict_prefix_replace(sd, {"module.": ""})
@@ -8224,7 +8224,7 @@ class SAMWrapper:
 
 class SAMLoader:
     def load_model(self, model_name, device_mode="auto"):
-        modelname = ".\\_internal\\yolos\\" + model_name
+        modelname = "./_internal/yolos/" + model_name
 
         if "vit_h" in model_name:
             model_kind = "vit_h"
@@ -8491,7 +8491,7 @@ class NO_SEGM_DETECTOR:
 
 class UltralyticsDetectorProvider:
     def doit(self, model_name):
-        model = load_yolo(".\\_internal\\yolos\\" + model_name)
+        model = load_yolo("./_internal/yolos/" + model_name)
         return UltraBBoxDetector(model), UltraSegmDetector(model)
 
 
@@ -9804,7 +9804,7 @@ def enhance_prompt(p=None):
 
 
 def pipeline(prompt, w, h):
-    ckpt = ".\\_internal\\checkpoints\\meinamix_meinaV11.safetensors"
+    ckpt = "./_internal/checkpoints/meinamix_meinaV11.safetensors"
     with torch.inference_mode():
         checkpointloadersimple = CheckpointLoaderSimple()
         checkpointloadersimple_241 = checkpointloadersimple.load_checkpoint(
@@ -9892,7 +9892,7 @@ def pipeline(prompt, w, h):
 
 
 def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
-    with open(".\\_internal\\prompt.txt", "w") as f:
+    with open("./_internal/prompt.txt", "w") as f:
         f.write(f"prompt: {prompt_entry}")
         f.write(f"neg: {neg}")
         f.write(f"w: {int(width)}\n")
@@ -9901,7 +9901,7 @@ def write_parameters_to_file(prompt_entry, neg, width, height, cfg):
 
 
 def load_parameters_from_file():
-    with open(".\\_internal\\prompt.txt", "r") as f:
+    with open("./_internal/prompt.txt", "r") as f:
         lines = f.readlines()
         parameters = {}
         for line in lines:
@@ -9918,9 +9918,9 @@ def load_parameters_from_file():
     return prompt, neg, width, height, cfg
 
 
-files = glob.glob(".\\_internal\\checkpoints\\*.safetensors")
-loras = glob.glob(".\\_internal\\loras\\*.safetensors")
-loras += glob.glob(".\\_internal\\loras\\*.pt")
+files = glob.glob("./_internal/checkpoints/*.safetensors")
+loras = glob.glob("./_internal/loras/*.safetensors")
+loras += glob.glob("./_internal/loras/*.pt")
 
 
 class App(tk.Tk):
@@ -10270,7 +10270,7 @@ class App(tk.Tk):
                 loraloader = LoraLoader()
                 loraloader_274 = loraloader.load_lora(
                     lora_name=self.lora_selection.get().replace(
-                        ".\\_internal\\loras\\", ""
+                        "./_internal/loras/", ""
                     ),
                     strength_model=0.7,
                     strength_clip=0.7,
@@ -10279,7 +10279,7 @@ class App(tk.Tk):
                 )
                 print(
                     "loading",
-                    self.lora_selection.get().replace(".\\_internal\\loras\\", ""),
+                    self.lora_selection.get().replace("./_internal/loras/", ""),
                 )
             except:
                 loraloader_274 = checkpointloadersimple_241
@@ -10524,7 +10524,7 @@ class App(tk.Tk):
 
     def display_most_recent_image(self):
         # Get a list of all image files in the output directory
-        image_files = glob.glob(".\\_internal\\output\\*")
+        image_files = glob.glob("./_internal/output/*")
 
         # Get the current size of the window
         window_width = self.winfo_width() - 400
