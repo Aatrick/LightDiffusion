@@ -39,8 +39,8 @@ folder_names_and_paths["loras"] = (
     supported_pt_extensions,
 )
 
-folder_names_and_paths["ERSGAN"] = (
-    [os.path.join(models_dir, "ERSGAN")],
+folder_names_and_paths["ESRGAN"] = (
+    [os.path.join(models_dir, "ESRGAN")],
     supported_pt_extensions,
 )
 
@@ -79,13 +79,13 @@ if glob.glob("./_internal/yolos/*.pt") == []:
         filename="sam_vit_b_01ec64.pth",
         local_dir="./_internal/yolos/",
     )
-if glob.glob("./_internal/ERSGAN/*.pth") == []:
+if glob.glob("./_internal/ESRGAN/*.pth") == []:
     from huggingface_hub import hf_hub_download
 
     hf_hub_download(
-        repo_id="ximso/RealESRGAN_x4plus_anime_6B",
-        filename="RealESRGAN_x4plus_anime_6B.pth",
-        local_dir="./_internal/ERSGAN/",
+        repo_id="lllyasviel/Annotators",
+        filename="RealESRGAN_x4plus.pth",
+        local_dir="./_internal/ESRGAN/",
     )
 if glob.glob("./_internal/loras/*.safetensors") == []:
     from huggingface_hub import hf_hub_download
@@ -7070,7 +7070,7 @@ class UpscaleModelLoader:
     CATEGORY = "loaders"
 
     def load_model(self, model_name):
-        model_path = f"_internal/ERSGAN/{model_name}"
+        model_path = f"_internal/ESRGAN/{model_name}"
         sd = load_torch_file(model_path, safe_load=True)
         if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
             sd = state_dict_prefix_replace(sd, {"module.": ""})
@@ -10153,7 +10153,7 @@ class App(tk.Tk):
                 clip=clipsetlastlayer_257[0],
             )
             upscalemodelloader_244 = upscalemodelloader.load_model(
-                "RealESRGAN_x4plus_anime_6B.pth"
+                "RealESRGAN_x4plus.pth"
             )
             try:
                 app.title("LightDiffusion - Upscaling")
@@ -10173,7 +10173,7 @@ class App(tk.Tk):
                 mask_blur=16,
                 tile_padding=32,
                 seam_fix_mode="Half Tile",
-                seam_fix_denoise=0.3,
+                seam_fix_denoise=0.2,
                 seam_fix_width=64,
                 seam_fix_mask_blur=16,
                 seam_fix_padding=32,
