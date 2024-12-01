@@ -2,6 +2,8 @@
 
 VENV_DIR=.venv
 
+sudo apt-get install python3.10 python3.10-venv
+
 # Check if .venv exists
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment..."
