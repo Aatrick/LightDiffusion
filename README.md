@@ -6,6 +6,8 @@ SDWebUI.
 
 There's also a LightDiffusion version using Flux Dev available in releases and Flux branch.
 
+For more information, check the [documentation](https://aatrick.github.io/LightDiffusion/)
+
 ## Features
 
 - Original Txt2Img, Img2Img (R-ERSGAN4x+ UltimateSDUpscaling DPM++ 2M)
