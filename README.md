@@ -4,6 +4,8 @@ The purpose of this repository and project is to remake the famous stable-diffus
 least number of lines and in the least complex way. It's made by retro-engineering Stable-Diffusion, ComfyUI and
 SDWebUI.
 
+For more information, check the [documentation](https://aatrick.github.io/LightDiffusion/Flux)
+
 ## Features
 
 - Original Txt2Img euler simple
