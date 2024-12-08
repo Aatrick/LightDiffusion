@@ -400,6 +400,14 @@ def set_attr(obj, attr, value):
 def set_attr_param(obj, attr, value):
     return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
 
+def copy_to_param(obj, attr, value):
+    # inplace update tensor instead of replacing it
+    attrs = attr.split(".")
+    for name in attrs[:-1]:
+        obj = getattr(obj, name)
+    prev = getattr(obj, attrs[-1])
+    prev.data.copy_(value)
+
 
 def get_attr(obj, attr):
     attrs = attr.split(".")
@@ -3078,6 +3086,7 @@ def sample1(
 import uuid
 
 
+
 class ModelPatcher:
     def __init__(
         self,
@@ -3183,31 +3192,96 @@ class ModelPatcher:
         return sd
 
     def patch_weight_to_device(self, key, device_to=None):
+        if key not in self.patches:
+            return
+
         weight = get_attr(self.model, key)
 
         inplace_update = self.weight_inplace_update
 
         if key not in self.backup:
-            self.backup[key] = weight.to(
-                device=self.offload_device, copy=inplace_update
-            )
+            self.backup[key] = weight.to(device=self.offload_device, copy=inplace_update)
 
-        temp_weight = cast_to_device(weight, device_to, torch.float32, copy=True)
-        out_weight = self.calculate_weight(self.patches[key], temp_weight, key).to(
-            weight.dtype
-        )
-        set_attr_param(self.model, key, out_weight)
-
+        if device_to is not None:
+            temp_weight = cast_to_device(weight, device_to, torch.float32, copy=True)
+        else:
+            temp_weight = weight.to(torch.float32, copy=True)
+        out_weight = self.calculate_weight(self.patches[key], temp_weight, key).to(weight.dtype)
+        if inplace_update:
+            copy_to_param(self.model, key, out_weight)
+        else:
+            set_attr_param(self.model, key, out_weight)
+    
     def patch_model(self, device_to=None, patch_weights=True):
+        for k in self.object_patches:
+            old = set_attr(self.model, k, self.object_patches[k])
+            if k not in self.object_patches_backup:
+                self.object_patches_backup[k] = old
+
         if patch_weights:
             model_sd = self.model_state_dict()
             for key in self.patches:
+                if key not in model_sd:
+                    logging.warning("could not patch. key doesn't exist in model: {}".format(key))
+                    continue
+
                 self.patch_weight_to_device(key, device_to)
 
             if device_to is not None:
                 self.model.to(device_to)
                 self.current_device = device_to
 
+        return self.model
+
+    def patch_model_lowvram(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False):
+        self.patch_model(device_to, patch_weights=False)
+
+        logging.info("loading in lowvram mode {}".format(lowvram_model_memory/(1024 * 1024)))
+        class LowVramPatch:
+            def __init__(self, key, model_patcher):
+                self.key = key
+                self.model_patcher = model_patcher
+            def __call__(self, weight):
+                return self.model_patcher.calculate_weight(self.model_patcher.patches[self.key], weight, self.key)
+
+        mem_counter = 0
+        patch_counter = 0
+        for n, m in self.model.named_modules():
+            lowvram_weight = False
+            if hasattr(m, "comfy_cast_weights"):
+                module_mem = module_size(m)
+                if mem_counter + module_mem >= lowvram_model_memory:
+                    lowvram_weight = True
+
+            weight_key = "{}.weight".format(n)
+            bias_key = "{}.bias".format(n)
+
+            if lowvram_weight:
+                if weight_key in self.patches:
+                    if force_patch_weights:
+                        self.patch_weight_to_device(weight_key)
+                    else:
+                        m.weight_function = LowVramPatch(weight_key, self)
+                        patch_counter += 1
+                if bias_key in self.patches:
+                    if force_patch_weights:
+                        self.patch_weight_to_device(bias_key)
+                    else:
+                        m.bias_function = LowVramPatch(bias_key, self)
+                        patch_counter += 1
+
+                m.prev_comfy_cast_weights = m.comfy_cast_weights
+                m.comfy_cast_weights = True
+            else:
+                if hasattr(m, "weight"):
+                    self.patch_weight_to_device(weight_key, device_to)
+                    self.patch_weight_to_device(bias_key, device_to)
+                    m.to(device_to)
+                    mem_counter += module_size(m)
+                    logging.debug("lowvram: loaded module regularly {}".format(m))
+
+        self.model_lowvram = True
+        self.lowvram_patch_counter = patch_counter
         return self.model
 
     def calculate_weight(self, patches, weight, key):
