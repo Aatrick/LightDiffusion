@@ -17,6 +17,7 @@ import PIL
 import os
 import packaging.version
 import torch
+import torch.nn as nn
 
 import ollama
 
@@ -670,6 +671,85 @@ class EnumAction(argparse.Action):
         super(EnumAction, self).__init__(**kwargs)
 
 
+"""
+Tiny AutoEncoder for Stable Diffusion
+(DNN for encoding / decoding SD's latent space)
+"""
+
+def conv(n_in, n_out, **kwargs):
+    return disable_weight_init.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
+
+class Clamp(nn.Module):
+    def forward(self, x):
+        return torch.tanh(x / 3) * 3
+
+class Block(nn.Module):
+    def __init__(self, n_in, n_out):
+        super().__init__()
+        self.conv = nn.Sequential(conv(n_in, n_out), nn.ReLU(), conv(n_out, n_out), nn.ReLU(), conv(n_out, n_out))
+        self.skip = disable_weight_init.Conv2d(n_in, n_out, 1, bias=False) if n_in != n_out else nn.Identity()
+        self.fuse = nn.ReLU()
+    def forward(self, x):
+        return self.fuse(self.conv(x) + self.skip(x))
+
+def Encoder2(latent_channels=4):
+    return nn.Sequential(
+        conv(3, 64), Block(64, 64),
+        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(64, latent_channels),
+    )
+
+
+def Decoder2(latent_channels=4):
+    return nn.Sequential(
+        Clamp(), conv(latent_channels, 64), nn.ReLU(),
+        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+        Block(64, 64), conv(64, 3),
+    )
+
+class TAESD(nn.Module):
+    latent_magnitude = 3
+    latent_shift = 0.5
+
+    def __init__(self, encoder_path=None, decoder_path=None, latent_channels=4):
+        super().__init__()
+        self.vae_shift = torch.nn.Parameter(torch.tensor(0.0))
+        self.vae_scale = torch.nn.Parameter(torch.tensor(1.0))
+        self.taesd_encoder = Encoder2(latent_channels)
+        self.taesd_decoder = Decoder2(latent_channels)
+        decoder_path = "./_internal/vae_approx/taesd_decoder.pth" if decoder_path is None else decoder_path
+        if encoder_path is not None:
+            self.taesd_encoder.load_state_dict(load_torch_file(encoder_path, safe_load=True))
+        if decoder_path is not None:
+            self.taesd_decoder.load_state_dict(load_torch_file(decoder_path, safe_load=True))
+
+    @staticmethod
+    def scale_latents(x):
+        """raw latents -> [0, 1]"""
+        return x.div(2 * TAESD.latent_magnitude).add(TAESD.latent_shift).clamp(0, 1)
+
+    @staticmethod
+    def unscale_latents(x):
+        """[0, 1] -> raw latents"""
+        return x.sub(TAESD.latent_shift).mul(2 * TAESD.latent_magnitude)
+
+    def decode(self, x):
+        device = next(self.taesd_decoder.parameters()).device  # Get the device of the decoder
+        x = x.to(device)  # Move the input tensor to the same device as the decoder
+        x_sample = self.taesd_decoder((x - self.vae_shift) * self.vae_scale)
+        x_sample = x_sample.sub(0.5).mul(2)
+        return x_sample
+
+    def encode(self, x):
+        device = next(self.taesd_encoder.parameters()).device  # Get the device of the encoder
+        x = x.to(device)  # Move the input tensor to the same device as the encoder
+        return (self.taesd_encoder(x * 0.5 + 0.5) / self.vae_scale) + self.vae_shift
+
+
 class LatentPreviewMethod(enum.Enum):
     NoPreviews = "none"
     Auto = "auto"
@@ -960,6 +1040,7 @@ class DPMSolver(nn.Module):
             h_init, pcoeff, icoeff, dcoeff, 1.5 if eta else order, accept_safety
         )
         info = {"steps": 0, "nfe": 0, "n_accept": 0, "n_reject": 0}
+        taesd_instance = TAESD()
 
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
             try:
@@ -993,6 +1074,11 @@ class DPMSolver(nn.Module):
                 info["n_reject"] += 1
             info["nfe"] += order
             info["steps"] += 1
+            for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
+                i = 255.0 * image.cpu().numpy()
+                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            app.update_image(img)
+            
         try:
             app.title("LightDiffusion")
         except:
@@ -10003,11 +10089,17 @@ class App(tk.Tk):
         super().__init__()
 
         self.title("LightDiffusion")
-        self.geometry("800x800")
+        self.geometry("800x700")
+        
+        file_names = [os.path.basename(file) for file in files]
+        lora_names = [os.path.basename(lora) for lora in loras]
 
         selected_file = tk.StringVar()
-        if files:
-            selected_file.set(files[0])
+        selected_lora = tk.StringVar()
+        if file_names:
+            selected_file.set(file_names[0])
+        if lora_names:
+            selected_lora.set(lora_names[0])
 
         # Create a frame for the sidebar
         self.sidebar = tk.Frame(self, width=200, bg="black")
@@ -10020,10 +10112,10 @@ class App(tk.Tk):
         self.neg = ctk.CTkTextbox(self.sidebar, width=400, height=50)
         self.neg.pack(pady=10, padx=10)
 
-        self.dropdown = ctk.CTkOptionMenu(self.sidebar, values=files)
+        self.dropdown = ctk.CTkOptionMenu(self.sidebar, values=file_names)
         self.dropdown.pack()
 
-        self.lora_selection = ctk.CTkOptionMenu(self.sidebar, values=loras)
+        self.lora_selection = ctk.CTkOptionMenu(self.sidebar, values=lora_names)
         self.lora_selection.pack(pady=10)
 
         # Sliders for the resolution
@@ -10052,7 +10144,7 @@ class App(tk.Tk):
         self.cfg_slider.pack()
 
         # Create a frame for the checkboxes
-        self.checkbox_frame = tk.Frame(self.sidebar)
+        self.checkbox_frame = tk.Frame(self.sidebar, bg="black")
         self.checkbox_frame.pack(pady=10)
 
         # checkbox for hiresfix
@@ -10317,7 +10409,7 @@ class App(tk.Tk):
             with torch.inference_mode():
                 self.checkpointloadersimple = CheckpointLoaderSimple()
                 self.checkpointloadersimple_241 = (
-                    self.checkpointloadersimple.load_checkpoint(ckpt_name=self.ckpt)
+                    self.checkpointloadersimple.load_checkpoint(ckpt_name="./_internal/checkpoints/" + self.ckpt)
                 )
                 self.cliptextencode = CLIPTextEncode()
                 self.emptylatentimage = EmptyLatentImage()
@@ -10608,6 +10700,10 @@ class App(tk.Tk):
         self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
         self.height_label.configure(text=f"Height: {int(self.height_slider.get())}")
         self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
+        
+    def update_image(self, img):
+        img = ImageTk.PhotoImage(img)
+        self.image_label.after(0, self._update_image_label, img)
 
     def display_most_recent_image(self):
         # Get a list of all image files in the output directory
@@ -10636,7 +10732,7 @@ class App(tk.Tk):
         # Display the image
         self.image_label.config(image=img)
         self.image_label.image = img
-        self.after(1000, self.display_most_recent_image)
+        #self.after(1000, self.display_most_recent_image)
 
 
 if __name__ == "__main__":
