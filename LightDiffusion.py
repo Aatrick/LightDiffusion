@@ -921,7 +921,10 @@ def sample_euler_ancestral(
         x = x + d * dt
         if sigmas[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
-        taesd_preview(x)
+        if app.previewer_checkbox.get() == True:
+            taesd_preview(x)
+        else:
+            pass
     return x
 
 
@@ -1084,7 +1087,10 @@ class DPMSolver(nn.Module):
                 info["n_reject"] += 1
             info["nfe"] += order
             info["steps"] += 1
-            taesd_preview(x)
+            if app.previewer_checkbox.get() == True:
+                taesd_preview(x)
+            else:
+                pass
             
         try:
             app.title("LightDiffusion")
@@ -1211,7 +1217,10 @@ def sample_dpmpp_2m_sde(
                     * (-2 * eta_h).expm1().neg().sqrt()
                     * s_noise
                 )
-        taesd_preview(x)
+        if app.previewer_checkbox.get() == True:
+            taesd_preview(x)
+        else:
+            pass
 
         old_denoised = denoised
         h_last = h
@@ -10110,14 +10119,14 @@ class App(tk.Tk):
             selected_lora.set(lora_names[0])
 
         # Create a frame for the sidebar
-        self.sidebar = tk.Frame(self, width=200, bg="black")
+        self.sidebar = tk.Frame(self, width=300, bg="black")
         self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
 
         # Text input for the prompt
-        self.prompt_entry = ctk.CTkTextbox(self.sidebar, width=400, height=200)
+        self.prompt_entry = ctk.CTkTextbox(self.sidebar, height=200, width=300)
         self.prompt_entry.pack(pady=10, padx=10)
 
-        self.neg = ctk.CTkTextbox(self.sidebar, width=400, height=50)
+        self.neg = ctk.CTkTextbox(self.sidebar, height=50, width=300)
         self.neg.pack(pady=10, padx=10)
 
         self.dropdown = ctk.CTkOptionMenu(self.sidebar, values=file_names)
@@ -10283,6 +10292,7 @@ class App(tk.Tk):
                 self.cfg_slider.get(),
             ),
         )
+        self.bind("<Configure>", self.on_resize)
         self.display_most_recent_image()
 
     def _img2img(self, file_path):
@@ -10700,13 +10710,9 @@ class App(tk.Tk):
                 pass
 
         # Convert the image to PhotoImage and display it
-        img = img.resize((int(w / 2), int(h / 2)))
-        img = ImageTk.PhotoImage(img)
+        #img = img.resize((int(w / 2), int(h / 2)))
+        #img = ImageTk.PhotoImage(img)
         self.image_label.after(0, self._update_image_label, img)
-
-    def _update_image_label(self, img):
-        self.image_label.config(image=img)
-        self.image_label.image = img  # Keep a reference to prevent garbage collection
 
     def update_labels(self):
         self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
@@ -10714,16 +10720,22 @@ class App(tk.Tk):
         self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
         
     def update_image(self, img):
-        img = ImageTk.PhotoImage(img)
+        label_width = int(4 * self.winfo_width() / 7)
+        label_height = int(4 * self.winfo_height() / 7)
+        img = img.resize((label_width, label_height), Image.LANCZOS)
         self.image_label.after(0, self._update_image_label, img)
+
+    def _update_image_label(self, img):
+        # Convert the PIL image to a Tkinter PhotoImage
+        tk_image = ImageTk.PhotoImage(img)
+        # Update the image label with the Tkinter PhotoImage
+        self.image_label.config(image=tk_image)
+        # Keep a reference to the image to prevent it from being garbage collected
+        self.image_label.image = tk_image
 
     def display_most_recent_image(self):
         # Get a list of all image files in the output directory
         image_files = glob.glob("./_internal/output/*")
-
-        # Get the current size of the window
-        window_width = self.winfo_width() - 400
-        window_height = self.winfo_height()
 
         # If there are no image files, return
         if not image_files:
@@ -10734,17 +10746,11 @@ class App(tk.Tk):
 
         # Open the most recent image file
         img = Image.open(image_files[0])
+        self.update_image(img)
 
-        # resize the image to fit the window while keeping the aspect ratio
-        img.thumbnail([window_width, window_height])
-
-        # Convert the image to PhotoImage
-        img = ImageTk.PhotoImage(img)
-
-        # Display the image
-        self.image_label.config(image=img)
-        self.image_label.image = img
-        #self.after(1000, self.display_most_recent_image)
+    def on_resize(self, event):
+        if hasattr(self, 'img'):
+            self.update_image(self.img)
 
 
 if __name__ == "__main__":
