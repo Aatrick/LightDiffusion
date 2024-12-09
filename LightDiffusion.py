@@ -738,16 +738,26 @@ class TAESD(nn.Module):
         return x.sub(TAESD.latent_shift).mul(2 * TAESD.latent_magnitude)
 
     def decode(self, x):
-        device = next(self.taesd_decoder.parameters()).device  # Get the device of the decoder
-        x = x.to(device)  # Move the input tensor to the same device as the decoder
+        device = next(self.taesd_decoder.parameters()).device
+        x = x.to(device)
         x_sample = self.taesd_decoder((x - self.vae_shift) * self.vae_scale)
         x_sample = x_sample.sub(0.5).mul(2)
         return x_sample
 
     def encode(self, x):
-        device = next(self.taesd_encoder.parameters()).device  # Get the device of the encoder
-        x = x.to(device)  # Move the input tensor to the same device as the encoder
+        device = next(self.taesd_encoder.parameters()).device
+        x = x.to(device) 
         return (self.taesd_encoder(x * 0.5 + 0.5) / self.vae_scale) + self.vae_shift
+
+def taesd_preview(x):
+    if app.previewer_checkbox.get() == True:
+        taesd_instance = TAESD()
+        for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
+            i = 255.0 * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        app.update_image(img)
+    else:
+        pass
 
 
 class LatentPreviewMethod(enum.Enum):
@@ -911,6 +921,7 @@ def sample_euler_ancestral(
         x = x + d * dt
         if sigmas[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
+        taesd_preview(x)
     return x
 
 
@@ -1040,7 +1051,6 @@ class DPMSolver(nn.Module):
             h_init, pcoeff, icoeff, dcoeff, 1.5 if eta else order, accept_safety
         )
         info = {"steps": 0, "nfe": 0, "n_accept": 0, "n_reject": 0}
-        taesd_instance = TAESD()
 
         while s < t_end - 1e-5 if forward else s > t_end + 1e-5:
             try:
@@ -1074,10 +1084,7 @@ class DPMSolver(nn.Module):
                 info["n_reject"] += 1
             info["nfe"] += order
             info["steps"] += 1
-            for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
-                i = 255.0 * image.cpu().numpy()
-                img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            app.update_image(img)
+            taesd_preview(x)
             
         try:
             app.title("LightDiffusion")
@@ -1204,6 +1211,7 @@ def sample_dpmpp_2m_sde(
                     * (-2 * eta_h).expm1().neg().sqrt()
                     * s_noise
                 )
+        taesd_preview(x)
 
         old_denoised = denoised
         h_last = h
@@ -10198,6 +10206,10 @@ class App(tk.Tk):
         # centered Label to display the generated image
         self.image_label = tk.Label(self.display, bg="black")
         self.image_label.pack(expand=True, padx=10, pady=10)
+        
+        self.previewer_checkbox = ctk.CTkCheckBox(
+            self.display, text="Previewer", variable=tk.BooleanVar())
+        self.previewer_checkbox.pack(pady=10)
 
         self.ckpt = None
 
