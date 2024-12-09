@@ -109,6 +109,14 @@ if glob.glob("./_internal/embeddings/*.pt") == []:
     #     filename="EasyNegative.safetensors",
     #     local_dir="./_internal/embeddings/",
     # )
+if glob.glob("./_internal/vae_approx/*.pth") == []:
+    from huggingface_hub import hf_hub_download
+    
+    hf_hub_download(
+        repo_id="madebyollin/taesd",
+        filename="taesd_decoder.safetensors",
+        local_dir="./_internal/vae_approx/",
+    )
 
 args_parsing = False
 
@@ -721,7 +729,7 @@ class TAESD(nn.Module):
         self.vae_scale = torch.nn.Parameter(torch.tensor(1.0))
         self.taesd_encoder = Encoder2(latent_channels)
         self.taesd_decoder = Decoder2(latent_channels)
-        decoder_path = "./_internal/vae_approx/taesd_decoder.pth" if decoder_path is None else decoder_path
+        decoder_path = "./_internal/vae_approx/taesd_decoder.safetensors" if decoder_path is None else decoder_path
         if encoder_path is not None:
             self.taesd_encoder.load_state_dict(load_torch_file(encoder_path, safe_load=True))
         if decoder_path is not None:
@@ -909,10 +917,13 @@ def sample_euler_ancestral(
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
+        if app.interrupt_flag == True:
+                break
         try:
             app.title(f"LightDiffusion - {i}it")
         except:
             pass
+        
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
         d = to_d(x, sigmas[i], denoised)
@@ -1060,6 +1071,8 @@ class DPMSolver(nn.Module):
                 app.title(f"LightDiffusion - {info['steps']*3}it")
             except:
                 pass
+            if app.interrupt_flag == True:
+                break
             eps_cache = {}
             t = (
                 torch.minimum(t_end, s + pid.h)
@@ -1183,6 +1196,8 @@ def sample_dpmpp_2m_sde(
     h = None
 
     for i in trange(len(sigmas) - 1, disable=disable):
+        if app.interrupt_flag == True:
+                break
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         if sigmas[i + 1] == 0:
             # Denoising step
@@ -10206,7 +10221,7 @@ class App(tk.Tk):
         self.generate_button = ctk.CTkButton(
             self.sidebar, text="Generate", command=self.generate_image
         )
-        self.generate_button.pack(pady=20)
+        self.generate_button.pack(pady=10)
 
         # Create a frame for the image display, without border
         self.display = tk.Frame(self, bg="black", border=0)
@@ -10224,12 +10239,20 @@ class App(tk.Tk):
 
         # load the checkpoint on an another thread
         threading.Thread(target=self._prep, daemon=True).start()
+        
+        self.button_frame = tk.Frame(self.sidebar, bg="black")
+        self.button_frame.pack(pady=10)
 
         # add an img2img button, the button opens the file selector, run img2img on the selected image
         self.img2img_button = ctk.CTkButton(
-            self.sidebar, text="img2img", command=self.img2img
+            self.button_frame, text="img2img", command=self.img2img
         )
-        self.img2img_button.pack()
+        self.img2img_button.grid(row=0, column=0, padx=5)
+        
+        self.interrupt_flag = False
+        
+        self.interrupt_button = ctk.CTkButton(self.button_frame, text="Interrupt", command=self.interrupt_generation)
+        self.interrupt_button.grid(row=0, column=1, padx=5)
 
         prompt, neg, width, height, cfg = load_parameters_from_file()
         self.prompt_entry.insert(tk.END, prompt)
@@ -10521,7 +10544,7 @@ class App(tk.Tk):
             )
             if self.stable_fast_var.get() == True:
                 try:
-                    app.title("LightDiffusion - Generating StableFast model")
+                    self.title("LightDiffusion - Generating StableFast model")
                 except:
                     pass
                 applystablefast = ApplyStableFastUnet()
@@ -10531,7 +10554,6 @@ class App(tk.Tk):
                 )
             else:
                 applystablefast_158 = loraloader_274
-
             cliptextencode_242 = cliptextencode.encode(
                 text=prompt,
                 clip=clipsetlastlayer_257[0],
@@ -10575,7 +10597,6 @@ class App(tk.Tk):
                     negative=cliptextencode_243[0],
                     latent_image=latentupscale_254[0],
                 )
-
                 vaedecode_240 = vaedecode.decode(
                     samples=ksampler_253[0],
                     vae=checkpointloadersimple_241[2],
@@ -10593,126 +10614,119 @@ class App(tk.Tk):
                 for image in vaedecode_240[0]:
                     i = 255.0 * image.cpu().numpy()
                     img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-
-            try:
-                if self.adetailer_var.get() == True:
-                    bboxdetectorsegs_132 = bboxdetectorsegs.doit(
-                        threshold=0.5,
-                        dilation=10,
-                        crop_factor=2,
-                        drop_size=10,
-                        labels="all",
-                        bbox_detector=ultralyticsdetectorprovider_151[0],
-                        image=vaedecode_240[0],
-                    )
-                    samdetectorcombined_139 = samdetectorcombined.doit(
-                        detection_hint="center-1",
-                        dilation=0,
-                        threshold=0.93,
-                        bbox_expansion=0,
-                        mask_hint_threshold=0.7,
-                        mask_hint_use_negative="False",
-                        sam_model=samloader_87[0],
-                        segs=bboxdetectorsegs_132[0],
-                        image=vaedecode_240[0],
-                    )
-                    impactsegsandmask_152 = impactsegsandmask.doit(
-                        segs=bboxdetectorsegs_132[0],
-                        mask=samdetectorcombined_139[0],
-                    )
-                    detailerforeachdebug_145 = detailerforeachdebug.doit(
-                        guide_size=512,
-                        guide_size_for=False,
-                        max_size=768,
-                        seed=random.randint(1, 2**64),
-                        steps=40,
-                        cfg=6.5,
-                        sampler_name="dpmpp_2m_sde",
-                        scheduler="karras",
-                        denoise=0.5,
-                        feather=5,
-                        noise_mask=True,
-                        force_inpaint=True,
-                        wildcard="",
-                        cycle=1,
-                        inpaint_model=False,
-                        noise_mask_feather=20,
-                        image=vaedecode_240[0],
-                        segs=impactsegsandmask_152[0],
-                        model=checkpointloadersimple_241[0],
-                        clip=checkpointloadersimple_241[1],
-                        vae=checkpointloadersimple_241[2],
-                        positive=cliptextencode_124[0],
-                        negative=cliptextencode_243[0],
-                    )
-                    saveimage_115 = saveimage.save_images(
-                        filename_prefix="LD-refined",
-                        images=detailerforeachdebug_145[0],
-                    )
-                    ultralyticsdetectorprovider = UltralyticsDetectorProvider()
-                    ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
-                        model_name="face_yolov9c.pt"
-                    )
-                    bboxdetectorsegs_132 = bboxdetectorsegs.doit(
-                        threshold=0.5,
-                        dilation=10,
-                        crop_factor=2,
-                        drop_size=10,
-                        labels="all",
-                        bbox_detector=ultralyticsdetectorprovider_151[0],
-                        image=detailerforeachdebug_145[0],
-                    )
-                    samdetectorcombined_139 = samdetectorcombined.doit(
-                        detection_hint="center-1",
-                        dilation=0,
-                        threshold=0.93,
-                        bbox_expansion=0,
-                        mask_hint_threshold=0.7,
-                        mask_hint_use_negative="False",
-                        sam_model=samloader_87[0],
-                        segs=bboxdetectorsegs_132[0],
-                        image=detailerforeachdebug_145[0],
-                    )
-                    impactsegsandmask_152 = impactsegsandmask.doit(
-                        segs=bboxdetectorsegs_132[0],
-                        mask=samdetectorcombined_139[0],
-                    )
-                    detailerforeachdebug_145 = detailerforeachdebug.doit(
-                        guide_size=512,
-                        guide_size_for=False,
-                        max_size=768,
-                        seed=random.randint(1, 2**64),
-                        steps=40,
-                        cfg=6.5,
-                        sampler_name="dpmpp_2m_sde",
-                        scheduler="karras",
-                        denoise=0.5,
-                        feather=5,
-                        noise_mask=True,
-                        force_inpaint=True,
-                        wildcard="",
-                        cycle=1,
-                        inpaint_model=False,
-                        noise_mask_feather=20,
-                        image=detailerforeachdebug_145[0],
-                        segs=impactsegsandmask_152[0],
-                        model=checkpointloadersimple_241[0],
-                        clip=checkpointloadersimple_241[1],
-                        vae=checkpointloadersimple_241[2],
-                        positive=cliptextencode_124[0],
-                        negative=cliptextencode_243[0],
-                    )
-                    saveimage_115 = saveimage.save_images(
-                        filename_prefix="lD-2ndrefined",
-                        images=detailerforeachdebug_145[0],
-                    )
-            except:
-                pass
-
-        # Convert the image to PhotoImage and display it
-        #img = img.resize((int(w / 2), int(h / 2)))
-        #img = ImageTk.PhotoImage(img)
-        self.image_label.after(0, self._update_image_label, img)
+            if self.adetailer_var.get() == True:
+                bboxdetectorsegs_132 = bboxdetectorsegs.doit(
+                    threshold=0.5,
+                    dilation=10,
+                    crop_factor=2,
+                    drop_size=10,
+                    labels="all",
+                    bbox_detector=ultralyticsdetectorprovider_151[0],
+                    image=vaedecode_240[0],
+                )
+                samdetectorcombined_139 = samdetectorcombined.doit(
+                    detection_hint="center-1",
+                    dilation=0,
+                    threshold=0.93,
+                    bbox_expansion=0,
+                    mask_hint_threshold=0.7,
+                    mask_hint_use_negative="False",
+                    sam_model=samloader_87[0],
+                    segs=bboxdetectorsegs_132[0],
+                    image=vaedecode_240[0],
+                )
+                impactsegsandmask_152 = impactsegsandmask.doit(
+                    segs=bboxdetectorsegs_132[0],
+                    mask=samdetectorcombined_139[0],
+                )
+                detailerforeachdebug_145 = detailerforeachdebug.doit(
+                    guide_size=512,
+                    guide_size_for=False,
+                    max_size=768,
+                    seed=random.randint(1, 2**64),
+                    steps=40,
+                    cfg=6.5,
+                    sampler_name="dpmpp_2m_sde",
+                    scheduler="karras",
+                    denoise=0.5,
+                    feather=5,
+                    noise_mask=True,
+                    force_inpaint=True,
+                    wildcard="",
+                    cycle=1,
+                    inpaint_model=False,
+                    noise_mask_feather=20,
+                    image=vaedecode_240[0],
+                    segs=impactsegsandmask_152[0],
+                    model=checkpointloadersimple_241[0],
+                    clip=checkpointloadersimple_241[1],
+                    vae=checkpointloadersimple_241[2],
+                    positive=cliptextencode_124[0],
+                    negative=cliptextencode_243[0],
+                )
+                saveimage_115 = saveimage.save_images(
+                    filename_prefix="LD-refined",
+                    images=detailerforeachdebug_145[0],
+                )
+                ultralyticsdetectorprovider = UltralyticsDetectorProvider()
+                ultralyticsdetectorprovider_151 = ultralyticsdetectorprovider.doit(
+                    model_name="face_yolov9c.pt"
+                )
+                bboxdetectorsegs_132 = bboxdetectorsegs.doit(
+                    threshold=0.5,
+                    dilation=10,
+                    crop_factor=2,
+                    drop_size=10,
+                    labels="all",
+                    bbox_detector=ultralyticsdetectorprovider_151[0],
+                    image=detailerforeachdebug_145[0],
+                )
+                samdetectorcombined_139 = samdetectorcombined.doit(
+                    detection_hint="center-1",
+                    dilation=0,
+                    threshold=0.93,
+                    bbox_expansion=0,
+                    mask_hint_threshold=0.7,
+                    mask_hint_use_negative="False",
+                    sam_model=samloader_87[0],
+                    segs=bboxdetectorsegs_132[0],
+                    image=detailerforeachdebug_145[0],
+                )
+                impactsegsandmask_152 = impactsegsandmask.doit(
+                    segs=bboxdetectorsegs_132[0],
+                    mask=samdetectorcombined_139[0],
+                )
+                detailerforeachdebug_145 = detailerforeachdebug.doit(
+                    guide_size=512,
+                    guide_size_for=False,
+                    max_size=768,
+                    seed=random.randint(1, 2**64),
+                    steps=40,
+                    cfg=6.5,
+                    sampler_name="dpmpp_2m_sde",
+                    scheduler="karras",
+                    denoise=0.5,
+                    feather=5,
+                    noise_mask=True,
+                    force_inpaint=True,
+                    wildcard="",
+                    cycle=1,
+                    inpaint_model=False,
+                    noise_mask_feather=20,
+                    image=detailerforeachdebug_145[0],
+                    segs=impactsegsandmask_152[0],
+                    model=checkpointloadersimple_241[0],
+                    clip=checkpointloadersimple_241[1],
+                    vae=checkpointloadersimple_241[2],
+                    positive=cliptextencode_124[0],
+                    negative=cliptextencode_243[0],
+                )
+                saveimage_115 = saveimage.save_images(
+                    filename_prefix="lD-2ndrefined",
+                    images=detailerforeachdebug_145[0],
+                )
+        self.update_image(img)
+            
 
     def update_labels(self):
         self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
@@ -10720,9 +10734,22 @@ class App(tk.Tk):
         self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
         
     def update_image(self, img):
+        # Calculate the aspect ratio of the original image
+        aspect_ratio = img.width / img.height
+
+        # Determine the new dimensions while maintaining the aspect ratio
         label_width = int(4 * self.winfo_width() / 7)
         label_height = int(4 * self.winfo_height() / 7)
-        img = img.resize((label_width, label_height), Image.LANCZOS)
+
+        if label_width / aspect_ratio <= label_height:
+            new_width = label_width
+            new_height = int(label_width / aspect_ratio)
+        else:
+            new_height = label_height
+            new_width = int(label_height * aspect_ratio)
+
+        # Resize the image to the new dimensions
+        img = img.resize((new_width, new_height), Image.LANCZOS)
         self.image_label.after(0, self._update_image_label, img)
 
     def _update_image_label(self, img):
@@ -10751,7 +10778,9 @@ class App(tk.Tk):
     def on_resize(self, event):
         if hasattr(self, 'img'):
             self.update_image(self.img)
-
+    
+    def interrupt_generation(self):
+        self.interrupt_flag = True
 
 if __name__ == "__main__":
     app = App()
