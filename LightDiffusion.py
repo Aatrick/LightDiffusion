@@ -4,6 +4,7 @@ import glob
 import os
 import random
 import sys
+import threading
 import tkinter as tk
 from tkinter import *
 from tkinter import filedialog
@@ -761,7 +762,7 @@ def taesd_preview(x):
     if app.previewer_checkbox.get() == True:
         taesd_instance = TAESD()
         for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
-            i = 255.0 * image.cpu().numpy()
+            i = 255.0 * image.cpu().detach().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
         app.update_image(img)
     else:
@@ -933,7 +934,7 @@ def sample_euler_ancestral(
         if sigmas[i + 1] > 0:
             x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * s_noise * sigma_up
         if app.previewer_checkbox.get() == True:
-            taesd_preview(x)
+                threading.Thread(target=taesd_preview, args=(x,)).start()
         else:
             pass
     return x
@@ -1101,7 +1102,7 @@ class DPMSolver(nn.Module):
             info["nfe"] += order
             info["steps"] += 1
             if app.previewer_checkbox.get() == True:
-                taesd_preview(x)
+                threading.Thread(target=taesd_preview, args=(x,)).start()
             else:
                 pass
             
@@ -1233,7 +1234,7 @@ def sample_dpmpp_2m_sde(
                     * s_noise
                 )
         if app.previewer_checkbox.get() == True:
-            taesd_preview(x)
+                threading.Thread(target=taesd_preview, args=(x,)).start()
         else:
             pass
 
@@ -10316,7 +10317,9 @@ class App(tk.Tk):
             ),
         )
         self.bind("<Configure>", self.on_resize)
+        self.display_most_recent_image_flag = False
         self.display_most_recent_image()
+       
 
     def _img2img(self, file_path):
         prompt = self.prompt_entry.get("1.0", tk.END)
@@ -10726,6 +10729,7 @@ class App(tk.Tk):
                     images=detailerforeachdebug_145[0],
                 )
         self.update_image(img)
+        self.display_most_recent_image_flag = True
             
 
     def update_labels(self):
@@ -10774,6 +10778,11 @@ class App(tk.Tk):
         # Open the most recent image file
         img = Image.open(image_files[0])
         self.update_image(img)
+        
+        if self.display_most_recent_image_flag == True:
+            self.after(10000, self.display_most_recent_image)
+            self.display_most_recent_image_flag = False
+
 
     def on_resize(self, event):
         if hasattr(self, 'img'):
