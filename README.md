@@ -25,7 +25,7 @@ For more information, check the [documentation](https://aatrick.github.io/LightD
 - Automatic Prompt-Enhancing with llama3.1 (ollama)
 - Discord bot integration with the installation of [Boubou](https://github.com/Aatrick/Boubou) and the usage of LightDiffusion's pipeline
 - Automatic Face and body Detailer (based on [Impact pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack))
-- TAESD image previewing
+- TAESD image previewing at the cost of a 10% performance hit
 
 ![Screenshot 2024-06-10 140130](https://github.com/Aatrick/LightDiffusion/assets/113598245/711100ee-3af6-49aa-9de6-81361a64f3f9)
 
