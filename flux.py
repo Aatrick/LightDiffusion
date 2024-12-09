@@ -275,6 +275,94 @@ parser.add_argument(
     help="Disables ipex.optimize when loading models with Intel GPUs.",
 )
 
+"""
+Tiny AutoEncoder for Stable Diffusion
+(DNN for encoding / decoding SD's latent space)
+"""
+
+def conv(n_in, n_out, **kwargs):
+    return disable_weight_init.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
+
+class Clamp(nn.Module):
+    def forward(self, x):
+        return torch.tanh(x / 3) * 3
+
+class Block(nn.Module):
+    def __init__(self, n_in, n_out):
+        super().__init__()
+        self.conv = nn.Sequential(conv(n_in, n_out), nn.ReLU(), conv(n_out, n_out), nn.ReLU(), conv(n_out, n_out))
+        self.skip = disable_weight_init.Conv2d(n_in, n_out, 1, bias=False) if n_in != n_out else nn.Identity()
+        self.fuse = nn.ReLU()
+    def forward(self, x):
+        return self.fuse(self.conv(x) + self.skip(x))
+
+def Encoder2(latent_channels=4):
+    return nn.Sequential(
+        conv(3, 64), Block(64, 64),
+        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
+        conv(64, latent_channels),
+    )
+
+
+def Decoder2(latent_channels=4):
+    return nn.Sequential(
+        Clamp(), conv(latent_channels, 64), nn.ReLU(),
+        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+        Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
+        Block(64, 64), conv(64, 3),
+    )
+
+class TAESD(nn.Module):
+    latent_magnitude = 3
+    latent_shift = 0.5
+
+    def __init__(self, encoder_path=None, decoder_path=None, latent_channels=4):
+        super().__init__()
+        self.vae_shift = torch.nn.Parameter(torch.tensor(0.0))
+        self.vae_scale = torch.nn.Parameter(torch.tensor(1.0))
+        self.taesd_encoder = Encoder2(latent_channels)
+        self.taesd_decoder = Decoder2(latent_channels)
+        decoder_path = "./_internal/vae_approx/taef1_decoder.pth" if decoder_path is None else decoder_path
+        if encoder_path is not None:
+            self.taesd_encoder.load_state_dict(load_torch_file(encoder_path, safe_load=True))
+        if decoder_path is not None:
+            self.taesd_decoder.load_state_dict(load_torch_file(decoder_path, safe_load=True))
+
+    @staticmethod
+    def scale_latents(x):
+        """raw latents -> [0, 1]"""
+        return x.div(2 * TAESD.latent_magnitude).add(TAESD.latent_shift).clamp(0, 1)
+
+    @staticmethod
+    def unscale_latents(x):
+        """[0, 1] -> raw latents"""
+        return x.sub(TAESD.latent_shift).mul(2 * TAESD.latent_magnitude)
+
+    def decode(self, x):
+        device = next(self.taesd_decoder.parameters()).device
+        x = x.to(device)
+        x_sample = self.taesd_decoder((x - self.vae_shift) * self.vae_scale)
+        x_sample = x_sample.sub(0.5).mul(2)
+        return x_sample
+
+    def encode(self, x):
+        device = next(self.taesd_encoder.parameters()).device
+        x = x.to(device) 
+        return (self.taesd_encoder(x * 0.5 + 0.5) / self.vae_scale) + self.vae_shift
+
+def taesd_preview(x):
+    if app.previewer_checkbox.get() == True:
+        taesd_instance = TAESD()
+        for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
+            i = 255.0 * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+        app.update_image(img)
+    else:
+        pass
+
 
 class LatentPreviewMethod(enum.Enum):
     NoPreviews = "none"
@@ -772,6 +860,7 @@ def sample_euler(
         dt = sigmas[i + 1] - sigma_hat
         # Euler method
         x = x + d * dt
+        taesd_preview(x)
     return x
 
 
@@ -3050,65 +3139,7 @@ class KSAMPLER(Sampler):
 
 
 def ksampler(sampler_name, extra_options={}, inpaint_options={}):
-    if sampler_name == "dpm_adaptive":
-
-        def dpm_adaptive_function(
-            model, noise, sigmas, extra_args, callback, disable, **extra_options
-        ):
-            if len(sigmas) <= 1:
-                return noise
-
-            sigma_min = sigmas[-1]
-            if sigma_min == 0:
-                sigma_min = sigmas[-2]
-            return sample_dpm_adaptive(
-                model,
-                noise,
-                sigma_min,
-                sigmas[0],
-                extra_args=extra_args,
-                callback=callback,
-                disable=disable,
-                **extra_options,
-            )
-
-        sampler_function = dpm_adaptive_function
-    elif sampler_name == "dpmpp_2m_sde":
-
-        def dpmpp_sde_function(
-            model, noise, sigmas, extra_args, callback, disable, **extra_options
-        ):
-            sigma_min = sigmas[-1]
-            if sigma_min == 0:
-                sigma_min = sigmas[-2]
-            return sample_dpmpp_2m_sde(
-                model,
-                noise,
-                sigmas,
-                extra_args=extra_args,
-                callback=callback,
-                disable=disable,
-                **extra_options,
-            )
-
-        sampler_function = dpmpp_sde_function
-    elif sampler_name == "euler_ancestral":
-
-        def euler_ancestral_function(
-            model, noise, sigmas, extra_args, callback, disable
-        ):
-            return sample_euler_ancestral(
-                model,
-                noise,
-                sigmas,
-                extra_args=extra_args,
-                callback=callback,
-                disable=disable,
-                **extra_options,
-            )
-
-        sampler_function = euler_ancestral_function
-    elif sampler_name == "euler":
+    if sampler_name == "euler":
 
         def euler_function(model, noise, sigmas, extra_args, callback, disable):
             return sample_euler(
@@ -9281,12 +9312,6 @@ def cleanup_additional_models(models):
 
 
 class KSampler1:
-    SCHEDULERS = SCHEDULER_NAMES
-    SAMPLERS = SAMPLER_NAMES
-    DISCARD_PENULTIMATE_SIGMA_SAMPLERS = set(
-        ("dpm_2", "dpm_2_ancestral", "uni_pc", "uni_pc_bh2")
-    )
-
     def __init__(
         self,
         model,
@@ -9486,6 +9511,11 @@ class App(tk.Tk):
         # centered Label to display the generated image
         self.image_label = tk.Label(self.display, bg="black")
         self.image_label.pack(expand=True, padx=10, pady=10)
+        
+        self.preview_check = ctk.CTkCheckBox(
+            self.display, bg="black", text="Preview", variable=tk.BooleanVar()
+            )
+        self.preview_check.pack(pady=10)
 
         self.ckpt = None
 
