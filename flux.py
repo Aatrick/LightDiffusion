@@ -70,6 +70,15 @@ if glob.glob("./_internal/vae/*.safetensors") == []:
         filename="ae.safetensors",
         local_dir="./_internal/vae",
     )
+    
+if glob.glob("./_internal/vae_approx/*.pth") == []:
+    from huggingface_hub import hf_hub_download
+    
+    hf_hub_download(
+        repo_id="madebyollin/taef1",
+        filename="diffusion_pytorch_model.safetensors",
+        local_dir="./_internal/vae_approx/",
+    )
 
 args_parsing = False
 
@@ -325,7 +334,7 @@ class TAESD(nn.Module):
         self.vae_scale = torch.nn.Parameter(torch.tensor(1.0))
         self.taesd_encoder = Encoder2(latent_channels)
         self.taesd_decoder = Decoder2(latent_channels)
-        decoder_path = "./_internal/vae_approx/taef1_decoder.pth" if decoder_path is None else decoder_path
+        decoder_path = "./_internal/vae_approx/diffusion_pytorch_model.safetensors" if decoder_path is None else decoder_path
         if encoder_path is not None:
             self.taesd_encoder.load_state_dict(load_torch_file(encoder_path, safe_load=True))
         if decoder_path is not None:
@@ -357,7 +366,7 @@ def taesd_preview(x):
     if app.previewer_checkbox.get() == True:
         taesd_instance = TAESD()
         for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
-            i = 255.0 * image.cpu().numpy()
+            i = 255.0 * image.cpu().detach().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
         app.update_image(img)
     else:
@@ -831,6 +840,8 @@ def sample_euler(
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
+        if app.interrupt_flag == True:
+            break
         if s_churn > 0:
             gamma = (
                 min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
@@ -860,7 +871,9 @@ def sample_euler(
         dt = sigmas[i + 1] - sigma_hat
         # Euler method
         x = x + d * dt
-        taesd_preview(x)
+        if app.preview_check.get() == True:
+            threading.Thread(target=taesd_preview, args=(x,)).start()
+        else : pass
     return x
 
 
@@ -9497,12 +9510,20 @@ class App(tk.Tk):
             variable=self.enhancer_var,
         )
         self.enhancer_checkbox.pack(pady=5)
+        
+        self.button_frame = tk.Frame(self.sidebar, bg="black")
+        self.button_frame.pack()
 
         # Button to launch the generation
         self.generate_button = ctk.CTkButton(
-            self.sidebar, text="Generate", command=self.generate_image
+            self.button_frame, text="Generate", command=self.generate_image
         )
-        self.generate_button.pack(pady=20)
+        self.generate_button.grid(row=0, column=0, padx=10, pady=10)
+        
+        self.interrupt_button = ctk.CTkButton(
+            self.button_frame, text="Interrupt", command=self.interrupt
+        )
+        self.interrupt_button.grid(row=0, column=1, padx=10, pady=10)
 
         # Create a frame for the image display, without border
         self.display = tk.Frame(self, bg="black", border=0)
@@ -9576,6 +9597,8 @@ class App(tk.Tk):
         self.enhancer_var.trace("w", lambda *args: self.changed_smt())
         self.width_slider.bind("<ButtonRelease-1>", lambda event: self.changed_smt())
         self.height_slider.bind("<ButtonRelease-1>", lambda event: self.changed_smt())
+        self.bind("<Configure>", self.on_resize)
+        self.display_most_recent_image_flag = False
         self.display_most_recent_image()
 
     def generate_image(self):
@@ -9674,29 +9697,45 @@ class App(tk.Tk):
 
             self.changed = False
 
-        w = int(self.width_slider.get())
-        h = int(self.height_slider.get())
-        # Convert the image to PhotoImage and display it
-        img = img.resize((int(w / 2), int(h / 2)))
-        img = ImageTk.PhotoImage(img)
         self.image_label.after(0, self._update_image_label, img)
+        self.display_most_recent_image_flag = True
 
-    def _update_image_label(self, img):
-        self.image_label.config(image=img)
-        self.image_label.image = img  # Keep a reference to prevent garbage collection
 
     def update_labels(self):
         self.width_label.configure(text=f"Width: {int(self.width_slider.get())}")
         self.height_label.configure(text=f"Height: {int(self.height_slider.get())}")
         self.changed = True
 
+    def update_image(self, img):
+        # Calculate the aspect ratio of the original image
+        aspect_ratio = img.width / img.height
+
+        # Determine the new dimensions while maintaining the aspect ratio
+        label_width = int(4 * self.winfo_width() / 7)
+        label_height = int(4 * self.winfo_height() / 7)
+
+        if label_width / aspect_ratio <= label_height:
+            new_width = label_width
+            new_height = int(label_width / aspect_ratio)
+        else:
+            new_height = label_height
+            new_width = int(label_height * aspect_ratio)
+
+        # Resize the image to the new dimensions
+        img = img.resize((new_width, new_height), Image.LANCZOS)
+        self.image_label.after(0, self._update_image_label, img)
+
+    def _update_image_label(self, img):
+        # Convert the PIL image to a Tkinter PhotoImage
+        tk_image = ImageTk.PhotoImage(img)
+        # Update the image label with the Tkinter PhotoImage
+        self.image_label.config(image=tk_image)
+        # Keep a reference to the image to prevent it from being garbage collected
+        self.image_label.image = tk_image
+
     def display_most_recent_image(self):
         # Get a list of all image files in the output directory
         image_files = glob.glob("./_internal/output/*")
-
-        # Get the current size of the window
-        window_width = self.winfo_width() - 400
-        window_height = self.winfo_height()
 
         # If there are no image files, return
         if not image_files:
@@ -9707,17 +9746,18 @@ class App(tk.Tk):
 
         # Open the most recent image file
         img = Image.open(image_files[0])
+        self.update_image(img)
+        
+        if self.display_most_recent_image_flag == True:
+            self.after(10000, self.display_most_recent_image)
+            self.display_most_recent_image_flag = False
 
-        # resize the image to fit the window while keeping the aspect ratio
-        img.thumbnail([window_width, window_height])
+    def on_resize(self, event):
+        if hasattr(self, 'img'):
+            self.update_image(self.img)
 
-        # Convert the image to PhotoImage
-        img = ImageTk.PhotoImage(img)
-
-        # Display the image
-        self.image_label.config(image=img)
-        self.image_label.image = img
-        self.after(1000, self.display_most_recent_image)
+    def interrupt_generation(self):
+        self.interrupt_flag = True
 
 
 if __name__ == "__main__":
