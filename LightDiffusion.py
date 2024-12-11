@@ -764,6 +764,7 @@ def taesd_preview(x):
         for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
             i = 255.0 * image.cpu().detach().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            img = img.convert("RGB")
         app.update_image(img)
     else:
         pass
@@ -10115,7 +10116,7 @@ def load_parameters_from_file():
 files = glob.glob("./_internal/checkpoints/*.safetensors")
 loras = glob.glob("./_internal/loras/*.safetensors")
 loras += glob.glob("./_internal/loras/*.pt")
-
+generated = 0
 
 class App(tk.Tk):
     def __init__(self):
@@ -10729,6 +10730,8 @@ class App(tk.Tk):
                     images=detailerforeachdebug_145[0],
                 )
         self.update_image(img)
+        global generated
+        generated = img
         self.display_most_recent_image_flag = True
             
 
@@ -10738,6 +10741,7 @@ class App(tk.Tk):
         self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
         
     def update_image(self, img):
+        global generated
         # Calculate the aspect ratio of the original image
         aspect_ratio = img.width / img.height
 
@@ -10755,6 +10759,9 @@ class App(tk.Tk):
         # Resize the image to the new dimensions
         img = img.resize((new_width, new_height), Image.LANCZOS)
         self.image_label.after(0, self._update_image_label, img)
+        if self.display_most_recent_image_flag == True:
+            self.update_image(generated)
+            self.display_most_recent_image_flag = False
 
     def _update_image_label(self, img):
         # Convert the PIL image to a Tkinter PhotoImage
@@ -10778,10 +10785,6 @@ class App(tk.Tk):
         # Open the most recent image file
         img = Image.open(image_files[0])
         self.update_image(img)
-        
-        if self.display_most_recent_image_flag == True:
-            self.after(10000, self.display_most_recent_image)
-            self.display_most_recent_image_flag = False
 
 
     def on_resize(self, event):
