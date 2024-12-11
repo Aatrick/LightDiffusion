@@ -123,18 +123,45 @@ args_parsing = False
 
 
 class LatentFormat:
+    """Base class for latent formats.
+    
+    Attributes:
+        scale_factor (float): The scale factor for the latent format.
+
+    Returns:
+        LatentFormat: A latent format object.
+    """
     scale_factor = 1.0
-    latent_rgb_factors = None
-    taesd_decoder_name = None
 
     def process_in(self, latent):
+        """Process the latent input, by multiplying it by the scale factor.
+
+        Args:
+            latent (torch.Tensor): The latent tensor.
+
+        Returns:
+            torch.Tensor: The processed latent tensor.
+        """
         return latent * self.scale_factor
 
     def process_out(self, latent):
+        """Process the latent output, by dividing it by the scale factor.
+        
+        Args:
+            latent (torch.Tensor): The latent tensor.
+            
+        Returns:
+            torch.Tensor: The processed latent tensor.
+        """
         return latent / self.scale_factor
 
 
 class SD15(LatentFormat):
+    """SD15 latent format.
+
+    Args:
+        LatentFormat (LatentFormat): The base latent format class.
+    """
     def __init__(self, scale_factor=0.18215):
         self.scale_factor = scale_factor
         self.latent_rgb_factors = [
@@ -154,6 +181,7 @@ load = pickle.load
 
 
 class Empty:
+    """An empty class used as a placeholder."""
     pass
 
 
@@ -164,6 +192,23 @@ import importlib
 
 
 class DiagonalGaussianDistribution(object):
+    """Represents a diagonal Gaussian distribution parameterized by mean and log-variance.
+    
+    Attributes:
+        parameters (torch.Tensor): The concatenated mean and log-variance of the distribution.
+        mean (torch.Tensor): The mean of the distribution.
+        logvar (torch.Tensor): The log-variance of the distribution, clamped between -30.0 and 20.0.
+        std (torch.Tensor): The standard deviation of the distribution, computed as exp(0.5 * logvar).
+        var (torch.Tensor): The variance of the distribution, computed as exp(logvar).
+        deterministic (bool): If True, the distribution is deterministic.
+        
+    Methods:
+        sample() -> torch.Tensor:
+            Samples from the distribution using the reparameterization trick.
+        kl(other: DiagonalGaussianDistribution = None) -> torch.Tensor:
+            Computes the Kullback-Leibler divergence between this distribution and a standard normal distribution.
+            If `other` is provided, computes the KL divergence between this distribution and `other`.
+    """
     def __init__(self, parameters, deterministic=False):
         self.parameters = parameters
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
@@ -173,12 +218,26 @@ class DiagonalGaussianDistribution(object):
         self.var = torch.exp(self.logvar)
 
     def sample(self):
+        """Samples from the distribution using the reparameterization trick.
+        
+        Returns:
+            torch.Tensor: A sample from the distribution.
+        """
         x = self.mean + self.std * torch.randn(self.mean.shape).to(
             device=self.parameters.device
         )
         return x
 
     def kl(self, other=None):
+        """Computes the Kullback-Leibler divergence between this distribution and a standard normal distribution.
+        
+        If `other` is provided, computes the KL divergence between this distribution and `other`.
+        
+        Args:
+            other (DiagonalGaussianDistribution, optional): Another distribution to compute the KL divergence with.
+        Returns:
+            torch.Tensor: The KL divergence.
+        """
         return 0.5 * torch.sum(
             torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
             dim=[1, 2, 3],
@@ -186,11 +245,17 @@ class DiagonalGaussianDistribution(object):
 
 
 def append_dims(x, target_dims):
-    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions.
+
+    Args:
+        x (torch.Tensor): The input tensor.
+        target_dims (int): The target number of dimensions.
+
+    Returns:
+        torch.Tensor: The expanded tensor.
+    """
     dims_to_append = target_dims - x.ndim
     expanded = x[(...,) + (None,) * dims_to_append]
-    # MPS will get inf values if it tries to index into the new axes, but detaching fixes this.
-    # https://github.com/pytorch/pytorch/issues/84364
     return expanded.detach().clone() if expanded.device.type == "mps" else expanded
 
 
@@ -198,6 +263,16 @@ import safetensors.torch
 
 
 def load_torch_file(ckpt, safe_load=False, device=None):
+    """Load a PyTorch checkpoint file.
+
+    Args:
+        ckpt (str): The path to the checkpoint file.
+        safe_load (bool, optional): Whether to use safe loading. Defaults to False.
+        device (str, optional): The device to load the checkpoint on. Defaults to None.
+
+    Returns:
+        dict: The loaded checkpoint.
+    """
     if device is None:
         device = torch.device("cpu")
     if ckpt.lower().endswith(".safetensors"):
@@ -208,6 +283,15 @@ def load_torch_file(ckpt, safe_load=False, device=None):
 
 
 def calculate_parameters(sd, prefix=""):
+    """Calculate the parameters of a state dictionary.
+
+    Args:
+        sd (dict): The state dictionary.
+        prefix (str, optional): The prefix for the parameters. Defaults to "".
+
+    Returns:
+        dict: The calculated parameters.
+    """
     params = 0
     for k in sd.keys():
         if k.startswith(prefix):
@@ -216,6 +300,16 @@ def calculate_parameters(sd, prefix=""):
 
 
 def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
+    """Replace the prefix of keys in a state dictionary.
+
+    Args:
+        state_dict (dict): The state dictionary.
+        replace_prefix (str): The prefix to replace.
+        filter_keys (bool, optional): Whether to filter keys. Defaults to False.
+
+    Returns:
+        dict: The updated state dictionary.
+    """
     out = {}
     for rp in replace_prefix:
         replace = list(
@@ -300,6 +394,14 @@ UNET_MAP_BASIC = {
 
 
 def unet_to_diffusers(unet_config):
+    """Convert a UNet configuration to a diffusers configuration.
+
+    Args:
+        unet_config (dict): The UNet configuration.
+
+    Returns:
+        dict: The diffusers configuration.
+    """
     if "num_res_blocks" not in unet_config:
         return {}
     num_res_blocks = unet_config["num_res_blocks"]
@@ -395,10 +497,26 @@ def unet_to_diffusers(unet_config):
 
 
 def repeat_to_batch_size(tensor, batch_size):
-    return tensor
+    """Repeat a tensor to match a specific batch size.
+
+    Args:
+        tensor (torch.Tensor): The input tensor.
+        batch_size (int): The target batch size.
+
+    Returns:
+        torch.Tensor: The repeated tensor.
+    """
+    return tensor.expand(batch_size, *tensor.shape)
 
 
 def set_attr(obj, attr, value):
+    """Set an attribute of an object.
+
+    Args:
+        obj (object): The object.
+        attr (str): The attribute name.
+        value (any): The value to set.
+    """
     attrs = attr.split(".")
     for name in attrs[:-1]:
         obj = getattr(obj, name)
@@ -408,10 +526,23 @@ def set_attr(obj, attr, value):
 
 
 def set_attr_param(obj, attr, value):
+    """Set an attribute parameter of an object.
+
+    Args:
+        obj (object): The object.
+        attr (str): The attribute name.
+        value (any): The value to set.
+    """
     return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
 
 def copy_to_param(obj, attr, value):
-    # inplace update tensor instead of replacing it
+    """Copy a value to an attribute parameter of an object.
+
+    Args:
+        obj (object): The object.
+        attr (str): The attribute name.
+        value (any): The value to copy.
+    """
     attrs = attr.split(".")
     for name in attrs[:-1]:
         obj = getattr(obj, name)
@@ -420,6 +551,15 @@ def copy_to_param(obj, attr, value):
 
 
 def get_attr(obj, attr):
+    """Get an attribute of an object.
+
+    Args:
+        obj (object): The object.
+        attr (str): The attribute name.
+
+    Returns:
+        any: The attribute value.
+    """
     attrs = attr.split(".")
     for name in attrs:
         obj = getattr(obj, name)
@@ -427,6 +567,16 @@ def get_attr(obj, attr):
 
 
 def bislerp(samples, width, height):
+    """Perform bilinear interpolation on samples.
+
+    Args:
+        samples (torch.Tensor): The input samples.
+        width (int): The target width.
+        height (int): The target height.
+
+    Returns:
+        torch.Tensor: The interpolated samples.
+    """
     def slerp(b1, b2, r):
         """slerps batches b1, b2 according to ratio r, batches should be flat e.g. NxC"""
 
@@ -519,6 +669,18 @@ def bislerp(samples, width, height):
 
 
 def common_upscale(samples, width, height, upscale_method, crop):
+    """Upscale samples using a common method.
+
+    Args:
+        samples (torch.Tensor): The input samples.
+        width (int): The target width.
+        height (int): The target height.
+        upscale_method (str): The upscale method.
+        crop (bool): Whether to crop the samples.
+
+    Returns:
+        torch.Tensor: The upscaled samples.
+    """
     s = samples
     return bislerp(s, width, height)
 
@@ -528,6 +690,7 @@ PROGRESS_BAR_HOOK = None
 
 
 class ProgressBar:
+    """Class representing a progress bar."""
     def __init__(self, total):
         global PROGRESS_BAR_HOOK
         self.total = total
@@ -546,6 +709,15 @@ LORA_CLIP_MAP = {
 
 
 def load_lora(lora, to_load):
+    """Load a LoRA model.
+
+    Args:
+        lora (str): The path to the LoRA model.
+        to_load (str): The path to load the model.
+
+    Returns:
+        dict: The loaded LoRA model.
+    """
     patch_dict = {}
     loaded_keys = set()
     for x in to_load:
@@ -580,6 +752,15 @@ def load_lora(lora, to_load):
 
 
 def model_lora_keys_clip(model, key_map={}):
+    """Get the keys for a LoRA model's CLIP component.
+
+    Args:
+        model (torch.nn.Module): The LoRA model.
+        key_map (dict, optional): The key map. Defaults to {}.
+
+    Returns:
+        dict: The keys for the CLIP component.
+    """
     sdk = model.state_dict().keys()
 
     text_model_lora_key = "lora_te_text_model_encoder_layers_{}_{}"
@@ -603,6 +784,15 @@ def model_lora_keys_clip(model, key_map={}):
 
 
 def model_lora_keys_unet(model, key_map={}):
+    """Get the keys for a LoRA model's UNet component.
+
+    Args:
+        model (torch.nn.Module): The LoRA model.
+        key_map (dict, optional): The key map. Defaults to {}.
+
+    Returns:
+        dict: The keys for the UNet component.
+    """
     sdk = model.state_dict().keys()
 
     for k in sdk:
@@ -630,21 +820,34 @@ def model_lora_keys_unet(model, key_map={}):
 
 
 def lcm(a, b):
+    """Calculate the least common multiple (LCM) of two numbers.
+
+    Args:
+        a (int): The first number.
+        b (int): The second number.
+
+    Returns:
+        int: The LCM of the two numbers.
+    """
     return abs(a * b) // math.gcd(a, b)
 
 
 class CONDRegular:
+    """Class representing a regular condition."""
     def __init__(self, cond):
         self.cond = cond
 
     def _copy_with(self, cond):
+        """Copy the condition with a new condition."""
         return self.__class__(cond)
 
     def process_cond(self, batch_size, device, **kwargs):
+        """Process the condition."""
         return self._copy_with(repeat_to_batch_size(self.cond, batch_size).to(device))
 
 
 class CONDCrossAttn(CONDRegular):
+    """Class representing a cross-attention condition."""
     def concat(self, others):
         conds = [self.cond]
         crossattn_max_len = self.cond.shape[1]
@@ -668,6 +871,7 @@ import enum
 
 
 class EnumAction(argparse.Action):
+    """Class representing an argparse action for enums."""
     def __init__(self, **kwargs):
         # Pop off the type value
         enum_type = kwargs.pop("type", None)
@@ -686,13 +890,24 @@ Tiny AutoEncoder for Stable Diffusion
 """
 
 def conv(n_in, n_out, **kwargs):
+    """Create a convolutional layer.
+
+    Args:
+        n_in (int): The number of input channels.
+        n_out (int): The number of output channels.
+
+    Returns:
+        torch.nn.Module: The convolutional layer.
+    """
     return disable_weight_init.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
 
 class Clamp(nn.Module):
+    """Class representing a clamping layer."""
     def forward(self, x):
         return torch.tanh(x / 3) * 3
 
 class Block(nn.Module):
+    """Class representing a block layer."""
     def __init__(self, n_in, n_out):
         super().__init__()
         self.conv = nn.Sequential(conv(n_in, n_out), nn.ReLU(), conv(n_out, n_out), nn.ReLU(), conv(n_out, n_out))
@@ -702,6 +917,14 @@ class Block(nn.Module):
         return self.fuse(self.conv(x) + self.skip(x))
 
 def Encoder2(latent_channels=4):
+    """Create an encoder.
+
+    Args:
+        latent_channels (int, optional): The number of latent channels. Defaults to 4.
+
+    Returns:
+        torch.nn.Module: The encoder.
+    """
     return nn.Sequential(
         conv(3, 64), Block(64, 64),
         conv(64, 64, stride=2, bias=False), Block(64, 64), Block(64, 64), Block(64, 64),
@@ -712,6 +935,14 @@ def Encoder2(latent_channels=4):
 
 
 def Decoder2(latent_channels=4):
+    """Create a decoder.
+
+    Args:
+        latent_channels (int, optional): The number of latent channels. Defaults to 4.
+
+    Returns:
+        torch.nn.Module: The decoder.
+    """
     return nn.Sequential(
         Clamp(), conv(latent_channels, 64), nn.ReLU(),
         Block(64, 64), Block(64, 64), Block(64, 64), nn.Upsample(scale_factor=2), conv(64, 64, bias=False),
@@ -721,6 +952,30 @@ def Decoder2(latent_channels=4):
     )
 
 class TAESD(nn.Module):
+    """Class representing a Tiny AutoEncoder for Stable Diffusion.
+    
+    Attributes:
+        latent_magnitude (float): Magnitude of the latent space.
+        latent_shift (float): Shift value for the latent space.
+        vae_shift (torch.nn.Parameter): Shift parameter for the VAE.
+        vae_scale (torch.nn.Parameter): Scale parameter for the VAE.
+        taesd_encoder (Encoder2): Encoder network for the TAESD.
+        taesd_decoder (Decoder2): Decoder network for the TAESD.
+        
+    Args:
+        encoder_path (str, optional): Path to the encoder model file. Defaults to None.
+        decoder_path (str, optional): Path to the decoder model file. Defaults to "./_internal/vae_approx/taesd_decoder.safetensors".
+        latent_channels (int, optional): Number of channels in the latent space. Defaults to 4.
+    Methods:
+        scale_latents(x):
+            Scales raw latents to the range [0, 1].
+        unscale_latents(x):
+            Unscales latents from the range [0, 1] to raw latents.
+        decode(x):
+            Decodes the given latent representation to the original space.
+        encode(x):
+            Encodes the given input to the latent space.
+    """
     latent_magnitude = 3
     latent_shift = 0.5
 
@@ -738,15 +993,37 @@ class TAESD(nn.Module):
 
     @staticmethod
     def scale_latents(x):
-        """raw latents -> [0, 1]"""
+        """Scales raw latents to the range [0, 1].
+        
+        Args:
+            x (torch.Tensor): The raw latents.
+            
+        Returns:
+            torch.Tensor: The scaled latents.
+        """
         return x.div(2 * TAESD.latent_magnitude).add(TAESD.latent_shift).clamp(0, 1)
 
     @staticmethod
     def unscale_latents(x):
-        """[0, 1] -> raw latents"""
+        """Unscales latents from the range [0, 1] to raw latents.
+        
+        Args:
+            x (torch.Tensor): The scaled latents.
+            
+        Returns:
+            torch.Tensor: The raw latents.
+        """
         return x.sub(TAESD.latent_shift).mul(2 * TAESD.latent_magnitude)
 
     def decode(self, x):
+        """Decodes the given latent representation to the original space.
+        
+        Args:
+            x (torch.Tensor): The latent representation.
+            
+        Returns:
+            torch.Tensor: The decoded representation.
+        """
         device = next(self.taesd_decoder.parameters()).device
         x = x.to(device)
         x_sample = self.taesd_decoder((x - self.vae_shift) * self.vae_scale)
@@ -754,11 +1031,26 @@ class TAESD(nn.Module):
         return x_sample
 
     def encode(self, x):
+        """Encodes the given input to the latent space.
+        
+        Args:
+            x (torch.Tensor): The input.
+            
+        Returns:
+            torch.Tensor: The latent representation.
+        """
         device = next(self.taesd_encoder.parameters()).device
         x = x.to(device) 
         return (self.taesd_encoder(x * 0.5 + 0.5) / self.vae_scale) + self.vae_shift
 
 def taesd_preview(x):
+    """Preview the input latent as an image.
+    
+    Uses the TAESD model to decode the latent and updates the image in the app.
+    
+    Args:
+        x (torch.Tensor): The input latent.
+    """
     if app.previewer_checkbox.get() == True:
         taesd_instance = TAESD()
         for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
@@ -770,6 +1062,7 @@ def taesd_preview(x):
 
 
 class LatentPreviewMethod(enum.Enum):
+    """Enum representing the latent preview methods."""
     NoPreviews = "none"
     Auto = "auto"
     Latent2RGB = "latent2rgb"
@@ -786,6 +1079,18 @@ logging.basicConfig(format="%(message)s", level=logging_level)
 def make_beta_schedule(
     schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3
 ):
+    """Create a beta schedule.
+
+    Args:
+        schedule (str): The schedule type.
+        n_timestep (int): The number of timesteps.
+        linear_start (float, optional): The linear start value. Defaults to 1e-4.
+        linear_end (float, optional): The linear end value. Defaults to 2e-2.
+        cosine_s (float, optional): The cosine s value. Defaults to 8e-3.
+
+    Returns:
+        list: The beta schedule.
+    """
     betas = (
         torch.linspace(
             linear_start**0.5, linear_end**0.5, n_timestep, dtype=torch.float64
@@ -796,10 +1101,32 @@ def make_beta_schedule(
 
 
 def checkpoint(func, inputs, params, flag):
+    """Create a checkpoint.
+
+    Args:
+        func (callable): The function to checkpoint.
+        inputs (list): The inputs to the function.
+        params (list): The parameters of the function.
+        flag (bool): The checkpoint flag.
+
+    Returns:
+        any: The checkpointed output.
+    """
     return func(*inputs)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
+    """Create a timestep embedding.
+
+    Args:
+        timesteps (torch.Tensor): The timesteps.
+        dim (int): The embedding dimension.
+        max_period (int, optional): The maximum period. Defaults to 10000.
+        repeat_only (bool, optional): Whether to repeat only. Defaults to False.
+
+    Returns:
+        torch.Tensor: The timestep embedding.
+    """
     half = dim // 2
     freqs = torch.exp(
         -math.log(max_period)
@@ -812,6 +1139,14 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
 
 
 def zero_module(module):
+    """Zero out the parameters of a module.
+
+    Args:
+        module (torch.nn.Module): The module.
+
+    Returns:
+        torch.nn.Module: The zeroed module.
+    """
     for p in module.parameters():
         p.detach().zero_()
     return module
@@ -824,11 +1159,32 @@ from tqdm.auto import trange, tqdm
 
 
 def append_zero(x):
+    """Append a zero to the end of a tensor.
+
+    Args:
+        x (torch.Tensor): The input tensor.
+
+    Returns:
+        torch.Tensor: The tensor with a zero appended.
+    """
     return torch.cat([x, x.new_zeros([1])])
 
 
 def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
-    """Constructs the noise schedule of Karras et al. (2022)."""
+    """Get the sigmas for Karras sampling.
+
+    Constructs the noise schedule of Karras et al. (2022).
+    
+    Args:
+        n (int): The number of sigmas.
+        sigma_min (float): The minimum sigma value.
+        sigma_max (float): The maximum sigma value.
+        rho (float, optional): The rho value. Defaults to 7.0.
+        device (str, optional): The device to use. Defaults to "cpu".
+
+    Returns:
+        torch.Tensor: The sigmas.
+    """
     ramp = torch.linspace(0, 1, n, device=device)
     min_inv_rho = sigma_min ** (1 / rho)
     max_inv_rho = sigma_max ** (1 / rho)
@@ -837,10 +1193,28 @@ def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
 
 
 def to_d(x, sigma, denoised):
+    """Convert a tensor to a denoised tensor."""
     return (x - denoised) / append_dims(sigma, x.ndim)
 
 
 def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
+    """
+    Calculate the ancestral step in a diffusion process.
+
+    This function computes the values of `sigma_down` and `sigma_up` based on the 
+    input parameters `sigma_from`, `sigma_to`, and `eta`. These values are used 
+    in the context of diffusion models to determine the next step in the process.
+
+    Parameters:
+        - sigma_from (float): The starting value of sigma.
+        - sigma_to (float): The target value of sigma.
+        - eta (float, optional): A scaling factor for the step size. Default is 1.0.
+
+    Returns:
+    - tuple: A tuple containing `sigma_down` and `sigma_up`:
+        - sigma_down (float): The computed value of sigma for the downward step.
+        - sigma_up (float): The computed value of sigma for the upward step.
+    """
     sigma_up = min(
         sigma_to,
         eta * (sigma_to**2 * (sigma_from**2 - sigma_to**2) / sigma_from**2) ** 0.5,
@@ -850,10 +1224,40 @@ def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
 
 
 def default_noise_sampler(x):
+    """
+    Returns a noise sampling function that generates random noise with the same shape as the input tensor `x`.
+
+    Args:
+        - x (torch.Tensor): The input tensor whose shape will be used to generate random noise.
+
+    Returns:
+        - function: A function that takes two arguments, `sigma` and `sigma_next`, and returns a tensor of random noise
+                  with the same shape as `x`.
+    """
     return lambda sigma, sigma_next: torch.randn_like(x)
 
 
 class BatchedBrownianTree:
+    """A class to represent a batched Brownian tree for stochastic differential equations.
+    
+    Attributes:
+        - cpu_tree : bool
+            Indicates if the tree is on CPU.
+        - sign : int
+            Sign indicating the order of t0 and t1.
+        - batched : bool
+            Indicates if the tree is batched.
+        - trees : list
+            List of BrownianTree instances.
+            
+    Methods:
+        - __init__(x, t0, t1, seed=None, **kwargs):
+            Initializes the BatchedBrownianTree with given parameters.
+        - sort(a, b):
+            Static method to sort two values and return them along with a sign.
+        - __call__(t0, t1):
+            Calls the Brownian tree with given time points t0 and t1.
+    """
     def __init__(self, x, t0, t1, seed=None, **kwargs):
         self.cpu_tree = True
         if "cpu" in kwargs:
@@ -872,9 +1276,27 @@ class BatchedBrownianTree:
 
     @staticmethod
     def sort(a, b):
+        """Sort two values and return them along with a sign.
+
+        Args:
+            - a (float): The first value.
+            - b (float): The second value.
+        
+        Returns:
+            - tuple: A tuple containing the sorted values and a sign:
+        """
         return (a, b, 1) if a < b else (b, a, -1)
 
     def __call__(self, t0, t1):
+        """#### Call the Brownian tree with given time points t0 and t1.
+        
+        #### Args:
+            - `t0` (torch.Tensor): The starting time point.
+            - `t1` (torch.Tensor): The target time point.
+        
+        #### Returns:
+            - `torch.Tensor`: The Brownian tree values.
+        """
         t0, t1, sign = self.sort(t0, t1)
         w = torch.stack(
             [
@@ -886,9 +1308,31 @@ class BatchedBrownianTree:
 
 
 class BrownianTreeNoiseSampler:
+    """#### A class to sample noise using a Brownian tree approach.
+    
+    #### Attributes:
+        - `transform` (callable): A function to transform the sigma values.
+        - `tree` (BatchedBrownianTree): An instance of the BatchedBrownianTree class.
+        
+    #### Methods:
+        - `__init__(self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x, cpu=False)`:
+            Initializes the BrownianTreeNoiseSampler with the given parameters.
+        - `__call__(self, sigma, sigma_next)`:
+            Samples noise between the given sigma values.
+    """
     def __init__(
         self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x, cpu=False
     ):
+        """#### Initializes the BrownianTreeNoiseSampler with the given parameters.
+        
+        #### Args:
+            - `x` (Tensor): The initial tensor.
+            - `sigma_min` (float): The minimum sigma value.
+            - `sigma_max` (float): The maximum sigma value.
+            - `seed` (int, optional): The seed for random number generation. Defaults to None.
+            - `transform` (callable, optional): A function to transform the sigma values. Defaults to identity function.
+            - `cpu` (bool, optional): Whether to use CPU for computations. Defaults to False.
+        """
         self.transform = transform
         t0, t1 = self.transform(torch.as_tensor(sigma_min)), self.transform(
             torch.as_tensor(sigma_max)
@@ -896,6 +1340,15 @@ class BrownianTreeNoiseSampler:
         self.tree = BatchedBrownianTree(x, t0, t1, seed, cpu=cpu)
 
     def __call__(self, sigma, sigma_next):
+        """#### Samples noise between the given sigma values.
+        
+        #### Args:
+            - `sigma` (float): The current sigma value.
+            - `sigma_next` (float): The next sigma value.
+            
+        #### Returns:
+            - `Tensor`: The sampled noise.
+        """
         t0, t1 = self.transform(torch.as_tensor(sigma)), self.transform(
             torch.as_tensor(sigma_next)
         )
@@ -914,6 +1367,22 @@ def sample_euler_ancestral(
     s_noise=1.0,
     noise_sampler=None,
 ):
+    """#### Perform ancestral sampling using the Euler method.
+    
+    #### Args:
+        - `model` (torch.nn.Module): The model to use for denoising.
+        - `x` (torch.Tensor): The input tensor to be denoised.
+        - `sigmas` (list or torch.Tensor): A list or tensor of sigma values for the noise schedule.
+        - `extra_args` (dict, optional): Additional arguments to pass to the model. Defaults to None.
+        - `callback` (callable, optional): A callback function to be called at each iteration. Defaults to None.
+        - `disable` (bool, optional): If True, disables the progress bar. Defaults to None.
+        - `eta` (float, optional): The eta parameter for the ancestral step. Defaults to 1.0.
+        - `s_noise` (float, optional): The noise scaling factor. Defaults to 1.0.
+        - `noise_sampler` (callable, optional): A function to sample noise. Defaults to None.
+        
+    #### Returns:
+        - `torch.Tensor`: The denoised tensor after ancestral sampling.
+    """
     extra_args = {} if extra_args is None else extra_args
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_in = x.new_ones([x.shape[0]])
@@ -941,6 +1410,25 @@ def sample_euler_ancestral(
 
 
 class PIDStepSizeController:
+    """#### A PID (Proportional-Integral-Derivative) Step Size Controller for adaptive step size selection.
+    
+    #### Attributes:
+        - `h` (float): Initial step size.
+        - `b1` (float): Coefficient for the proportional term.
+        - `b2` (float): Coefficient for the integral term.
+        - `b3` (float): Coefficient for the derivative term.
+        - `accept_safety` (float): Safety factor for accepting a proposed step size.
+        - `eps` (float): Small value to prevent division by zero.
+        - `errs` (list): List to store inverse errors for PID control.
+    
+    #### Methods:
+        - `__init__(self, h, pcoeff, icoeff, dcoeff, order=1, accept_safety=0.81, eps=1e-8)`:
+            Initializes the PIDStepSizeController with given parameters.
+        - `limiter(self, x)`:
+            Limits the factor to prevent excessive changes in step size.
+        - `propose_step(self, error)`:
+            Proposes a new step size based on the given error and updates internal state.
+    """
     def __init__(
         self, h, pcoeff, icoeff, dcoeff, order=1, accept_safety=0.81, eps=1e-8
     ):
@@ -953,9 +1441,25 @@ class PIDStepSizeController:
         self.errs = []
 
     def limiter(self, x):
+        """#### Limit the factor to prevent excessive changes in step size.
+
+        #### Args:
+            - `x` (float): The factor to limit.
+
+        #### Returns:
+            - `float`: The limited factor.
+        """
         return 1 + math.atan(x - 1)
 
     def propose_step(self, error):
+        """#### Propose a new step size based on the given error and update the internal state.
+
+        #### Args:
+            - `error` (float): The error value.
+
+        #### Returns:
+            - `bool`: True if the proposed step size is accepted, False otherwise.
+        """
         inv_error = 1 / (float(error) + self.eps)
         if not self.errs:
             self.errs = [inv_error, inv_error, inv_error]
@@ -973,6 +1477,28 @@ class PIDStepSizeController:
 
 
 class DPMSolver(nn.Module):
+    """#### DPMSolver is a class for solving differential equations using the DPM-Solver algorithm.
+    
+    #### Args:
+        - `model` (nn.Module): The model to be used for solving the differential equations.
+        - `extra_args` (dict, optional): Additional arguments to be passed to the model. Defaults to None.
+        - `eps_callback` (callable, optional): A callback function to be called after computing epsilon. Defaults to None.
+        - `info_callback` (callable, optional): A callback function to be called with information about the solver's progress. Defaults to None.
+        
+    #### Methods:
+        - `t(sigma)`:
+            Converts sigma to time t.
+        - `sigma(t)`:
+            Converts time t to sigma.
+        - `eps(eps_cache, key, x, t, *args, **kwargs)`:
+            Computes the epsilon value for the given inputs and caches the result.
+        - `dpm_solver_2_step(x, t, t_next, r1=1/2, eps_cache=None)`:
+            Performs a 2-step DPM-Solver update.
+        - `dpm_solver_3_step(x, t, t_next, r1=1/3, r2=2/3, eps_cache=None)`:
+            Performs a 3-step DPM-Solver update.
+        - `dpm_solver_adaptive(x, t_start, t_end, order=3, rtol=0.05, atol=0.0078, h_init=0.05, pcoeff=0.0, icoeff=1.0, dcoeff=0.0, accept_safety=0.81, eta=0.0, s_noise=1.0, noise_sampler=None)`:
+            Performs an adaptive DPM-Solver update with error control and step size adaptation.
+    """
     def __init__(self, model, extra_args=None, eps_callback=None, info_callback=None):
         super().__init__()
         self.model = model
@@ -981,12 +1507,39 @@ class DPMSolver(nn.Module):
         self.info_callback = info_callback
 
     def t(self, sigma):
+        """#### Convert sigma to time t.
+        
+        #### Args:
+            - `sigma` (torch.Tensor): The sigma value.
+            
+        #### Returns:
+            - torch.Tensor: The time t.
+        """
         return -sigma.log()
 
     def sigma(self, t):
+        """#### Convert time t to sigma.
+        
+        #### Args:
+            - `t` (torch.Tensor): The time t.
+        
+        #### Returns:
+            - torch.Tensor: The sigma value.
+        """
         return t.neg().exp()
 
     def eps(self, eps_cache, key, x, t, *args, **kwargs):
+        """#### Compute the epsilon value for the given inputs and cache the result.
+        
+        #### Args:
+            - `eps_cache` (dict): The cache for epsilon values.
+            - `key` (str): The key for the cache.
+            - `x` (torch.Tensor): The input tensor.
+            - `t` (torch.Tensor): The time t.
+        
+        #### Returns:
+            - tuple: A tuple containing the epsilon value and the updated cache.
+        """
         if key in eps_cache:
             return eps_cache[key], eps_cache
         sigma = self.sigma(t) * x.new_ones([x.shape[0]])
@@ -998,6 +1551,18 @@ class DPMSolver(nn.Module):
         return eps, {key: eps, **eps_cache}
 
     def dpm_solver_2_step(self, x, t, t_next, r1=1 / 2, eps_cache=None):
+        """#### Perform a 2-step DPM-Solver update.
+        
+        #### Args:
+            -`x` (torch.Tensor): The input tensor.
+            -`t` (torch.Tensor): The current time t.
+            -`t_next` (torch.Tensor): The target time t.
+            -`r1` (float, optional): The ratio for the first step. Defaults to 1/2.
+            -`eps_cache` (dict, optional): The cache for epsilon values. Defaults to None.
+        
+        #### Returns:
+            - tuple: A tuple containing the updated tensor and the updated cache.
+        """
         eps_cache = {} if eps_cache is None else eps_cache
         h = t_next - t
         eps, eps_cache = self.eps(eps_cache, "eps", x, t)
@@ -1012,6 +1577,19 @@ class DPMSolver(nn.Module):
         return x_2, eps_cache
 
     def dpm_solver_3_step(self, x, t, t_next, r1=1 / 3, r2=2 / 3, eps_cache=None):
+        """#### Perform a 3-step DPM-Solver update.
+        
+        #### Args:
+            - `x` (torch.Tensor): The input tensor.
+            - `t` (torch.Tensor): The current time t.
+            - `t_next` (torch.Tensor): The target time t.
+            - `r1` (float, optional): The ratio for the first step. Defaults to 1/3.
+            - `r2` (float, optional): The ratio for the second step. Defaults to 2/3.
+            - `eps_cache` (dict, optional): The cache for epsilon values. Defaults to None.
+            
+        #### Returns:
+            - tuple: A tuple containing the updated tensor and the updated cache.
+        """
         eps_cache = {} if eps_cache is None else eps_cache
         h = t_next - t
         eps, eps_cache = self.eps(eps_cache, "eps", x, t)
@@ -1052,6 +1630,27 @@ class DPMSolver(nn.Module):
         s_noise=1.0,
         noise_sampler=None,
     ):
+        """#### Perform an adaptive DPM-Solver update with error control and step size adaptation.
+        
+        #### Args:
+            - `x` (torch.Tensor): The input tensor.
+            - `t_start` (torch.Tensor): The starting time t.
+            - `t_end` (torch.Tensor): The target time t.
+            - `order` (int, optional): The order of the DPM-Solver. Defaults to 3.
+            - `rtol` (float, optional): The relative tolerance for error control. Defaults to 0.05.
+            - `atol` (float, optional): The absolute tolerance for error control. Defaults to 0.0078.
+            - `h_init` (float, optional): The initial step size. Defaults to 0.05.
+            - `pcoeff` (float, optional): Coefficient for the proportional term in the PID controller. Defaults to 0.0.
+            - `icoeff` (float, optional): Coefficient for the integral term in the PID controller. Defaults to 1.0.
+            - `dcoeff` (float, optional): Coefficient for the derivative term in the PID controller. Defaults to 0.0.
+            - `accept_safety` (float, optional): Safety factor for accepting a proposed step size. Defaults to 0.81.
+            - `eta` (float, optional): The eta parameter for the ancestral step. Defaults to 0.0.
+            - `s_noise` (float, optional): The noise scaling factor. Defaults to 1.0.
+            - `noise_sampler` (callable, optional): A function to sample noise. Defaults to None.
+        
+        #### Returns:
+            - tuple: A tuple containing the updated tensor and information about the solver's progress.
+        """
         noise_sampler = (
             default_noise_sampler(x) if noise_sampler is None else noise_sampler
         )
@@ -1135,7 +1734,40 @@ def sample_dpm_adaptive(
     noise_sampler=None,
     return_info=False,
 ):
-    """DPM-Solver-12 and 23 (adaptive step size). See https://arxiv.org/abs/2206.00927."""
+    """
+    #### Samples from a diffusion probabilistic model using an adaptive step size solver.
+
+    This function implements the DPM-Solver-12 and DPM-Solver-23 methods with adaptive step size as described in the paper
+    https://arxiv.org/abs/2206.00927.
+
+    #### Args:
+        - `model` (torch.nn.Module): The diffusion model to sample from.
+        - `x` (torch.Tensor): The initial tensor to start sampling from.
+        - `sigma_min` (float): The minimum sigma value for the sampling process.
+        - `sigma_max` (float): The maximum sigma value for the sampling process.
+        - `extra_args` (dict, optional): Additional arguments to pass to the model. Default is None.
+        - `callback` (callable, optional): A callback function to be called with progress information. Default is None.
+        - `disable` (bool, optional): If True, disables the progress bar. Default is None.
+        - `order` (int, optional): The order of the solver. Default is 3.
+        - `rtol` (float, optional): Relative tolerance for adaptive step size. Default is 0.05.
+        - `atol` (float, optional): Absolute tolerance for adaptive step size. Default is 0.0078.
+        - `h_init` (float, optional): Initial step size. Default is 0.05.
+        - `pcoeff` (float, optional): Coefficient for the predictor step. Default is 0.0.
+        - `icoeff` (float, optional): Coefficient for the corrector step. Default is 1.0.
+        - `dcoeff` (float, optional): Coefficient for the diffusion step. Default is 0.0.
+        - `accept_safety` (float, optional): Safety factor for step acceptance. Default is 0.81.
+        - `eta` (float, optional): Noise scale for the sampling process. Default is 0.0.
+        - `s_noise` (float, optional): Scale of the noise to be added. Default is 1.0.
+        - `noise_sampler` (callable, optional): A function to sample noise. Default is None.
+        - `return_info` (bool, optional): If True, returns additional information about the sampling process. Default is False.
+
+    #### Returns:
+        - torch.Tensor: The sampled tensor.
+        - dict (optional): Additional information about the sampling process if `return_info` is True.
+
+    #### Raises:
+        - ValueError: If sigma_min or sigma_max is less than or equal to 0.
+    """
     if sigma_min <= 0 or sigma_max <= 0:
         raise ValueError("sigma_min and sigma_max must not be 0")
     with tqdm(disable=disable) as pbar:
@@ -1182,6 +1814,24 @@ def sample_dpmpp_2m_sde(
     noise_sampler=None,
     solver_type="midpoint",
 ):
+    """
+    ### Samples from a model using the DPM-Solver++(2M) SDE method.
+
+    ### Args:
+        - `model` (torch.nn.Module): The model to sample from.
+        - `x` (torch.Tensor): The initial input tensor.
+        - `sigmas` (torch.Tensor): A tensor of sigma values for the SDE.
+        - `extra_args` (dict, optional): Additional arguments for the model. Default is None.
+        - `callback` (callable, optional): A callback function to be called at each step. Default is None.
+        - `disable` (bool, optional): If True, disables the progress bar. Default is None.
+        - `eta` (float, optional): The eta parameter for the SDE. Default is 1.0.
+        - `s_noise` (float, optional): The noise scale parameter. Default is 1.0.
+        - `noise_sampler` (callable, optional): A noise sampler function. Default is None.
+        - `solver_type` (str, optional): The type of solver to use ('midpoint' or 'heun'). Default is "midpoint".
+
+    ### Returns:
+        - torch.Tensor: The final sampled tensor.
+    """
     seed = extra_args.get("seed", None)
     sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
     noise_sampler = (
