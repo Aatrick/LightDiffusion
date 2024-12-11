@@ -123,44 +123,44 @@ args_parsing = False
 
 
 class LatentFormat:
-    """Base class for latent formats.
+    """#### Base class for latent formats.
     
-    Attributes:
-        scale_factor (float): The scale factor for the latent format.
+    #### Attributes:
+        - `scale_factor` (float): The scale factor for the latent format.
 
-    Returns:
-        LatentFormat: A latent format object.
+    #### Returns:
+        - `LatentFormat`: A latent format object.
     """
     scale_factor = 1.0
 
     def process_in(self, latent):
-        """Process the latent input, by multiplying it by the scale factor.
+        """#### Process the latent input, by multiplying it by the scale factor.
 
-        Args:
-            latent (torch.Tensor): The latent tensor.
+        #### Args:
+            - `latent` (torch.Tensor): The latent tensor.
 
-        Returns:
-            torch.Tensor: The processed latent tensor.
+        #### Returns:
+            - `torch.Tensor`: The processed latent tensor.
         """
         return latent * self.scale_factor
 
     def process_out(self, latent):
-        """Process the latent output, by dividing it by the scale factor.
+        """#### Process the latent output, by dividing it by the scale factor.
         
-        Args:
-            latent (torch.Tensor): The latent tensor.
+        #### Args:
+            - `latent` (torch.Tensor): The latent tensor.
             
-        Returns:
-            torch.Tensor: The processed latent tensor.
+        #### Returns:
+            - `torch.Tensor`: The processed latent tensor.
         """
         return latent / self.scale_factor
 
 
 class SD15(LatentFormat):
-    """SD15 latent format.
+    """#### SD15 latent format.
 
-    Args:
-        LatentFormat (LatentFormat): The base latent format class.
+    #### Args:
+        - `LatentFormat` (LatentFormat): The base latent format class.
     """
     def __init__(self, scale_factor=0.18215):
         self.scale_factor = scale_factor
@@ -181,7 +181,7 @@ load = pickle.load
 
 
 class Empty:
-    """An empty class used as a placeholder."""
+    """#### An empty class used as a placeholder."""
     pass
 
 
@@ -192,20 +192,20 @@ import importlib
 
 
 class DiagonalGaussianDistribution(object):
-    """Represents a diagonal Gaussian distribution parameterized by mean and log-variance.
+    """#### Represents a diagonal Gaussian distribution parameterized by mean and log-variance.
     
-    Attributes:
-        parameters (torch.Tensor): The concatenated mean and log-variance of the distribution.
-        mean (torch.Tensor): The mean of the distribution.
-        logvar (torch.Tensor): The log-variance of the distribution, clamped between -30.0 and 20.0.
-        std (torch.Tensor): The standard deviation of the distribution, computed as exp(0.5 * logvar).
-        var (torch.Tensor): The variance of the distribution, computed as exp(logvar).
-        deterministic (bool): If True, the distribution is deterministic.
+    #### Attributes:
+        - `parameters` (torch.Tensor): The concatenated mean and log-variance of the distribution.
+        - `mean` (torch.Tensor): The mean of the distribution.
+        - `logvar` (torch.Tensor): The log-variance of the distribution, clamped between -30.0 and 20.0.
+        - `std` (torch.Tensor): The standard deviation of the distribution, computed as exp(0.5 * logvar).
+        - `var` (torch.Tensor): The variance of the distribution, computed as exp(logvar).
+        - `deterministic` (bool): If True, the distribution is deterministic.
         
-    Methods:
-        sample() -> torch.Tensor:
+    #### Methods:
+        - `sample() -> torch.Tensor`:
             Samples from the distribution using the reparameterization trick.
-        kl(other: DiagonalGaussianDistribution = None) -> torch.Tensor:
+        - `kl(other: DiagonalGaussianDistribution = None) -> torch.Tensor`:
             Computes the Kullback-Leibler divergence between this distribution and a standard normal distribution.
             If `other` is provided, computes the KL divergence between this distribution and `other`.
     """
@@ -218,10 +218,10 @@ class DiagonalGaussianDistribution(object):
         self.var = torch.exp(self.logvar)
 
     def sample(self):
-        """Samples from the distribution using the reparameterization trick.
+        """#### Samples from the distribution using the reparameterization trick.
         
-        Returns:
-            torch.Tensor: A sample from the distribution.
+        #### Returns:
+            - `torch.Tensor`: A sample from the distribution.
         """
         x = self.mean + self.std * torch.randn(self.mean.shape).to(
             device=self.parameters.device
@@ -229,14 +229,14 @@ class DiagonalGaussianDistribution(object):
         return x
 
     def kl(self, other=None):
-        """Computes the Kullback-Leibler divergence between this distribution and a standard normal distribution.
+        """#### Computes the Kullback-Leibler divergence between this distribution and a standard normal distribution.
         
         If `other` is provided, computes the KL divergence between this distribution and `other`.
         
-        Args:
-            other (DiagonalGaussianDistribution, optional): Another distribution to compute the KL divergence with.
-        Returns:
-            torch.Tensor: The KL divergence.
+        #### Args:
+            - `other` (DiagonalGaussianDistribution, optional): Another distribution to compute the KL divergence with.
+        #### Returns:
+            - `torch.Tensor`: The KL divergence.
         """
         return 0.5 * torch.sum(
             torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
@@ -245,14 +245,14 @@ class DiagonalGaussianDistribution(object):
 
 
 def append_dims(x, target_dims):
-    """Appends dimensions to the end of a tensor until it has target_dims dimensions.
+    """#### Appends dimensions to the end of a tensor until it has target_dims dimensions.
 
-    Args:
-        x (torch.Tensor): The input tensor.
-        target_dims (int): The target number of dimensions.
+    #### Args:
+        - `x` (torch.Tensor): The input tensor.
+        - `target_dims` (int): The target number of dimensions.
 
-    Returns:
-        torch.Tensor: The expanded tensor.
+    #### Returns:
+        - `torch.Tensor`: The expanded tensor.
     """
     dims_to_append = target_dims - x.ndim
     expanded = x[(...,) + (None,) * dims_to_append]
@@ -263,15 +263,15 @@ import safetensors.torch
 
 
 def load_torch_file(ckpt, safe_load=False, device=None):
-    """Load a PyTorch checkpoint file.
+    """#### Load a PyTorch checkpoint file.
 
-    Args:
-        ckpt (str): The path to the checkpoint file.
-        safe_load (bool, optional): Whether to use safe loading. Defaults to False.
-        device (str, optional): The device to load the checkpoint on. Defaults to None.
+    #### Args:
+        - `ckpt` (str): The path to the checkpoint file.
+        - `safe_load` (bool, optional): Whether to use safe loading. Defaults to False.
+        - `device` (str, optional): The device to load the checkpoint on. Defaults to None.
 
-    Returns:
-        dict: The loaded checkpoint.
+    #### Returns:
+        - `dict`: The loaded checkpoint.
     """
     if device is None:
         device = torch.device("cpu")
@@ -283,14 +283,14 @@ def load_torch_file(ckpt, safe_load=False, device=None):
 
 
 def calculate_parameters(sd, prefix=""):
-    """Calculate the parameters of a state dictionary.
+    """#### Calculate the parameters of a state dictionary.
 
-    Args:
-        sd (dict): The state dictionary.
-        prefix (str, optional): The prefix for the parameters. Defaults to "".
+    #### Args:
+        - `sd` (dict): The state dictionary.
+        - `prefix` (str, optional): The prefix for the parameters. Defaults to "".
 
-    Returns:
-        dict: The calculated parameters.
+    #### Returns:
+        - `dict`: The calculated parameters.
     """
     params = 0
     for k in sd.keys():
@@ -300,15 +300,15 @@ def calculate_parameters(sd, prefix=""):
 
 
 def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
-    """Replace the prefix of keys in a state dictionary.
+    """#### Replace the prefix of keys in a state dictionary.
 
-    Args:
-        state_dict (dict): The state dictionary.
-        replace_prefix (str): The prefix to replace.
-        filter_keys (bool, optional): Whether to filter keys. Defaults to False.
+    #### Args:
+        - `state_dict` (dict): The state dictionary.
+        - `replace_prefix` (str): The prefix to replace.
+        - `filter_keys` (bool, optional): Whether to filter keys. Defaults to False.
 
-    Returns:
-        dict: The updated state dictionary.
+    #### Returns:
+        - `dict`: The updated state dictionary.
     """
     out = {}
     for rp in replace_prefix:
@@ -394,13 +394,13 @@ UNET_MAP_BASIC = {
 
 
 def unet_to_diffusers(unet_config):
-    """Convert a UNet configuration to a diffusers configuration.
+    """#### Convert a UNet configuration to a diffusers configuration.
 
-    Args:
-        unet_config (dict): The UNet configuration.
+    #### Args:
+        - `unet_config` (dict): The UNet configuration.
 
-    Returns:
-        dict: The diffusers configuration.
+    #### Returns:
+        - `dict`: The diffusers configuration.
     """
     if "num_res_blocks" not in unet_config:
         return {}
@@ -497,25 +497,28 @@ def unet_to_diffusers(unet_config):
 
 
 def repeat_to_batch_size(tensor, batch_size):
-    """Repeat a tensor to match a specific batch size.
+    """#### Repeat a tensor to match a specific batch size.
 
-    Args:
-        tensor (torch.Tensor): The input tensor.
-        batch_size (int): The target batch size.
+    #### Args:
+        - `tensor` (torch.Tensor): The input tensor.
+        - `batch_size` (int): The target batch size.
 
-    Returns:
-        torch.Tensor: The repeated tensor.
+    #### Returns:
+        - `torch.Tensor`: The repeated tensor.
     """
-    return tensor.expand(batch_size, *tensor.shape)
+    return tensor
 
 
 def set_attr(obj, attr, value):
-    """Set an attribute of an object.
+    """#### Set an attribute of an object.
 
-    Args:
-        obj (object): The object.
-        attr (str): The attribute name.
-        value (any): The value to set.
+    #### Args:
+        - `obj` (object): The object.
+        - `attr` (str): The attribute name.
+        - `value` (any): The value to set.
+        
+    #### Returns:
+        - `prev`: The previous attribute value.
     """
     attrs = attr.split(".")
     for name in attrs[:-1]:
@@ -526,22 +529,25 @@ def set_attr(obj, attr, value):
 
 
 def set_attr_param(obj, attr, value):
-    """Set an attribute parameter of an object.
-
-    Args:
-        obj (object): The object.
-        attr (str): The attribute name.
-        value (any): The value to set.
+    """#### Set an attribute parameter of an object.
+    
+    #### Args:
+        - `obj` (object): The object.
+        - `attr` (str): The attribute name.
+        - `value` (any): The value to set.
+        
+    #### Returns:
+        - `prev`: The previous attribute value.
     """
     return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
 
 def copy_to_param(obj, attr, value):
-    """Copy a value to an attribute parameter of an object.
-
-    Args:
-        obj (object): The object.
-        attr (str): The attribute name.
-        value (any): The value to copy.
+    """#### Copy a value to a parameter of an object.
+    
+    #### Args:
+        - `obj` (object): The object.
+        - `attr` (str): The attribute name.
+        - `value` (any): The value to set.
     """
     attrs = attr.split(".")
     for name in attrs[:-1]:
@@ -551,14 +557,14 @@ def copy_to_param(obj, attr, value):
 
 
 def get_attr(obj, attr):
-    """Get an attribute of an object.
-
-    Args:
-        obj (object): The object.
-        attr (str): The attribute name.
-
-    Returns:
-        any: The attribute value.
+    """#### Get an attribute of an object.
+    
+    #### Args:
+        - `obj` (object): The object.
+        - `attr` (str): The attribute name.
+        
+    #### Returns:
+        - `obj`: The attribute value.
     """
     attrs = attr.split(".")
     for name in attrs:
@@ -567,15 +573,15 @@ def get_attr(obj, attr):
 
 
 def bislerp(samples, width, height):
-    """Perform bilinear interpolation on samples.
+    """#### Perform bilinear interpolation on samples.
 
-    Args:
-        samples (torch.Tensor): The input samples.
-        width (int): The target width.
-        height (int): The target height.
+    #### Args:
+        - `samples` (torch.Tensor): The input samples.
+        - `width` (int): The target width.
+        - `height` (int): The target height.
 
-    Returns:
-        torch.Tensor: The interpolated samples.
+    #### Returns:
+        - `torch.Tensor`: The interpolated samples.
     """
     def slerp(b1, b2, r):
         """slerps batches b1, b2 according to ratio r, batches should be flat e.g. NxC"""
@@ -669,17 +675,15 @@ def bislerp(samples, width, height):
 
 
 def common_upscale(samples, width, height, upscale_method, crop):
-    """Upscale samples using a common method.
-
-    Args:
-        samples (torch.Tensor): The input samples.
-        width (int): The target width.
-        height (int): The target height.
-        upscale_method (str): The upscale method.
-        crop (bool): Whether to crop the samples.
-
-    Returns:
-        torch.Tensor: The upscaled samples.
+    """#### Upscales the given samples to the specified width and height using the specified method and crop settings.
+    #### Args:
+        - `samples` (list): The list of samples to be upscaled.
+        - `width` (int): The target width for the upscaled samples.
+        - `height` (int): The target height for the upscaled samples.
+        - `upscale_method` (str): The method to use for upscaling.
+        - `crop` (bool): Whether to crop the samples after upscaling.
+    #### Returns:
+        - `list`: The upscaled samples.
     """
     s = samples
     return bislerp(s, width, height)
@@ -690,7 +694,7 @@ PROGRESS_BAR_HOOK = None
 
 
 class ProgressBar:
-    """Class representing a progress bar."""
+    """#### Class representing a progress bar."""
     def __init__(self, total):
         global PROGRESS_BAR_HOOK
         self.total = total
@@ -709,14 +713,14 @@ LORA_CLIP_MAP = {
 
 
 def load_lora(lora, to_load):
-    """Load a LoRA model.
+    """#### Load a LoRA model.
 
-    Args:
-        lora (str): The path to the LoRA model.
-        to_load (str): The path to load the model.
+    #### Args:
+        - `lora` (str): The path to the LoRA model.
+        - `to_load` (str): The path to load the model.
 
-    Returns:
-        dict: The loaded LoRA model.
+    #### Returns:
+        - `dict`: The loaded LoRA model.
     """
     patch_dict = {}
     loaded_keys = set()
@@ -752,14 +756,14 @@ def load_lora(lora, to_load):
 
 
 def model_lora_keys_clip(model, key_map={}):
-    """Get the keys for a LoRA model's CLIP component.
+    """#### Get the keys for a LoRA model's CLIP component.
 
-    Args:
-        model (torch.nn.Module): The LoRA model.
-        key_map (dict, optional): The key map. Defaults to {}.
+    #### Args:
+        - `model` (torch.nn.Module): The LoRA model.
+        - `key_map` (dict, optional): The key map. Defaults to {}.
 
-    Returns:
-        dict: The keys for the CLIP component.
+    #### Returns:
+        - `dict`: The keys for the CLIP component.
     """
     sdk = model.state_dict().keys()
 
@@ -784,14 +788,14 @@ def model_lora_keys_clip(model, key_map={}):
 
 
 def model_lora_keys_unet(model, key_map={}):
-    """Get the keys for a LoRA model's UNet component.
+    """#### Get the keys for a LoRA model's UNet component.
 
-    Args:
-        model (torch.nn.Module): The LoRA model.
-        key_map (dict, optional): The key map. Defaults to {}.
+    #### Args:
+        - `model` (torch.nn.Module): The LoRA model.
+        - `key_map` (dict, optional): The key map. Defaults to {}.
 
-    Returns:
-        dict: The keys for the UNet component.
+    #### Returns:
+        - `dict`: The keys for the UNet component.
     """
     sdk = model.state_dict().keys()
 
@@ -820,34 +824,49 @@ def model_lora_keys_unet(model, key_map={}):
 
 
 def lcm(a, b):
-    """Calculate the least common multiple (LCM) of two numbers.
+    """#### Calculate the least common multiple (LCM) of two numbers.
 
-    Args:
-        a (int): The first number.
-        b (int): The second number.
+    #### Args:
+        - `a` (int): The first number.
+        - `b` (int): The second number.
 
-    Returns:
-        int: The LCM of the two numbers.
+    #### Returns:
+        - `int`: The LCM of the two numbers.
     """
     return abs(a * b) // math.gcd(a, b)
 
 
 class CONDRegular:
-    """Class representing a regular condition."""
+    """#### Class representing a regular condition."""
     def __init__(self, cond):
         self.cond = cond
 
     def _copy_with(self, cond):
-        """Copy the condition with a new condition."""
+        """#### Copy the condition with a new condition.
+        
+        #### Args:
+            - `cond` (torch.Tensor): The new condition.
+        
+        #### Returns:
+            - `CONDRegular`: The copied condition.
+        """
         return self.__class__(cond)
 
     def process_cond(self, batch_size, device, **kwargs):
-        """Process the condition."""
+        """#### Process the condition.
+        
+        #### Args:
+            - `batch_size` (int): The batch size.
+            - `device` (torch.device): The device.
+            
+        #### Returns:
+            - `CONDRegular`: The processed condition.
+        """
         return self._copy_with(repeat_to_batch_size(self.cond, batch_size).to(device))
 
 
 class CONDCrossAttn(CONDRegular):
-    """Class representing a cross-attention condition."""
+    """#### Class representing a cross-attention condition."""
     def concat(self, others):
         conds = [self.cond]
         crossattn_max_len = self.cond.shape[1]
@@ -871,7 +890,7 @@ import enum
 
 
 class EnumAction(argparse.Action):
-    """Class representing an argparse action for enums."""
+    """#### Class representing an argparse action for enums."""
     def __init__(self, **kwargs):
         # Pop off the type value
         enum_type = kwargs.pop("type", None)
@@ -890,24 +909,24 @@ Tiny AutoEncoder for Stable Diffusion
 """
 
 def conv(n_in, n_out, **kwargs):
-    """Create a convolutional layer.
+    """#### Create a convolutional layer.
 
-    Args:
-        n_in (int): The number of input channels.
-        n_out (int): The number of output channels.
+    #### Args:
+        - `n_in` (int): The number of input channels.
+        - `n_out` (int): The number of output channels.
 
-    Returns:
-        torch.nn.Module: The convolutional layer.
+    #### Returns:
+        - `torch.nn.Module`: The convolutional layer.
     """
     return disable_weight_init.Conv2d(n_in, n_out, 3, padding=1, **kwargs)
 
 class Clamp(nn.Module):
-    """Class representing a clamping layer."""
+    """#### Class representing a clamping layer."""
     def forward(self, x):
         return torch.tanh(x / 3) * 3
 
 class Block(nn.Module):
-    """Class representing a block layer."""
+    """#### Class representing a block layer."""
     def __init__(self, n_in, n_out):
         super().__init__()
         self.conv = nn.Sequential(conv(n_in, n_out), nn.ReLU(), conv(n_out, n_out), nn.ReLU(), conv(n_out, n_out))
@@ -917,13 +936,13 @@ class Block(nn.Module):
         return self.fuse(self.conv(x) + self.skip(x))
 
 def Encoder2(latent_channels=4):
-    """Create an encoder.
+    """#### Create an encoder.
 
-    Args:
-        latent_channels (int, optional): The number of latent channels. Defaults to 4.
+    #### Args:
+        - `latent_channels` (int, optional): The number of latent channels. Defaults to 4.
 
-    Returns:
-        torch.nn.Module: The encoder.
+    #### Returns:
+        - `torch.nn.Module`: The encoder.
     """
     return nn.Sequential(
         conv(3, 64), Block(64, 64),
@@ -935,13 +954,13 @@ def Encoder2(latent_channels=4):
 
 
 def Decoder2(latent_channels=4):
-    """Create a decoder.
+    """#### Create a decoder.
 
-    Args:
-        latent_channels (int, optional): The number of latent channels. Defaults to 4.
+    #### Args:
+        - `latent_channels` (int, optional): The number of latent channels. Defaults to 4.
 
-    Returns:
-        torch.nn.Module: The decoder.
+    #### Returns:
+        - `torch.nn.Module`: The decoder.
     """
     return nn.Sequential(
         Clamp(), conv(latent_channels, 64), nn.ReLU(),
@@ -952,28 +971,29 @@ def Decoder2(latent_channels=4):
     )
 
 class TAESD(nn.Module):
-    """Class representing a Tiny AutoEncoder for Stable Diffusion.
+    """#### Class representing a Tiny AutoEncoder for Stable Diffusion.
     
-    Attributes:
-        latent_magnitude (float): Magnitude of the latent space.
-        latent_shift (float): Shift value for the latent space.
-        vae_shift (torch.nn.Parameter): Shift parameter for the VAE.
-        vae_scale (torch.nn.Parameter): Scale parameter for the VAE.
-        taesd_encoder (Encoder2): Encoder network for the TAESD.
-        taesd_decoder (Decoder2): Decoder network for the TAESD.
+    #### Attributes:
+        - `latent_magnitude` (float): Magnitude of the latent space.
+        - `latent_shift` (float): Shift value for the latent space.
+        - `vae_shift` (torch.nn.Parameter): Shift parameter for the VAE.
+        - `vae_scale` (torch.nn.Parameter): Scale parameter for the VAE.
+        - `taesd_encoder` (Encoder2): Encoder network for the TAESD.
+        - `taesd_decoder` (Decoder2): Decoder network for the TAESD.
         
-    Args:
-        encoder_path (str, optional): Path to the encoder model file. Defaults to None.
-        decoder_path (str, optional): Path to the decoder model file. Defaults to "./_internal/vae_approx/taesd_decoder.safetensors".
-        latent_channels (int, optional): Number of channels in the latent space. Defaults to 4.
-    Methods:
-        scale_latents(x):
+    #### Args:
+        - `encoder_path` (str, optional): Path to the encoder model file. Defaults to None.
+        - `decoder_path` (str, optional): Path to the decoder model file. Defaults to "./_internal/vae_approx/taesd_decoder.safetensors".
+        - `latent_channels` (int, optional): Number of channels in the latent space. Defaults to 4.
+    
+    #### Methods:
+        - `scale_latents(x)`:
             Scales raw latents to the range [0, 1].
-        unscale_latents(x):
+        - `unscale_latents(x)`:
             Unscales latents from the range [0, 1] to raw latents.
-        decode(x):
+        - `decode(x)`:
             Decodes the given latent representation to the original space.
-        encode(x):
+        - `encode(x)`:
             Encodes the given input to the latent space.
     """
     latent_magnitude = 3
@@ -993,36 +1013,36 @@ class TAESD(nn.Module):
 
     @staticmethod
     def scale_latents(x):
-        """Scales raw latents to the range [0, 1].
+        """#### Scales raw latents to the range [0, 1].
         
-        Args:
-            x (torch.Tensor): The raw latents.
+        #### Args:
+            - `x` (torch.Tensor): The raw latents.
             
-        Returns:
-            torch.Tensor: The scaled latents.
+        #### Returns:
+            - `torch.Tensor`: The scaled latents.
         """
         return x.div(2 * TAESD.latent_magnitude).add(TAESD.latent_shift).clamp(0, 1)
 
     @staticmethod
     def unscale_latents(x):
-        """Unscales latents from the range [0, 1] to raw latents.
+        """#### Unscales latents from the range [0, 1] to raw latents.
         
-        Args:
-            x (torch.Tensor): The scaled latents.
+        #### Args:
+            - `x` (torch.Tensor): The scaled latents.
             
-        Returns:
-            torch.Tensor: The raw latents.
+        #### Returns:
+            - `torch.Tensor`: The raw latents.
         """
         return x.sub(TAESD.latent_shift).mul(2 * TAESD.latent_magnitude)
 
     def decode(self, x):
-        """Decodes the given latent representation to the original space.
+        """#### Decodes the given latent representation to the original space.
         
-        Args:
-            x (torch.Tensor): The latent representation.
+        #### Args:
+            - `x` (torch.Tensor): The latent representation.
             
-        Returns:
-            torch.Tensor: The decoded representation.
+        #### Returns:
+            - `torch.Tensor`: The decoded representation.
         """
         device = next(self.taesd_decoder.parameters()).device
         x = x.to(device)
@@ -1031,38 +1051,39 @@ class TAESD(nn.Module):
         return x_sample
 
     def encode(self, x):
-        """Encodes the given input to the latent space.
+        """#### Encodes the given input to the latent space.
         
-        Args:
-            x (torch.Tensor): The input.
+        #### Args:
+            - `x` (torch.Tensor): The input.
             
-        Returns:
-            torch.Tensor: The latent representation.
+        #### Returns:
+            - `torch.Tensor`: The latent representation.
         """
         device = next(self.taesd_encoder.parameters()).device
         x = x.to(device) 
         return (self.taesd_encoder(x * 0.5 + 0.5) / self.vae_scale) + self.vae_shift
 
 def taesd_preview(x):
-    """Preview the input latent as an image.
+    """#### Preview the input latent as an image.
     
     Uses the TAESD model to decode the latent and updates the image in the app.
     
-    Args:
-        x (torch.Tensor): The input latent.
+    #### Args:
+        - `x` (torch.Tensor): The input latent.
     """
     if app.previewer_checkbox.get() == True:
         taesd_instance = TAESD()
         for image in taesd_instance.decode(x[0].unsqueeze(0))[0]:
             i = 255.0 * image.cpu().detach().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+            img = img.convert("RGB")
         app.update_image(img)
     else:
         pass
 
 
 class LatentPreviewMethod(enum.Enum):
-    """Enum representing the latent preview methods."""
+    """#### Enum representing the latent preview methods."""
     NoPreviews = "none"
     Auto = "auto"
     Latent2RGB = "latent2rgb"
@@ -1079,17 +1100,17 @@ logging.basicConfig(format="%(message)s", level=logging_level)
 def make_beta_schedule(
     schedule, n_timestep, linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3
 ):
-    """Create a beta schedule.
+    """#### Create a beta schedule.
 
-    Args:
-        schedule (str): The schedule type.
-        n_timestep (int): The number of timesteps.
-        linear_start (float, optional): The linear start value. Defaults to 1e-4.
-        linear_end (float, optional): The linear end value. Defaults to 2e-2.
-        cosine_s (float, optional): The cosine s value. Defaults to 8e-3.
+    #### Args:
+        - `schedule` (str): The schedule type.
+        - `n_timestep` (int): The number of timesteps.
+        - `linear_start` (float, optional): The linear start value. Defaults to 1e-4.
+        - `linear_end` (float, optional): The linear end value. Defaults to 2e-2.
+        - `cosine_s` (float, optional): The cosine s value. Defaults to 8e-3.
 
-    Returns:
-        list: The beta schedule.
+    #### Returns:
+        - `list`: The beta schedule.
     """
     betas = (
         torch.linspace(
@@ -1101,31 +1122,31 @@ def make_beta_schedule(
 
 
 def checkpoint(func, inputs, params, flag):
-    """Create a checkpoint.
+    """#### Create a checkpoint.
 
-    Args:
-        func (callable): The function to checkpoint.
-        inputs (list): The inputs to the function.
-        params (list): The parameters of the function.
-        flag (bool): The checkpoint flag.
+    #### Args:
+        - `func` (callable): The function to checkpoint.
+        - `inputs` (list): The inputs to the function.
+        - `params` (list): The parameters of the function.
+        - `flag` (bool): The checkpoint flag.
 
-    Returns:
-        any: The checkpointed output.
+    #### Returns:
+        - `any`: The checkpointed output.
     """
     return func(*inputs)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
-    """Create a timestep embedding.
+    """#### Create a timestep embedding.
 
-    Args:
-        timesteps (torch.Tensor): The timesteps.
-        dim (int): The embedding dimension.
-        max_period (int, optional): The maximum period. Defaults to 10000.
-        repeat_only (bool, optional): Whether to repeat only. Defaults to False.
+    #### Args:
+        - `timesteps` (torch.Tensor): The timesteps.
+        - `dim` (int): The embedding dimension.
+        - `max_period` (int, optional): The maximum period. Defaults to 10000.
+        - `repeat_only` (bool, optional): Whether to repeat only. Defaults to False.
 
-    Returns:
-        torch.Tensor: The timestep embedding.
+    #### Returns:
+        - `torch.Tensor`: The timestep embedding.
     """
     half = dim // 2
     freqs = torch.exp(
@@ -1139,13 +1160,13 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
 
 
 def zero_module(module):
-    """Zero out the parameters of a module.
+    """#### Zero out the parameters of a module.
 
-    Args:
-        module (torch.nn.Module): The module.
+    #### Args:
+        - `module` (torch.nn.Module): The module.
 
-    Returns:
-        torch.nn.Module: The zeroed module.
+    #### Returns:
+        - `torch.nn.Module`: The zeroed module.
     """
     for p in module.parameters():
         p.detach().zero_()
@@ -1159,31 +1180,31 @@ from tqdm.auto import trange, tqdm
 
 
 def append_zero(x):
-    """Append a zero to the end of a tensor.
+    """#### Append a zero to the end of a tensor.
 
-    Args:
-        x (torch.Tensor): The input tensor.
+    #### Args:
+        - `x` (torch.Tensor): The input tensor.
 
-    Returns:
-        torch.Tensor: The tensor with a zero appended.
+    #### Returns:
+        - `torch.Tensor`: The tensor with a zero appended.
     """
     return torch.cat([x, x.new_zeros([1])])
 
 
 def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
-    """Get the sigmas for Karras sampling.
+    """#### Get the sigmas for Karras sampling.
 
-    Constructs the noise schedule of Karras et al. (2022).
+    constructs the noise schedule of Karras et al. (2022).
     
-    Args:
-        n (int): The number of sigmas.
-        sigma_min (float): The minimum sigma value.
-        sigma_max (float): The maximum sigma value.
-        rho (float, optional): The rho value. Defaults to 7.0.
-        device (str, optional): The device to use. Defaults to "cpu".
+    #### Args:
+        - `n` (int): The number of sigmas.
+        - `sigma_min` (float): The minimum sigma value.
+        - `sigma_max` (float): The maximum sigma value.
+        - `rho` (float, optional): The rho value. Defaults to 7.0.
+        - `device` (str, optional): The device to use. Defaults to "cpu".
 
-    Returns:
-        torch.Tensor: The sigmas.
+    #### Returns:
+        - `torch.Tensor`: The sigmas.
     """
     ramp = torch.linspace(0, 1, n, device=device)
     min_inv_rho = sigma_min ** (1 / rho)
@@ -1193,27 +1214,27 @@ def get_sigmas_karras(n, sigma_min, sigma_max, rho=7.0, device="cpu"):
 
 
 def to_d(x, sigma, denoised):
-    """Convert a tensor to a denoised tensor."""
+    """#### Convert a tensor to a denoised tensor."""
     return (x - denoised) / append_dims(sigma, x.ndim)
 
 
 def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
     """
-    Calculate the ancestral step in a diffusion process.
+    #### Calculate the ancestral step in a diffusion process.
 
     This function computes the values of `sigma_down` and `sigma_up` based on the 
     input parameters `sigma_from`, `sigma_to`, and `eta`. These values are used 
     in the context of diffusion models to determine the next step in the process.
 
-    Parameters:
-        - sigma_from (float): The starting value of sigma.
-        - sigma_to (float): The target value of sigma.
-        - eta (float, optional): A scaling factor for the step size. Default is 1.0.
+    #### Parameters:
+        - `sigma_from` (float): The starting value of sigma.
+        - `sigma_to` (float): The target value of sigma.
+        - `eta` (float, optional): A scaling factor for the step size. Default is 1.0.
 
-    Returns:
-    - tuple: A tuple containing `sigma_down` and `sigma_up`:
-        - sigma_down (float): The computed value of sigma for the downward step.
-        - sigma_up (float): The computed value of sigma for the upward step.
+    #### Returns:
+    - `tuple`: A tuple containing `sigma_down` and `sigma_up`:
+        - `sigma_down` (float): The computed value of sigma for the downward step.
+        - `sigma_up` (float): The computed value of sigma for the upward step.
     """
     sigma_up = min(
         sigma_to,
@@ -1225,37 +1246,37 @@ def get_ancestral_step(sigma_from, sigma_to, eta=1.0):
 
 def default_noise_sampler(x):
     """
-    Returns a noise sampling function that generates random noise with the same shape as the input tensor `x`.
+    #### Returns a noise sampling function that generates random noise with the same shape as the input tensor `x`.
 
-    Args:
-        - x (torch.Tensor): The input tensor whose shape will be used to generate random noise.
+    #### Args:
+        - `x` (torch.Tensor): The input tensor whose shape will be used to generate random noise.
 
-    Returns:
-        - function: A function that takes two arguments, `sigma` and `sigma_next`, and returns a tensor of random noise
+    #### Returns:
+        - `function`: A function that takes two arguments, `sigma` and `sigma_next`, and returns a tensor of random noise
                   with the same shape as `x`.
     """
     return lambda sigma, sigma_next: torch.randn_like(x)
 
 
 class BatchedBrownianTree:
-    """A class to represent a batched Brownian tree for stochastic differential equations.
+    """#### A class to represent a batched Brownian tree for stochastic differential equations.
     
-    Attributes:
-        - cpu_tree : bool
+    #### Attributes:
+        - `cpu_tree` : bool
             Indicates if the tree is on CPU.
-        - sign : int
+        - `sign` : int
             Sign indicating the order of t0 and t1.
-        - batched : bool
+        - `batched` : bool
             Indicates if the tree is batched.
-        - trees : list
+        - `trees` : list
             List of BrownianTree instances.
             
-    Methods:
-        - __init__(x, t0, t1, seed=None, **kwargs):
+    #### Methods:
+        - `__init__(x, t0, t1, seed=None, **kwargs)`:
             Initializes the BatchedBrownianTree with given parameters.
-        - sort(a, b):
+        - `sort(a, b)`:
             Static method to sort two values and return them along with a sign.
-        - __call__(t0, t1):
+        - `__call__(t0, t1)`:
             Calls the Brownian tree with given time points t0 and t1.
     """
     def __init__(self, x, t0, t1, seed=None, **kwargs):
@@ -1276,14 +1297,14 @@ class BatchedBrownianTree:
 
     @staticmethod
     def sort(a, b):
-        """Sort two values and return them along with a sign.
+        """#### Sort two values and return them along with a sign.
 
-        Args:
-            - a (float): The first value.
-            - b (float): The second value.
+        #### Args:
+            - `a` (float): The first value.
+            - `b` (float): The second value.
         
-        Returns:
-            - tuple: A tuple containing the sorted values and a sign:
+        #### Returns:
+            - `tuple`: A tuple containing the sorted values and a sign:
         """
         return (a, b, 1) if a < b else (b, a, -1)
 
@@ -1513,7 +1534,7 @@ class DPMSolver(nn.Module):
             - `sigma` (torch.Tensor): The sigma value.
             
         #### Returns:
-            - torch.Tensor: The time t.
+            - `torch.Tensor`: The time t.
         """
         return -sigma.log()
 
@@ -1524,7 +1545,7 @@ class DPMSolver(nn.Module):
             - `t` (torch.Tensor): The time t.
         
         #### Returns:
-            - torch.Tensor: The sigma value.
+            - `torch.Tensor`: The sigma value.
         """
         return t.neg().exp()
 
@@ -1538,7 +1559,7 @@ class DPMSolver(nn.Module):
             - `t` (torch.Tensor): The time t.
         
         #### Returns:
-            - tuple: A tuple containing the epsilon value and the updated cache.
+            - `tuple`: A tuple containing the epsilon value and the updated cache.
         """
         if key in eps_cache:
             return eps_cache[key], eps_cache
@@ -1561,7 +1582,7 @@ class DPMSolver(nn.Module):
             -`eps_cache` (dict, optional): The cache for epsilon values. Defaults to None.
         
         #### Returns:
-            - tuple: A tuple containing the updated tensor and the updated cache.
+            - `tuple`: A tuple containing the updated tensor and the updated cache.
         """
         eps_cache = {} if eps_cache is None else eps_cache
         h = t_next - t
@@ -1588,7 +1609,7 @@ class DPMSolver(nn.Module):
             - `eps_cache` (dict, optional): The cache for epsilon values. Defaults to None.
             
         #### Returns:
-            - tuple: A tuple containing the updated tensor and the updated cache.
+            - `tuple`: A tuple containing the updated tensor and the updated cache.
         """
         eps_cache = {} if eps_cache is None else eps_cache
         h = t_next - t
@@ -1649,7 +1670,7 @@ class DPMSolver(nn.Module):
             - `noise_sampler` (callable, optional): A function to sample noise. Defaults to None.
         
         #### Returns:
-            - tuple: A tuple containing the updated tensor and information about the solver's progress.
+            - `tuple`: A tuple containing the updated tensor and information about the solver's progress.
         """
         noise_sampler = (
             default_noise_sampler(x) if noise_sampler is None else noise_sampler
@@ -1762,11 +1783,11 @@ def sample_dpm_adaptive(
         - `return_info` (bool, optional): If True, returns additional information about the sampling process. Default is False.
 
     #### Returns:
-        - torch.Tensor: The sampled tensor.
-        - dict (optional): Additional information about the sampling process if `return_info` is True.
+        - `torch.Tensor`: The sampled tensor.
+        - `dict` (optional): Additional information about the sampling process if `return_info` is True.
 
     #### Raises:
-        - ValueError: If sigma_min or sigma_max is less than or equal to 0.
+        - `ValueError`: If sigma_min or sigma_max is less than or equal to 0.
     """
     if sigma_min <= 0 or sigma_max <= 0:
         raise ValueError("sigma_min and sigma_max must not be 0")
@@ -1815,9 +1836,9 @@ def sample_dpmpp_2m_sde(
     solver_type="midpoint",
 ):
     """
-    ### Samples from a model using the DPM-Solver++(2M) SDE method.
+    #### Samples from a model using the DPM-Solver++(2M) SDE method.
 
-    ### Args:
+    #### Args:
         - `model` (torch.nn.Module): The model to sample from.
         - `x` (torch.Tensor): The initial input tensor.
         - `sigmas` (torch.Tensor): A tensor of sigma values for the SDE.
@@ -1829,8 +1850,8 @@ def sample_dpmpp_2m_sde(
         - `noise_sampler` (callable, optional): A noise sampler function. Default is None.
         - `solver_type` (str, optional): The type of solver to use ('midpoint' or 'heun'). Default is "midpoint".
 
-    ### Returns:
-        - torch.Tensor: The final sampled tensor.
+    #### Returns:
+        - `torch.Tensor`: The final sampled tensor.
     """
     seed = extra_args.get("seed", None)
     sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
@@ -4087,7 +4108,7 @@ class ModelPatcher:
 
 
 # import pytorch_lightning as pl
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 
@@ -5166,7 +5187,6 @@ class GEGLU(nn.Module):
 
 import json
 import traceback
-import zipfile
 
 import torch
 from transformers import CLIPTokenizer
@@ -10765,7 +10785,7 @@ def load_parameters_from_file():
 files = glob.glob("./_internal/checkpoints/*.safetensors")
 loras = glob.glob("./_internal/loras/*.safetensors")
 loras += glob.glob("./_internal/loras/*.pt")
-
+generated = 0
 
 class App(tk.Tk):
     def __init__(self):
@@ -11379,6 +11399,8 @@ class App(tk.Tk):
                     images=detailerforeachdebug_145[0],
                 )
         self.update_image(img)
+        global generated
+        generated = img
         self.display_most_recent_image_flag = True
             
 
@@ -11388,6 +11410,7 @@ class App(tk.Tk):
         self.cfg_label.configure(text=f"CFG: {int(self.cfg_slider.get())}")
         
     def update_image(self, img):
+        global generated
         # Calculate the aspect ratio of the original image
         aspect_ratio = img.width / img.height
 
@@ -11405,6 +11428,9 @@ class App(tk.Tk):
         # Resize the image to the new dimensions
         img = img.resize((new_width, new_height), Image.LANCZOS)
         self.image_label.after(0, self._update_image_label, img)
+        if self.display_most_recent_image_flag == True:
+            self.update_image(generated)
+            self.display_most_recent_image_flag = False
 
     def _update_image_label(self, img):
         # Convert the PIL image to a Tkinter PhotoImage
@@ -11428,10 +11454,6 @@ class App(tk.Tk):
         # Open the most recent image file
         img = Image.open(image_files[0])
         self.update_image(img)
-        
-        if self.display_most_recent_image_flag == True:
-            self.after(10000, self.display_most_recent_image)
-            self.display_most_recent_image_flag = False
 
 
     def on_resize(self, event):
