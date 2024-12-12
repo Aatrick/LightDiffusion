@@ -8,6 +8,8 @@ There's also a LightDiffusion version using Flux Dev available in releases and F
 
 For more information, check the [documentation](https://aatrick.github.io/LightDiffusion/)
 
+The project grew up with time, leaving the purpose of only being the fastest and simplest SD1.5 image generator, if you seek the original version you can still find it [here](https://github.com/Aatrick/LightDiffusion/releases/tag/V1.0)
+
 ## Features
 
 - Original Txt2Img, Img2Img (R-ERSGAN4x+ UltimateSDUpscaling DPM++ 2M)
