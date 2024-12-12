@@ -8,7 +8,9 @@ There's also a LightDiffusion version using Flux Dev available in releases and F
 
 For more information, check the [documentation](https://aatrick.github.io/LightDiffusion/)
 
-The project grew up with time, leaving the purpose of only being the fastest and simplest SD1.5 image generator, if you seek the original version you can still find it [here](https://github.com/Aatrick/LightDiffusion/releases/tag/V1.0)
+The project grew up with time, leaving the purpose of only being the fastest and simplest SD1.5 image generator, if you seek the original version you can still find it at [LightDiffusion-og](https://github.com/Aatrick/LightDiffusion-og) or in the releases [here](https://github.com/Aatrick/LightDiffusion/releases/tag/V1.0).
+
+Also check out the Refactored version for improved simplicity and assembling SD and Flux at [LightDiffusion-Next](https://github.com/Aatrick/LightDiffusion-Next)
 
 ## Features
 
