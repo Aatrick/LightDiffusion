@@ -6,6 +6,8 @@ SDWebUI.
 
 There's also a LightDiffusion version using Flux Dev available in releases and Flux branch.
 
+> :warning: **The Repository and all future updates will be made on the LightOrg repo [here](https://github.com/LightDiffusion/LightDiffusion-Next)**
+
 For more information, check the [documentation](https://aatrick.github.io/LightDiffusion/)
 
 The project grew up with time, leaving the purpose of only being the fastest and simplest SD1.5 image generator, if you seek the **original version of about 3000 lines of python**, you can still find it at [LightDiffusion-og](https://github.com/Aatrick/LightDiffusion-og) or in the releases [here](https://github.com/Aatrick/LightDiffusion/releases/tag/V1.0).
